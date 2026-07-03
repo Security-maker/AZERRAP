@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function userDoc() { return get(/databases/$(database)/documents/users/$(request.auth.uid)); }
+    function role() { return signedIn() && userDoc().exists() ? userDoc().data.role : null; }
+    function isAgent() { return role() == 'agent'; }
+    function isSupervisor() { return role() in ['superviseur', 'admin']; }
+    function isAdmin() { return role() == 'admin'; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function hasBaseFields() { return request.resource.data.keys().hasAll(['createdAt']); }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (isSelf(uid) || isSupervisor());
+      allow create: if signedIn() && (isAdmin() || isSelf(uid));
+      allow update: if signedIn() && (
+        isAdmin() ||
+        (isSelf(uid) && request.resource.data.diff(resource.data).changedKeys().hasOnly(['lastSeen', 'isOnline', 'statut', 'siteActuel', 'updatedAt']))
+      );
+      allow delete: if false;
+    }
+
+    match /sites/{siteId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /documents/{docId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /shifts/{shiftId} {
+      allow read: if signedIn() && (isSupervisor() || resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;
+      allow update: if signedIn() && (
+        isSupervisor() ||
+        (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.diff(resource.data).changedKeys().hasOnly(['endTime', 'endPositionGPS', 'status', 'summary', 'updatedAt']))
+      );
+      allow delete: if false;
+    }
+
+    match /reports/{reportId} {
+      allow read: if signedIn() && (isSupervisor() || resource.data.agentId == request.auth.uid);
+      allow create: if isAgent()
+        && request.resource.data.agentId == request.auth.uid
+        && request.resource.data.isLocked == true
+        && request.resource.data.keys().hasAll(['agentId','siteId','category','severity','message','createdAt','status','isLocked']);
+      allow update: if isSupervisor();
+      allow delete: if false;
+    }
+
+    match /alerts/{alertId} {
+      allow read: if signedIn() && (isSupervisor() || resource.data.agentId == request.auth.uid);
+      allow create: if isAgent()
+        && request.resource.data.agentId == request.auth.uid
+        && request.resource.data.typeAlerte == 'SOS/PTI'
+        && request.resource.data.niveau == 'critique';
+      allow update: if signedIn() && (
+        isSupervisor() ||
+        (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.diff(resource.data).changedKeys().hasOnly(['statut','closedAt','closureReason','updatedAt']))
+      );
+      allow delete: if false;
+    }
+
+    match /rounds/{roundId} {
+      allow read: if signedIn() && (isSupervisor() || resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;
+      allow update: if signedIn() && (isSupervisor() || (isAgent() && resource.data.agentId == request.auth.uid));
+      allow delete: if false;
+    }
+
+    match /roundCheckpoints/{checkpointId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /roundCheckpointsLogs/{logId} {
+      allow read: if signedIn() && (isSupervisor() || resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /flashMessages/{flashId} {
+      allow read: if signedIn();
+      allow create: if isSupervisor();
+      allow update: if signedIn() && (
+        isSupervisor() ||
+        request.resource.data.diff(resource.data).changedKeys().hasOnly(['readBy'])
+      );
+      allow delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if signedIn();
+      allow update, delete: if false;
+    }
+
+    match /settings/{settingId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+  }
+}

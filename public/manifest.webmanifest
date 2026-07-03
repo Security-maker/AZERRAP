@@ -1,0 +1,15 @@
+{
+  "name": "Sentinelle Pro",
+  "short_name": "Sentinelle",
+  "description": "Portail opérationnel sécurisé pour agence de sécurité privée",
+  "theme_color": "#050A13",
+  "background_color": "#050A13",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "start_url": "/",
+  "icons": [
+    { "src": "/icons/pwa-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/pwa-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
