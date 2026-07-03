@@ -3,12 +3,14 @@
 // Important : ces clés Firebase Web ne sont pas des secrets, la vraie sécurité se fait dans firestore.rules et storage.rules.
 
 export const firebaseConfig = {
-  apiKey: "REMPLACE_MOI",
-  authDomain: "REMPLACE_MOI.firebaseapp.com",
-  projectId: "REMPLACE_MOI",
-  storageBucket: "REMPLACE_MOI.appspot.com",
-  messagingSenderId: "REMPLACE_MOI",
-  appId: "REMPLACE_MOI"
+  apiKey: "AIzaSyCM1JfpeNx4Oy7hTMTXy9T-vWQGlhPb43Y",
+  authDomain: "azzerap-7b440.firebaseapp.com",
+  databaseURL: "https://azzerap-7b440-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "azzerap-7b440",
+  storageBucket: "azzerap-7b440.firebasestorage.app",
+  messagingSenderId: "259939966441",
+  appId: "1:259939966441:web:d787ed60a3b0f42f607f78",
+  measurementId: "G-8HBPQM7WJ1"
 };
 
 // Optionnel : mets le numéro QG par défaut au format international sans espace.
