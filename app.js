@@ -1,0 +1,1771 @@
+import { firebaseConfig, DEFAULT_QG_WHATSAPP } from './firebase-config.js';
+import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
+import {
+  getFirestore,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  addDoc,
+  setDoc,
+  updateDoc,
+  query,
+  where,
+  orderBy,
+  limit,
+  onSnapshot,
+  serverTimestamp,
+  Timestamp,
+  runTransaction
+} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
+
+const $app = document.querySelector('#app');
+const $toast = document.querySelector('#toast-root');
+
+let fbApp = null;
+let auth = null;
+let db = null;
+let storage = null; // Version Spark: Firebase Storage désactivé
+let currentUser = null;
+let currentProfile = null;
+let currentRoute = 'home';
+let unsubscribeList = [];
+let latestFlashUnsub = null;
+let mapInstance = null;
+let mapMarkers = [];
+let sosTimer = null;
+let sosArming = false;
+let activeShiftCache = null;
+let lastSitesCache = [];
+let qgReportMissionGroups = [];
+let qgNotificationsCache = [];
+let qgMissionsCache = [];
+let qgAllSitesCache = [];
+let qgAllAgentsCache = [];
+let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14 };
+
+const rolePortal = role => role === 'agent' ? 'agent' : 'qg';
+const nowText = () => new Date().toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
+const dateText = value => {
+  if (!value) return '—';
+  const d = value.toDate ? value.toDate() : new Date(value);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
+};
+const safe = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const id = () => Math.random().toString(36).slice(2, 10);
+const isConfigured = () => firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).includes('REMPLACE_MOI');
+const isOnline = () => navigator.onLine;
+
+function toast(message, type='info'){
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  $toast.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+function clearSubs(){
+  unsubscribeList.forEach(fn => { try { fn(); } catch(e){} });
+  unsubscribeList = [];
+  if (latestFlashUnsub) { try { latestFlashUnsub(); } catch(e){} latestFlashUnsub = null; }
+}
+
+function getGPS(options={ enableHighAccuracy:true, timeout:8000, maximumAge:20000 }){
+  return new Promise(resolve => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, capturedAt: new Date().toISOString() }),
+      () => resolve(null),
+      options
+    );
+  });
+}
+
+function collectionRef(name){ return collection(db, name); }
+function docRef(name, docId){ return doc(db, name, docId); }
+
+function page(title, subtitle, body, options={}){
+  const profileName = currentProfile ? `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim() : '';
+  const portal = currentProfile ? rolePortal(currentProfile.role) : 'public';
+  const nav = portal === 'agent' ? agentNav() : qgNav();
+  const gpsPill = portal === 'agent' ? `<span class="pill ${currentProfile?.statut === 'en_poste' ? 'green' : ''}">${currentProfile?.statut === 'en_poste' ? 'GPS actif pendant le service' : 'GPS inactif hors poste'}</span>` : '';
+  return `
+    <div class="layout ${portal}">
+      <aside class="sidebar">
+        <div class="brand">
+          <img src="assets/logo.png" alt="Sentinelle Pro">
+          <div><div class="brand-name">Sentinelle Pro</div><div class="brand-kicker">Centre opérationnel</div></div>
+        </div>
+        <nav class="nav">${nav}</nav>
+        <div class="side-footer">
+          <div><strong>${safe(profileName || 'Utilisateur')}</strong></div>
+          <div>${safe(currentProfile?.role || '')}</div>
+          <div class="divider"></div>
+          <button class="btn ghost full small" data-action="logout">Déconnexion</button>
+        </div>
+      </aside>
+      <main class="main">
+        <div class="mobile-brand">
+          <img src="assets/logo.png" alt="Azzera">
+          <div><strong>AZZERA</strong><span>Sentinelle Pro</span></div>
+        </div>
+        <div class="topbar">
+          <div class="page-title"><h1>${safe(title)}</h1><p>${safe(subtitle || '')}</p></div>
+          <div class="top-actions">
+            ${gpsPill}
+            <span class="pill ${navigator.onLine ? 'green':'red'}">${navigator.onLine ? 'En ligne':'Hors ligne'}</span>
+            <span class="pill blue" id="clock-pill">${nowText()}</span>
+            <button class="btn ghost small" data-action="logout">Quitter</button>
+          </div>
+        </div>
+        ${body}
+      </main>
+      <nav class="mobile-tabbar">${nav}</nav>
+      ${portal === 'agent' ? sosButton() : ''}
+    </div>
+  `;
+}
+
+function navBtn(route, icon, label){
+  return `<button class="nav-btn ${currentRoute === route ? 'active':''}" data-route="${route}"><span class="nav-icon">${icon}</span><span>${label}</span></button>`;
+}
+function agentNav(){
+  return [
+    navBtn('home','⌂','Accueil'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash')
+  ].join('');
+}
+function qgNav(){
+  return [
+    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('device','◉','Dispositif'), navBtn('sites','▣','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('history','⇩','Exports')
+  ].join('');
+}
+function sosButton(){
+  return `<div class="sos-help hidden" id="sos-help">Maintenir 3 secondes pour déclencher. Relâcher annule l’armement.</div><div class="sos-fixed"><button class="sos-btn" id="sos-btn">SOS<br><small>PTI</small></button></div>`;
+}
+
+function boot(){
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+  window.addEventListener('online', () => toast('Connexion rétablie', 'success'));
+  window.addEventListener('offline', () => toast('Mode hors ligne — SOS non garanti', 'warning'));
+
+  if (!isConfigured()) return renderSetupMissing();
+  try {
+    fbApp = initializeApp(firebaseConfig);
+    auth = getAuth(fbApp);
+    db = getFirestore(fbApp);
+    storage = null; // Storage volontairement désactivé pour rester compatible Spark
+  } catch (error) {
+    console.error(error);
+    return renderFatal('Configuration Firebase invalide', error.message);
+  }
+
+  onAuthStateChanged(auth, async user => {
+    clearSubs();
+    currentUser = user;
+    activeShiftCache = null;
+    if (!user) return renderLogin();
+    await loadProfile(user);
+  });
+}
+
+async function loadProfile(user){
+  try {
+    const snap = await getDoc(docRef('users', user.uid));
+    if (!snap.exists()) return renderMissingProfile(user);
+    currentProfile = { uid:user.uid, ...snap.data() };
+    await updateDoc(docRef('users', user.uid), { lastSeen: serverTimestamp(), isOnline: true }).catch(() => {});
+    currentRoute = 'home';
+    if (rolePortal(currentProfile.role) === 'agent') renderAgentHome(); else renderQGHome();
+    startFlashListener();
+  } catch (error) {
+    console.error(error);
+    renderFatal('Accès refusé', 'Impossible de charger le profil utilisateur. Vérifie Firestore et les règles de sécurité.');
+  }
+}
+
+function render(html){
+  $app.className = '';
+  $app.innerHTML = html;
+  bindGlobalEvents();
+  const clock = document.querySelector('#clock-pill');
+  if (clock) setInterval(() => { const c=document.querySelector('#clock-pill'); if(c) c.textContent=nowText(); }, 30000);
+}
+
+function bindGlobalEvents(){
+  document.querySelectorAll('[data-route]').forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.route)));
+  document.querySelectorAll('[data-action="logout"]').forEach(btn => btn.addEventListener('click', async () => {
+    if (currentUser) await updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen: serverTimestamp() }).catch(()=>{});
+    await signOut(auth);
+  }));
+  bindSos();
+}
+
+function navigate(route){
+  currentRoute = route;
+  clearSubs();
+  const portal = rolePortal(currentProfile.role);
+  if (portal === 'agent') {
+    ({ home:renderAgentHome, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash }[route] || renderAgentHome)();
+  } else {
+    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, history:renderQGHistory }[route] || renderQGHome)();
+  }
+}
+
+function renderSetupMissing(){
+  render(`
+    <div class="login-page"><section class="login-card">
+      <img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro">
+      <h1>Configuration requise</h1>
+      <p class="subtitle">Portail opérationnel sécurisé</p>
+      <div class="setup-box">
+        L’application est en mode production uniquement. Aucun mode démo n’est activé.<br><br>
+        Ouvre <strong>firebase-config.js</strong> et remplace les valeurs <strong>REMPLACE_MOI</strong> par celles de ton projet Firebase.
+      </div>
+      <div class="card compact">
+        <div class="item-meta">À faire : Firebase Console → Paramètres du projet → Général → Application Web → copier apiKey, authDomain, projectId, messagingSenderId, appId. Le storageBucket est optionnel et non utilisé en version Spark.</div>
+      </div>
+    </section></div>`);
+}
+function renderFatal(title, message){
+  render(`<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo"><h1>${safe(title)}</h1><p class="subtitle">Erreur système</p><div class="setup-box danger-copy">${safe(message)}</div></section></div>`);
+}
+function renderLogin(){
+  currentProfile = null;
+  render(`
+    <div class="login-page">
+      <form class="login-card" id="login-form">
+        <img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro">
+        <h1>Sentinelle Pro</h1>
+        <p class="subtitle">Portail opérationnel sécurisé</p>
+        <div class="field"><label>Email</label><input class="input" name="email" type="email" autocomplete="email" required placeholder="agent@agence.fr"></div>
+        <div class="field"><label>Mot de passe</label><input class="input" name="password" type="password" autocomplete="current-password" required placeholder="••••••••"></div>
+        <button class="btn primary full" type="submit">Connexion sécurisée</button>
+        <div class="divider"></div>
+        <p class="muted" style="font-size:12px;line-height:1.55">Les comptes se créent dans Firebase Authentication. Le rôle se règle dans Firestore collection <strong>users</strong>.</p>
+      </form>
+    </div>`);
+  document.querySelector('#login-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    try {
+      await signInWithEmailAndPassword(auth, fd.get('email'), fd.get('password'));
+      toast('Connexion validée', 'success');
+    } catch (error) {
+      toast('Connexion refusée. Vérifie email et mot de passe.', 'error');
+    }
+  });
+}
+function renderMissingProfile(user){
+  render(`
+    <div class="login-page"><section class="login-card">
+      <img src="assets/logo.png" class="login-logo"><h1>Profil non configuré</h1><p class="subtitle">UID Firebase requis</p>
+      <div class="setup-box">Le compte existe dans Authentication, mais son profil rôle n’existe pas encore dans Firestore.</div>
+      <div class="field"><label>UID à copier</label><input class="input mono" readonly value="${safe(user.uid)}"></div>
+      <div class="card compact"><div class="item-meta">Crée un document dans <strong>users</strong> avec cet UID. Champs minimum : uid, nom, prenom, email, role: "admin" ou "agent", statut: "actif".</div></div>
+      <div class="divider"></div><button class="btn full" data-action="logout">Déconnexion</button>
+    </section></div>`);
+}
+
+boot();
+
+// -------------------- AGENT --------------------
+async function findActiveShift(){
+  if (!currentUser) return null;
+  const q = query(collectionRef('shifts'), where('agentId','==',currentUser.uid), where('status','==','active'), limit(1));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  const d = snap.docs[0];
+  return { id:d.id, ...d.data() };
+}
+async function getActiveSites(){
+  const snap = await getDocs(query(collectionRef('sites'), where('isActive','==',true), orderBy('name'))).catch(async () => getDocs(query(collectionRef('sites'), where('isActive','==',true))));
+  lastSitesCache = snap.docs.map(d => ({ id:d.id, ...d.data() }));
+  return lastSitesCache;
+}
+
+async function getAgentPlannedMissions(){
+  if (!currentUser) return [];
+  const snap = await getDocs(query(collectionRef('missions'), where('agentId','==',currentUser.uid))).catch(()=>({docs:[]}));
+  const now = Date.now();
+  return snap.docs.map(d => ({ id:d.id, ...d.data() }))
+    .filter(m => ['planned','assigned'].includes(m.status || 'planned') || ((m.scheduledEnd?.toDate?.()?.getTime() || 0) > now && m.status !== 'completed'))
+    .sort((a,b)=>(a.scheduledStart?.toDate?.()?.getTime() || 0) - (b.scheduledStart?.toDate?.()?.getTime() || 0));
+}
+function toLocalInputValue(value){
+  if (!value) return '';
+  const d = value.toDate ? value.toDate() : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fromLocalInputValue(value){
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : Timestamp.fromDate(d);
+}
+function missionStatusLabel(status){
+  return ({ planned:'Planifiée', assigned:'Planifiée', active:'En cours', completed:'Terminée', cancelled:'Annulée' }[status || 'planned'] || status || 'Planifiée');
+}
+function missionStatusColor(status){
+  return status === 'completed' ? 'green' : status === 'active' ? 'blue' : status === 'cancelled' ? 'red' : 'orange';
+}
+function missionIsLate(m){
+  const start = m.scheduledStart?.toDate?.()?.getTime();
+  return start && Date.now() > start + 10*60*1000 && !['active','completed','cancelled'].includes(m.status);
+}
+function computeConformityScore({ shift, reportsCount, roundsCount, incidentsCount }){
+  let score = 100;
+  const start = shift.scheduledStart?.toDate?.()?.getTime();
+  const actual = shift.startTime?.toDate?.()?.getTime();
+  if (start && actual && actual > start + 5*60*1000) score -= Math.min(25, Math.ceil((actual - start) / 60000));
+  if (!reportsCount) score -= 12;
+  if (!roundsCount) score -= 10;
+  if (incidentsCount) score -= Math.min(10, incidentsCount * 2);
+  return Math.max(0, Math.min(100, score));
+}
+
+async function renderAgentHome(){
+  currentRoute = 'home';
+  const shift = await findActiveShift();
+  activeShiftCache = shift;
+  const isWorking = !!shift;
+  const body = `
+    <section class="grid cols-3">
+      <div class="card stat ${isWorking?'green':'orange'}"><div class="stat-label">Statut agent</div><div class="stat-value">${isWorking?'En poste':'Hors poste'}</div><div class="muted">${safe(currentProfile.prenom || '')} ${safe(currentProfile.nom || '')}</div></div>
+      <div class="card stat blue"><div class="stat-label">Mission / site</div><div class="stat-value" style="font-size:22px">${safe(shift?.siteNom || 'Aucune')}</div><div class="muted">${isWorking ? 'Mission active' : 'Mission à sélectionner'}</div></div>
+      <div class="card stat ${navigator.onLine?'green':'red'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'OK':'OFF'}</div><div class="muted">${navigator.onLine?'Synchronisation active':'SOS non garanti'}</div></div>
+    </section>
+    <section class="grid cols-2" style="margin-top:16px">
+      <div class="card">
+        <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
+        ${isWorking ? shiftSummary(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full" id="end-shift-btn">Terminer poste</button>` : takeShiftForm()}
+      </div>
+      <div class="card">
+        <div class="card-title"><div><h2>Actions rapides</h2><p>Terrain, main courante et ronde</p></div></div>
+        <div class="grid cols-2">
+          <button class="btn primary full" data-route="mci">Main courante</button>
+          <button class="btn full" data-route="round">Ronde</button>
+          <button class="btn full" data-route="docs">Documentation</button>
+          <button class="btn warning full" data-route="flash">Messages Flash</button>
+        </div>
+        <div class="divider"></div>
+        <button class="btn full" id="whatsapp-qg">Contacter le QG WhatsApp</button>
+        <button class="btn full" id="enable-push">Activer notifications écran verrouillé</button>
+        <p class="muted" style="font-size:12px;margin-top:12px">Canal non critique. En urgence, utiliser SOS/PTI.</p>
+      </div>
+    </section>
+    <section class="card" style="margin-top:16px">
+      <div class="card-title"><div><h2>Derniers rapports envoyés</h2><p>Flux personnel</p></div></div>
+      <div id="agent-recent-reports" class="timeline"><div class="empty">Chargement...</div></div>
+    </section>`;
+  render(page('Accueil Agent', 'Exécution terrain rapide et sécurisée', body));
+  bindAgentHome(shift);
+  if (shift) loadAgentHandoverCard(shift);
+  listenAgentRecentReports();
+}
+
+function shiftSummary(shift){
+  const score = typeof shift.conformityScore === 'number' ? `<br>Conformité : ${shift.conformityScore}%` : '';
+  const mission = shift.missionId ? `<br>Mission liée : ${safe(shift.missionTitle || shift.missionId)}` : '<br>Prise de poste libre';
+  const planned = shift.scheduledStart ? `<br>Prévu : ${dateText(shift.scheduledStart)} → ${dateText(shift.scheduledEnd)}` : '';
+  return `<div class="list" style="margin-bottom:16px">
+    <div class="item"><div class="item-main"><div class="item-title">${safe(shift.siteNom)}</div><div class="item-meta">Prise de poste : ${dateText(shift.startTime)}${planned}${mission}<br>Status : ${safe(shift.status)}${score}</div></div></div>
+  </div>`;
+}
+function takeShiftForm(){
+  return `<form id="take-shift-form">
+    <div class="field"><label>Mission planifiée</label><select class="select" name="missionId" id="mission-select"><option value="">Chargement des missions...</option></select></div>
+    <div class="field"><label>Site</label><select class="select" name="siteId" id="site-select" required><option value="">Chargement des sites...</option></select></div>
+    <div id="site-info" class="empty">Sélectionne une mission ou un site pour afficher les consignes.</div>
+    <div class="divider"></div>
+    <button class="btn primary full" type="submit">Prendre poste</button>
+  </form>`;
+}
+async function bindAgentHome(shift){
+  document.querySelectorAll('[data-route]').forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.route)));
+  const whatsappBtn = document.querySelector('#whatsapp-qg');
+  if (whatsappBtn) whatsappBtn.addEventListener('click', () => openWhatsapp(shift));
+  document.querySelector('#enable-push')?.addEventListener('click', () => registerPushNotifications());
+  if (!shift) {
+    const [sites, missions] = await Promise.all([getActiveSites(), getAgentPlannedMissions()]);
+    const select = document.querySelector('#site-select');
+    const missionSelect = document.querySelector('#mission-select');
+    if (select) select.innerHTML = `<option value="">Choisir un site</option>` + sites.map(s => `<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
+    if (missionSelect) {
+      missionSelect.innerHTML = `<option value="">Prise de poste libre</option>` + missions.map(m => `<option value="${safe(m.id)}">${safe(m.siteNom || 'Site')} · ${dateText(m.scheduledStart)}</option>`).join('');
+      missionSelect.addEventListener('change', () => {
+        const m = missions.find(x => x.id === missionSelect.value);
+        if (m && select) select.value = m.siteId;
+        renderTakeShiftInfo(sites.find(s => s.id === (m?.siteId || select?.value)), m);
+      });
+    }
+    if (select) select.addEventListener('change', () => renderTakeShiftInfo(sites.find(s => s.id === select.value), missions.find(m => m.id === missionSelect?.value)));
+    const form = document.querySelector('#take-shift-form');
+    form?.addEventListener('submit', async e => {
+      e.preventDefault();
+      if (!isOnline()) return toast('Réseau indisponible — prise de poste impossible.', 'error');
+      const fd = new FormData(form);
+      const mission = missions.find(m => m.id === fd.get('missionId')) || null;
+      const site = sites.find(s => s.id === (mission?.siteId || fd.get('siteId')));
+      if (!site) return toast('Sélectionne un site.', 'warning');
+      await takeShift(site, mission);
+    });
+  } else {
+    document.querySelector('#end-shift-btn')?.addEventListener('click', () => endShift(shift));
+  }
+}
+function renderTakeShiftInfo(site, mission){
+  const box = document.querySelector('#site-info');
+  if (!box) return;
+  if (!site) return box.innerHTML = 'Sélectionne une mission ou un site pour afficher les consignes.';
+  const late = mission && missionIsLate(mission) ? `<span class="pill red">Retard détecté</span>` : '';
+  box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">${safe(site.name)} ${late}</div><div class="item-meta">Client : ${safe(site.clientName || '—')}<br>Adresse : ${safe(site.address || '—')}<br>Contact urgence : ${safe(site.emergencyContact || '—')}<br>${mission ? `Mission prévue : ${dateText(mission.scheduledStart)} → ${dateText(mission.scheduledEnd)}<br>Type : ${safe(mission.type || 'Mission')}` : 'Mission : prise de poste libre'}<br><br>${safe(mission?.instructions || site.instructions || 'Aucune consigne renseignée.')}</div></div></div>`;
+}
+async function takeShift(site, mission=null){
+  try {
+    const existing = await findActiveShift();
+    if (existing) return toast('Un poste est déjà ouvert. Termine-le avant d’en ouvrir un autre.', 'warning');
+    const gps = await getGPS();
+    const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
+    const shiftDoc = await addDoc(collectionRef('shifts'), {
+      agentId: currentUser.uid, agentNom, siteId: site.id, siteNom: site.name,
+      missionId: mission?.id || null, missionTitle: mission ? `${mission.siteNom || site.name} · ${dateText(mission.scheduledStart)}` : null,
+      scheduledStart: mission?.scheduledStart || null, scheduledEnd: mission?.scheduledEnd || null, shiftType: mission?.type || 'Mission libre', missionInstructions: mission?.instructions || null,
+      startTime: serverTimestamp(), positionGPS: gps, status:'active', handoverAcknowledged:false, createdAt: serverTimestamp(), createdBy: currentUser.uid
+    });
+    if (mission?.id) await updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
+    await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() });
+    await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null });
+    toast('Poste démarré', 'success');
+    renderAgentHome();
+  } catch(error){ console.error(error); toast('Erreur prise de poste. Vérifie les droits Firebase.', 'error'); }
+}
+async function loadAgentHandoverCard(shift){
+  const box = document.querySelector('#agent-handover-card');
+  if (!box) return;
+  try {
+    const snap = await getDocs(query(collectionRef('shifts'), where('siteId','==',shift.siteId), where('status','==','completed'), orderBy('completedAt','desc'), limit(4))).catch(async()=>getDocs(query(collectionRef('shifts'), where('siteId','==',shift.siteId), where('status','==','completed'), limit(4))));
+    const prev = snap.docs.map(d => ({id:d.id,...d.data()})).filter(s => s.id !== shift.id).sort((a,b)=>(b.completedAt?.toDate?.()?.getTime()||0)-(a.completedAt?.toDate?.()?.getTime()||0))[0];
+    if (!prev) return box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">Relève agent</div><div class="item-meta">Aucune mission précédente trouvée sur ce site.</div></div></div>`;
+    const ack = shift.handoverAcknowledged ? `<span class="pill green">Relève confirmée</span>` : `<button class="btn small primary" id="ack-handover">Confirmer la relève</button>`;
+    box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">Relève agent ${ack}</div><div class="item-meta">Mission précédente : ${safe(prev.agentNom || '—')}<br>Fin : ${dateText(prev.completedAt)}<br>Rapports : ${prev.reportsCount || 0} · Rondes : ${prev.roundsCount || 0} · Incidents : ${prev.incidentsCount || 0}<br><br><strong>Note de relève :</strong><br>${safe(prev.handoverNote || 'Aucune note transmise.')}</div></div></div>`;
+    document.querySelector('#ack-handover')?.addEventListener('click', async () => {
+      await updateDoc(docRef('shifts', shift.id), { handoverAcknowledged:true, handoverFromShiftId:prev.id, handoverAcknowledgedAt:serverTimestamp(), updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
+      await addAudit('handover_acknowledged', { shiftId:shift.id, fromShiftId:prev.id });
+      toast('Relève prise en compte', 'success');
+      loadAgentHandoverCard({ ...shift, handoverAcknowledged:true });
+    });
+  } catch(e){ console.warn(e); box.innerHTML = `<div class="empty">Relève indisponible avec les règles actuelles.</div>`; }
+}
+async function endShift(shift){
+  try {
+    const reportsSnap = await getDocs(query(collectionRef('reports'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)));
+    const roundsSnap = await getDocs(query(collectionRef('rounds'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)));
+    const reports = reportsSnap.docs.map(d=>d.data());
+    const incidentsCount = reports.filter(r => ['Incident','Intervention','Anomalie'].includes(r.category) || ['Important','Critique'].includes(r.severity)).length;
+    const score = computeConformityScore({ shift, reportsCount:reportsSnap.size, roundsCount:roundsSnap.size, incidentsCount });
+    showModal('Clôture de mission', `<form id="end-shift-form">
+      <div class="mission-kpis"><div class="mini-kpi"><strong>${reportsSnap.size}</strong><span>Rapports</span></div><div class="mini-kpi green"><strong>${roundsSnap.size}</strong><span>Rondes</span></div><div class="mini-kpi ${incidentsCount?'orange':'green'}"><strong>${incidentsCount}</strong><span>Événements</span></div><div class="mini-kpi ${score < 70 ? 'red' : score < 90 ? 'orange' : 'green'}"><strong>${score}%</strong><span>Conformité</span></div></div>
+      <div class="field"><label>Note de relève pour l’agent suivant</label><textarea class="textarea" name="handoverNote" placeholder="RAS, point à surveiller, incident en cours, consigne client..."></textarea></div>
+      <label class="checkline"><input type="checkbox" name="certify" required> Je certifie avoir terminé ma mission, transmis les informations nécessaires et signalé les anomalies constatées.</label>
+      <div class="field"><label>Signature agent</label><input class="input" name="signatureName" required placeholder="Nom et prénom"></div>
+      <button class="btn danger full" type="submit">Clôturer la mission</button>
+    </form>`);
+    document.querySelector('#end-shift-form')?.addEventListener('submit', async e => {
+      e.preventDefault();
+      const fd = new FormData(e.currentTarget);
+      await updateDoc(docRef('shifts', shift.id), {
+        completedAt: serverTimestamp(), status:'completed', reportsCount: reportsSnap.size, roundsCount: roundsSnap.size, incidentsCount, conformityScore:score,
+        handoverNote: fd.get('handoverNote') || 'RAS', signatureName: fd.get('signatureName'), signatureStatement:true,
+        updatedAt: serverTimestamp(), updatedBy: currentUser.uid
+      });
+      if (shift.missionId) await updateDoc(docRef('missions', shift.missionId), { status:'completed', actualEnd:serverTimestamp(), reportsCount:reportsSnap.size, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, completedBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
+      await updateDoc(docRef('users', currentUser.uid), { statut:'hors_poste', siteActuel:null, siteActuelNom:null, lastSeen: serverTimestamp() });
+      await addAudit('shift_end', { shiftId: shift.id, reportsCount: reportsSnap.size, roundsCount: roundsSnap.size, conformityScore:score });
+      closeModal(); toast('Poste terminé', 'success'); renderAgentHome();
+    });
+  } catch(error){ console.error(error); toast('Erreur fin de poste.', 'error'); }
+}
+function listenAgentRecentReports(){
+  const box = document.querySelector('#agent-recent-reports');
+  if (!box) return;
+  const q = query(collectionRef('reports'), where('agentId','==',currentUser.uid), orderBy('createdAt','desc'), limit(8));
+  const unsub = onSnapshot(q, snap => {
+    if (snap.empty) return box.innerHTML = `<div class="empty">Aucun rapport envoyé.</div>`;
+    box.innerHTML = snap.docs.map(d => reportTimeline(d.data())).join('');
+  }, () => box.innerHTML = `<div class="empty">Flux indisponible. Vérifie les index Firestore.</div>`);
+  unsubscribeList.push(unsub);
+}
+function reportTimeline(r){
+  const sev = String(r.severity || 'normal').toLowerCase();
+  return `<div class="timeline-entry ${sev}"><div class="item-title">${safe(r.category || 'Rapport')} · ${safe(r.siteNom || '')}</div><div class="item-meta">${dateText(r.createdAt)} · Gravité ${safe(r.severity || 'Normal')}</div><div style="margin-top:6px">${safe(r.message || '')}</div></div>`;
+}
+
+async function renderAgentMCI(){
+  currentRoute = 'mci';
+  const shift = await findActiveShift();
+  const body = `<section class="grid cols-2">
+    <div class="card">
+      <div class="card-title"><div><h2>Main courante intelligente</h2><p>Maximum 2 clics pour déclarer</p></div></div>
+      ${!shift ? `<div class="setup-box">Tu dois prendre poste avant d’envoyer une main courante.</div>` : mciForm(shift)}
+    </div>
+    <div class="card"><div class="card-title"><div><h2>Flux du site</h2><p>Rapports récents</p></div></div><div id="site-report-feed" class="timeline"><div class="empty">Chargement...</div></div></div>
+  </section>`;
+  render(page('Main Courante Agent', 'Rapport opérationnel envoyé au QG en temps réel', body));
+  if (shift) bindMCIForm(shift);
+  listenSiteReports(shift?.siteId);
+}
+function mciForm(shift){
+  const cats = ['Ronde','Anomalie','Incident','Information','Intervention','Consigne reçue','Prise de service','Fin de service'];
+  const templates = [
+    'Ronde effectuée sans anomalie. Zone contrôlée, accès vérifiés, RAS.',
+    'Portail et accès principaux vérifiés. Aucun signe d’effraction constaté.',
+    'Présence suspecte constatée en zone à surveiller. QG informé, surveillance renforcée.',
+    'Dégradation constatée. Zone sécurisée, photo jointe si possible, client/QG à informer.',
+    'Levée de doute effectuée. Aucun danger immédiat constaté.',
+    'Consigne reçue du QG et appliquée sur site.',
+    'Intervention effectuée. Situation stabilisée, éléments transmis au QG.'
+  ];
+  return `<form id="mci-form">
+    <div class="field"><label>Catégorie</label><div class="category-grid">${cats.map((c,i)=>`<button type="button" class="cat-btn ${i===0?'active':''}" data-cat="${safe(c)}">${safe(c)}</button>`).join('')}</div><input type="hidden" name="category" value="Ronde"></div>
+    <div class="field"><label>Modèle rapide</label><select class="select" id="mci-template"><option value="">Écrire librement</option>${templates.map(t=>`<option value="${safe(t)}">${safe(t.slice(0,72))}${t.length>72?'…':''}</option>`).join('')}</select></div>
+    <div class="field"><label>Niveau</label><select class="select" name="severity"><option>Normal</option><option>À surveiller</option><option>Important</option><option>Critique</option></select></div>
+    <div class="field"><label>Rapport</label><textarea class="textarea" name="message" required placeholder="Décrire l’événement de manière factuelle..."></textarea></div>
+    <div class="btn-row"><button type="button" class="btn" id="voice-btn">🎙️ Micro</button><button type="button" class="btn disabled" id="photo-disabled" title="Firebase Storage nécessite Blaze">📷 Photo indisponible</button><button type="button" class="btn" id="gps-btn">◎ GPS</button></div>
+    <input type="hidden" name="gpsRequested" value="false">
+    <div id="voice-state" class="muted" style="margin:12px 0;font-size:12px"></div>
+    <div class="divider"></div><button class="btn primary full" type="submit">Envoyer au QG</button>
+  </form>`;
+}
+function bindMCIForm(shift){
+  const form = document.querySelector('#mci-form');
+  document.querySelectorAll('.cat-btn').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('.cat-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active'); form.category.value = btn.dataset.cat;
+  }));
+  document.querySelector('#mci-template')?.addEventListener('change', e => {
+    if (!e.target.value) return;
+    form.message.value = e.target.value;
+    form.message.focus();
+  });
+  document.querySelector('#voice-btn')?.addEventListener('click', () => {
+    const box = document.querySelector('#voice-state');
+    box.textContent = 'Dictée en cours... simulation de transcription.';
+    setTimeout(() => {
+      form.message.value = (form.message.value ? form.message.value + '\n' : '') + 'Observation terrain à compléter : présence constatée, zone sécurisée, information transmise au QG.';
+      box.textContent = 'Transcription ajoutée. Corrige le texte avant envoi.';
+    }, 900);
+  });
+  document.querySelector('#gps-btn')?.addEventListener('click', () => { form.gpsRequested.value = 'true'; toast('Position GPS demandée pour ce rapport.', 'success'); });
+  document.querySelector('#photo-disabled')?.addEventListener('click', () => toast('Photos désactivées : Firebase Storage nécessite le plan Blaze. Utilise une note MCI texte ou un lien document.', 'warning'));
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!isOnline()) return toast('Réseau indisponible — rapport non transmis. Appelle le QG si urgent.', 'error');
+    const fd = new FormData(form);
+    let photoUrl = null; // Version Spark : pas d'upload photo sans Firebase Storage/Blaze
+    try {
+      const gps = fd.get('gpsRequested') === 'true' ? await getGPS() : null;
+      await addDoc(collectionRef('reports'), {
+        agentId: currentUser.uid,
+        agentNom: `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
+        siteId: shift.siteId, siteNom: shift.siteNom, shiftId: shift.id, missionId: shift.missionId || null,
+        category: fd.get('category'), severity: fd.get('severity'), message: fd.get('message'),
+        photoUrl, gps, status:'new', isLocked:true, createdAt: serverTimestamp(), createdBy: currentUser.uid
+      });
+      await updateDoc(docRef('users', currentUser.uid), { lastSeen: serverTimestamp() }).catch(()=>{});
+      await addAudit('report_create', { siteId: shift.siteId, shiftId: shift.id, missionId: shift.missionId || null, category: fd.get('category'), severity: fd.get('severity') });
+      form.reset(); form.category.value = 'Ronde'; toast('Rapport envoyé au QG', 'success');
+    } catch(error){ console.error(error); toast('Erreur envoi rapport.', 'error'); }
+  });
+}
+function listenSiteReports(siteId){
+  const box = document.querySelector('#site-report-feed'); if (!box || !siteId) return;
+  const q = query(collectionRef('reports'), where('siteId','==',siteId), orderBy('createdAt','desc'), limit(12));
+  const unsub = onSnapshot(q, snap => box.innerHTML = snap.empty ? `<div class="empty">Aucun rapport pour ce site.</div>` : snap.docs.map(d => reportTimeline(d.data())).join(''));
+  unsubscribeList.push(unsub);
+}
+
+async function renderAgentDocs(){
+  currentRoute = 'docs';
+  const shift = await findActiveShift();
+  const body = `<section class="grid cols-2">
+    <div class="card"><div class="card-title"><div><h2>Consignes site</h2><p>Consultation opérationnelle</p></div></div><div id="docs-consignes">${shift?'Chargement...':'<div class="empty">Prends poste pour accéder aux consignes du site.</div>'}</div></div>
+    <div class="card"><div class="card-title"><div><h2>Documents et plans</h2><p>PDF, images, contacts</p></div></div><div class="field"><label>Recherche rapide</label><input class="input" id="doc-search" placeholder="incendie, intrusion, évacuation..."></div><div id="docs-list" class="list"><div class="empty">Chargement...</div></div><div id="doc-viewer" class="doc-viewer" style="margin-top:14px"><div class="empty" style="margin:20px">Sélectionne un document.</div></div></div>
+  </section>`;
+  render(page('Documentation Site', 'Consignes, plans et procédures spécifiques', body));
+  if (shift) loadSiteDocs(shift.siteId);
+}
+async function loadSiteDocs(siteId){
+  const siteSnap = await getDoc(docRef('sites', siteId));
+  const site = siteSnap.exists() ? siteSnap.data() : {};
+  document.querySelector('#docs-consignes').innerHTML = `<div class="list">
+    <div class="item"><div class="item-main"><div class="item-title">${safe(site.name || 'Site')}</div><div class="item-meta">Client : ${safe(site.clientName || '—')}<br>Adresse : ${safe(site.address || '—')}<br>Contact urgence : ${safe(site.emergencyContact || '—')}<br>Contact client : ${safe(site.contactPhone || '—')}</div></div></div>
+    <div class="item"><div class="item-main"><div class="item-title">Consignes principales</div><div class="item-meta">${safe(site.instructions || 'Aucune consigne renseignée.')}</div></div></div>
+  </div>`;
+  const docsSnap = await getDocs(query(collectionRef('documents'), where('siteId','==',siteId), where('status','==','active'))).catch(()=>({docs:[]}));
+  const docs = docsSnap.docs.map(d => ({id:d.id, ...d.data()}));
+  renderDocList(docs);
+  document.querySelector('#doc-search')?.addEventListener('input', e => {
+    const term = e.target.value.toLowerCase();
+    renderDocList(docs.filter(doc => `${doc.title} ${doc.type} ${doc.description}`.toLowerCase().includes(term)));
+  });
+}
+function renderDocList(docs){
+  const list = document.querySelector('#docs-list');
+  if (!docs.length) return list.innerHTML = `<div class="empty">Aucun document lié au site.</div>`;
+  list.innerHTML = docs.map(d => `<div class="item"><div class="item-main"><div class="item-title">${safe(d.title || 'Document')}</div><div class="item-meta">${safe(d.type || 'document')} · ${safe(d.description || '')}</div></div><div class="item-actions"><button class="btn small" data-open-doc="${safe(d.id)}">Ouvrir</button></div></div>`).join('');
+  document.querySelectorAll('[data-open-doc]').forEach(btn => btn.addEventListener('click', () => {
+    const doc = docs.find(d => d.id === btn.dataset.openDoc);
+    const url = doc?.url || doc?.fileUrl;
+    if (!url) return toast('URL document manquante.', 'warning');
+    const v = document.querySelector('#doc-viewer');
+    if ((doc.type || '').toLowerCase().includes('image') || /\.(png|jpg|jpeg|webp)$/i.test(url)) v.innerHTML = `<img src="${safe(url)}" alt="${safe(doc.title)}">`;
+    else v.innerHTML = `<iframe src="${safe(url)}" title="${safe(doc.title)}"></iframe>`;
+  }));
+}
+
+async function renderAgentRound(){
+  currentRoute = 'round';
+  const shift = await findActiveShift();
+  const body = `<section class="grid cols-2">
+    <div class="card"><div class="card-title"><div><h2>Validation de ronde</h2><p>QR prioritaire, NFC si compatible</p></div></div>${shift ? roundUI() : `<div class="setup-box">Tu dois prendre poste avant de démarrer une ronde.</div>`}</div>
+    <div class="card"><div class="card-title"><div><h2>Points de contrôle</h2><p>Progression en temps réel</p></div></div><div id="round-checkpoints" class="list"><div class="empty">Chargement...</div></div></div>
+  </section>`;
+  render(page('Ronde Agent', 'Certification des passages terrain', body));
+  if (shift) bindRound(shift);
+}
+function roundUI(){
+  return `<div class="qr-zone"><div style="font-weight:900;font-size:20px">Scanner QR / NFC</div><p class="muted">NFC disponible uniquement sur navigateur compatible. QR obligatoire en fallback.</p><div class="field"><label>Code point de ronde</label><input class="input mono" id="checkpoint-code" placeholder="Scanner ou saisir le code"></div><div class="btn-row"><button class="btn primary" id="validate-checkpoint">Valider point</button><button class="btn" id="nfc-read">Lire NFC</button></div></div><div class="divider"></div><div class="progress-shell"><div id="round-progress" class="progress-bar" style="width:0%"></div></div><p class="muted" id="round-progress-text">0% validé</p>`;
+}
+async function bindRound(shift){
+  const snap = await getDocs(query(collectionRef('roundCheckpoints'), where('siteId','==',shift.siteId), where('isActive','==',true), orderBy('order'))).catch(async()=>getDocs(query(collectionRef('roundCheckpoints'), where('siteId','==',shift.siteId), where('isActive','==',true))));
+  const points = snap.docs.map(d => ({id:d.id, ...d.data()}));
+  const state = { roundId:null, validated:new Set(), points };
+  renderCheckpoints(state);
+  document.querySelector('#validate-checkpoint')?.addEventListener('click', async () => {
+    const code = document.querySelector('#checkpoint-code').value.trim();
+    const point = points.find(p => p.qrCode === code || p.nfcId === code || p.id === code);
+    if (!point) return toast('Point non reconnu.', 'error');
+    await validateCheckpoint(shift, state, point, 'QR');
+  });
+  document.querySelector('#nfc-read')?.addEventListener('click', async () => {
+    if (!('NDEFReader' in window)) return toast('NFC non compatible. Utilise le QR code.', 'warning');
+    try {
+      const reader = new NDEFReader();
+      await reader.scan();
+      toast('Approche le téléphone du tag NFC.', 'success');
+      reader.onreading = async event => {
+        const serial = event.serialNumber;
+        const point = points.find(p => p.nfcId === serial);
+        if (point) await validateCheckpoint(shift, state, point, 'NFC'); else toast('Tag NFC non reconnu.', 'error');
+      };
+    } catch { toast('Lecture NFC refusée ou indisponible.', 'warning'); }
+  });
+}
+function renderCheckpoints(state){
+  const list = document.querySelector('#round-checkpoints');
+  if (!state.points.length) return list.innerHTML = `<div class="empty">Aucun point de ronde configuré pour ce site.</div>`;
+  list.innerHTML = state.points.map(p => `<div class="item"><div class="item-main"><div class="item-title">${state.validated.has(p.id)?'✅':'○'} ${safe(p.name)}</div><div class="item-meta">Zone : ${safe(p.zone || '—')} · Ordre : ${safe(p.order || '—')}<br>${safe(p.description || '')}</div></div></div>`).join('');
+  const percent = Math.round((state.validated.size / state.points.length) * 100);
+  const bar = document.querySelector('#round-progress'); if (bar) bar.style.width = `${percent}%`;
+  const txt = document.querySelector('#round-progress-text'); if (txt) txt.textContent = `${percent}% validé · ${state.validated.size}/${state.points.length}`;
+}
+async function validateCheckpoint(shift, state, point, method){
+  try {
+    if (!state.roundId) {
+      const round = await addDoc(collectionRef('rounds'), { agentId:currentUser.uid, agentNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim(), siteId:shift.siteId, siteNom:shift.siteNom, shiftId:shift.id, startedAt:serverTimestamp(), status:'active', checkpointsValidated:[] });
+      state.roundId = round.id;
+    }
+    if (state.validated.has(point.id)) return toast('Point déjà contrôlé.', 'warning');
+    const gps = await getGPS();
+    await addDoc(collectionRef('roundCheckpointsLogs'), { roundId:state.roundId, agentId:currentUser.uid, siteId:shift.siteId, checkpointId:point.id, checkpointName:point.name, scanMethod:method, gps, scannedAt:serverTimestamp(), isValid:true, createdBy:currentUser.uid });
+    state.validated.add(point.id);
+    await updateDoc(docRef('rounds', state.roundId), { checkpointsValidated:[...state.validated], status:state.validated.size === state.points.length ? 'completed':'active', completedAt:state.validated.size === state.points.length ? serverTimestamp() : null });
+    document.querySelector('#checkpoint-code').value = '';
+    renderCheckpoints(state);
+    toast('Point contrôlé', 'success');
+  } catch(error){ console.error(error); toast('Erreur validation ronde.', 'error'); }
+}
+
+function openWhatsapp(shift){
+  const phone = shift?.whatsappQG || DEFAULT_QG_WHATSAPP;
+  const msg = `Bonjour QG, ici ${currentProfile.prenom || ''} ${currentProfile.nom || ''}, site ${shift?.siteNom || 'non renseigné'}, je vous contacte concernant :`;
+  window.open(`https://wa.me/${String(phone).replace(/\D/g,'')}?text=${encodeURIComponent(msg)}`, '_blank');
+}
+
+async function renderAgentFlash(){
+  currentRoute = 'flash';
+  const body = `<section class="card"><div class="card-title"><div><h2>Messages Flash reçus</h2><p>Confirmation de lecture obligatoire</p></div></div><div id="agent-flash-list" class="list"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Messages Flash', 'Alertes descendantes du QG', body));
+  listenAgentFlashList();
+}
+function listenAgentFlashList(){
+  const box = document.querySelector('#agent-flash-list'); if (!box) return;
+  const q = query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(30));
+  const unsub = onSnapshot(q, snap => {
+    const data = snap.docs.map(d => ({ id:d.id, ...d.data() })).filter(f => flashTargetsMe(f));
+    if (!data.length) return box.innerHTML = `<div class="empty">Aucun message Flash.</div>`;
+    box.innerHTML = data.map(f => `<div class="item"><div class="item-main"><div class="item-title">${safe(f.title)}</div><div class="item-meta">${safe(f.priority || 'Information')} · ${dateText(f.sentAt)}<br>${safe(f.message)}</div></div><div class="item-actions">${f.readBy?.[currentUser.uid] ? '<span class="pill green">Lu</span>' : `<button class="btn small primary" data-read-flash="${safe(f.id)}">Confirmer lecture</button>`}</div></div>`).join('');
+    document.querySelectorAll('[data-read-flash]').forEach(btn => btn.addEventListener('click', () => markFlashRead(btn.dataset.readFlash)));
+  });
+  unsubscribeList.push(unsub);
+}
+
+// -------------------- QG --------------------
+function roleAllowedAdmin(){ return ['admin','superviseur'].includes(currentProfile?.role); }
+
+async function renderQGHome(){
+  currentRoute = 'home';
+  const body = `
+    <section class="grid cols-4" id="qg-stats">
+      <div class="card stat green"><div class="stat-label">Agents en poste</div><div class="stat-value" id="stat-working">—</div></div>
+      <div class="card stat red"><div class="stat-label">Alertes actives</div><div class="stat-value" id="stat-alerts">—</div></div>
+      <div class="card stat orange"><div class="stat-label">Incidents 24h</div><div class="stat-value" id="stat-incidents">—</div></div>
+      <div class="card stat blue"><div class="stat-label">Missions jour</div><div class="stat-value" id="stat-missions">—</div></div>
+    </section>
+    <section class="grid cols-2" style="margin-top:16px">
+      <div class="card"><div class="card-title"><div><h2>Carte opérationnelle</h2><p>Agents en poste et positions connues</p></div></div><div id="qg-map" class="map"></div></div>
+      <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, inactivité, SOS, critiques</p></div><button class="btn small" data-route="notifications">Voir tout</button></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
+    </section>
+    <section class="grid cols-2" style="margin-top:16px">
+      <div class="card"><div class="card-title"><div><h2>Alertes prioritaires</h2><p>SOS/PTI actifs</p></div></div><div id="qg-alerts-feed" class="list"><div class="empty">Chargement...</div></div></div>
+      <div class="card"><div class="card-title"><div><h2>Missions à venir</h2><p>Planning opérationnel</p></div><button class="btn small" data-route="missions">Gérer</button></div><div id="qg-missions-preview" class="list"><div class="empty">Chargement...</div></div></div>
+    </section>
+    <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Temps réel</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Dashboard QG', 'Centre de commandement temps réel', body));
+  listenQGStats(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5); listenQGMissionsPreview();
+}
+function listenQGStats(){
+  const usersQ = query(collectionRef('users'));
+  const alertsQ = query(collectionRef('alerts'), where('statut','==','active'));
+  const reportsQ = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(200));
+  const missionsQ = query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(200));
+  unsubscribeList.push(onSnapshot(usersQ, snap => {
+    const users = snap.docs.map(d=>d.data());
+    const working = users.filter(u => u.statut === 'en_poste').length;
+    setText('#stat-working', working);
+  }));
+  unsubscribeList.push(onSnapshot(alertsQ, snap => setText('#stat-alerts', snap.size)));
+  unsubscribeList.push(onSnapshot(reportsQ, snap => {
+    const since = Date.now() - 24*60*60*1000;
+    const rows = snap.docs.map(d=>d.data());
+    setText('#stat-incidents', rows.filter(r => ['Incident','Intervention'].includes(r.category) && (r.createdAt?.toDate?.()?.getTime() || 0) > since).length);
+  }));
+  unsubscribeList.push(onSnapshot(missionsQ, snap => {
+    const today = new Date(); today.setHours(0,0,0,0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
+    const rows = snap.docs.map(d=>d.data());
+    setText('#stat-missions', rows.filter(m => { const t=m.scheduledStart?.toDate?.()?.getTime() || 0; return t>=today.getTime() && t<tomorrow.getTime(); }).length);
+  }, () => setText('#stat-missions', '0')));
+}
+function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
+function listenQGReportsFeed(){
+  const box = document.querySelector('#qg-reports-feed'); if(!box) return;
+  const q = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(12));
+  unsubscribeList.push(onSnapshot(q, snap => box.innerHTML = snap.empty ? `<div class="empty">Aucun rapport.</div>` : snap.docs.map(d=>reportTimeline(d.data())).join('')));
+}
+function listenQGAlertsFeed(){
+  const box = document.querySelector('#qg-alerts-feed'); if(!box) return;
+  const q = query(collectionRef('alerts'), where('statut','==','active'));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    if (snap.empty) return box.innerHTML = `<div class="empty">Aucune alerte active.</div>`;
+    box.innerHTML = snap.docs.map(d => alertItem({id:d.id,...d.data()}, true)).join('');
+    bindAlertActions();
+  }));
+}
+function alertItem(a, compact=false){
+  return `<div class="item" style="border-color:rgba(255,46,46,.4)"><div class="item-main"><div class="item-title">🚨 ${safe(a.typeAlerte || 'SOS/PTI')} · ${safe(a.agentNom)}</div><div class="item-meta">Site : ${safe(a.siteActuelNom || a.siteActuel || '—')}<br>Heure : ${dateText(a.heure || a.createdAt)}<br>${a.positionGPS ? `GPS : ${a.positionGPS.lat?.toFixed?.(5)}, ${a.positionGPS.lng?.toFixed?.(5)}` : 'GPS : indisponible'}</div></div><div class="item-actions"><button class="btn small danger" data-take-alert="${safe(a.id)}">Prendre en charge</button><button class="btn small" data-close-alert="${safe(a.id)}">Clôturer</button></div></div>`;
+}
+async function initQGMap(){
+  const el = document.querySelector('#qg-map'); if (!el) return;
+  if (!window.L) { el.innerHTML = '<div class="empty" style="margin:20px">Carte indisponible. Connexion CDN Leaflet requise.</div>'; return; }
+  mapInstance = L.map('qg-map', { zoomControl:true }).setView([46.6, 2.4], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'© OpenStreetMap' }).addTo(mapInstance);
+  const q = query(collectionRef('shifts'), where('status','==','active'));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    mapMarkers.forEach(m => m.remove()); mapMarkers = [];
+    const points = [];
+    snap.docs.forEach(d => {
+      const s = d.data(); const gps = s.positionGPS;
+      if (!gps?.lat || !gps?.lng) return;
+      const marker = L.marker([gps.lat, gps.lng]).addTo(mapInstance).bindPopup(`<strong>${safe(s.agentNom)}</strong><br>${safe(s.siteNom)}`);
+      mapMarkers.push(marker); points.push([gps.lat, gps.lng]);
+    });
+    if (points.length) mapInstance.fitBounds(points, { padding:[40,40], maxZoom:14 });
+  }));
+}
+function listenQGMissionsPreview(){
+  const box = document.querySelector('#qg-missions-preview'); if (!box) return;
+  const q = query(collectionRef('missions'), orderBy('scheduledStart','asc'), limit(8));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m => !['completed','cancelled'].includes(m.status));
+    box.innerHTML = rows.length ? rows.slice(0,5).map(missionItem).join('') : `<div class="empty">Aucune mission à venir.</div>`;
+  }, () => box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les règles/index Firebase.</div>`));
+}
+
+async function renderQGMissions(){
+  currentRoute = 'missions';
+  const today = new Date();
+  const defaultDate = today.toISOString().slice(0,10);
+  const body = `<section class="grid cols-2 mission-admin-grid">
+    <div class="card"><div class="card-title"><div><h2>Créer une mission</h2><p>Planification agent / site / horaires</p></div></div>
+      <form id="mission-form">
+        <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" id="mission-agent" required></select></div><div class="field"><label>Site</label><select class="select" name="siteId" id="mission-site" required></select></div></div>
+        <div class="form-grid"><div class="field"><label>Début prévu</label><input class="input" type="datetime-local" name="scheduledStart" required></div><div class="field"><label>Fin prévue</label><input class="input" type="datetime-local" name="scheduledEnd" required></div></div>
+        <div class="field"><label>Type de mission</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div>
+        <div class="field"><label>Consignes mission</label><textarea class="textarea" name="instructions" placeholder="Consignes spécifiques pour cette vacation..."></textarea></div>
+        <button class="btn primary full" type="submit">Planifier la mission</button>
+      </form>
+    </div>
+    <div class="card"><div class="card-title"><div><h2>Suivi missions</h2><p>Retards, pointage, conformité</p></div></div><div id="missions-live" class="list"><div class="empty">Chargement...</div></div></div>
+  </section>
+  <section class="card planning-card" style="margin-top:16px">
+    <div class="card-title planning-title"><div><h2>Planning exploitation</h2><p>Vue PC inspirée planning sécurité : sites, agents, horaires et vacations</p></div><div class="btn-row"><button class="btn small" id="planning-prev">‹</button><input class="input planning-date" id="planning-date" type="date" value="${defaultDate}"><button class="btn small" id="planning-next">›</button></div></div>
+    <div class="planning-toolbar">
+      <div class="segmented"><button class="active" data-planning-mode="sites">Sites</button><button data-planning-mode="agents">Collaborateurs</button></div>
+      <div class="field compact-field"><label>Affichage</label><select class="select" id="planning-days"><option value="7">7 jours</option><option value="14" selected>14 jours</option><option value="31">Mois</option></select></div>
+      <div class="field compact-field"><label>Recherche</label><input class="input" id="planning-search" placeholder="Site, agent, client..."></div>
+    </div>
+    <div id="planning-board" class="planning-board"><div class="empty">Chargement du planning...</div></div>
+  </section>`;
+  render(page('Missions', 'Planning opérationnel et preuve d’exécution', body));
+  const [sitesSnap, usersSnap] = await Promise.all([
+    getDocs(query(collectionRef('sites'), where('isActive','==',true))).catch(()=>({docs:[]})),
+    getDocs(query(collectionRef('users'), where('role','==','agent'))).catch(()=>({docs:[]}))
+  ]);
+  const sites = sitesSnap.docs.map(d=>({id:d.id,...d.data()}));
+  const agents = usersSnap.docs.map(d=>({id:d.id,...d.data()}));
+  qgPlanningState.sites = sites;
+  qgPlanningState.agents = agents;
+  qgPlanningState.startDate = startOfDay(new Date(defaultDate));
+  document.querySelector('#mission-site').innerHTML = `<option value="">Choisir un site</option>` + sites.map(s=>`<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
+  document.querySelector('#mission-agent').innerHTML = `<option value="">Choisir un agent</option>` + agents.map(a=>`<option value="${safe(a.id)}">${safe((a.prenom||'')+' '+(a.nom||''))}</option>`).join('');
+  document.querySelector('#mission-form').addEventListener('submit', async e => {
+    e.preventDefault(); const fd = new FormData(e.currentTarget);
+    const site = qgPlanningState.sites.find(s=>s.id===fd.get('siteId')); const agent = qgPlanningState.agents.find(a=>a.id===fd.get('agentId'));
+    const scheduledStart = fromLocalInputValue(fd.get('scheduledStart')); const scheduledEnd = fromLocalInputValue(fd.get('scheduledEnd'));
+    if (!site || !agent || !scheduledStart || !scheduledEnd) return toast('Mission incomplète.', 'warning');
+    await addDoc(collectionRef('missions'), {
+      agentId: agent.id, agentNom:`${agent.prenom||''} ${agent.nom||''}`.trim(), siteId: site.id, siteNom:site.name,
+      scheduledStart, scheduledEnd, type:fd.get('type'), instructions:fd.get('instructions'), status:'planned',
+      createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+    });
+    await addAudit('mission_created', { siteId:site.id, agentId:agent.id });
+    e.currentTarget.reset(); toast('Mission planifiée', 'success');
+  });
+  bindPlanningControls();
+  listenMissionsList('#missions-live');
+  listenPlanningBoard();
+}
+
+function bindPlanningControls(){
+  document.querySelectorAll('[data-planning-mode]').forEach(btn => btn.addEventListener('click', () => {
+    qgPlanningState.mode = btn.dataset.planningMode;
+    document.querySelectorAll('[data-planning-mode]').forEach(b => b.classList.toggle('active', b === btn));
+    renderPlanningBoard();
+  }));
+  document.querySelector('#planning-days')?.addEventListener('change', e => { qgPlanningState.days = Number(e.target.value || 14); renderPlanningBoard(); });
+  document.querySelector('#planning-search')?.addEventListener('input', renderPlanningBoard);
+  document.querySelector('#planning-date')?.addEventListener('change', e => { qgPlanningState.startDate = startOfDay(new Date(e.target.value)); renderPlanningBoard(); });
+  document.querySelector('#planning-prev')?.addEventListener('click', () => movePlanningDate(-qgPlanningState.days));
+  document.querySelector('#planning-next')?.addEventListener('click', () => movePlanningDate(qgPlanningState.days));
+}
+function movePlanningDate(offsetDays){
+  const base = qgPlanningState.startDate || startOfDay(new Date());
+  const next = addDays(base, offsetDays);
+  qgPlanningState.startDate = next;
+  const input = document.querySelector('#planning-date');
+  if (input) input.value = next.toISOString().slice(0,10);
+  renderPlanningBoard();
+}
+function listenPlanningBoard(){
+  const q = query(collectionRef('missions'), orderBy('scheduledStart','asc'), limit(600));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    qgPlanningState.missions = snap.docs.map(d=>({id:d.id,...d.data()}));
+    renderPlanningBoard();
+  }, () => {
+    const box = document.querySelector('#planning-board');
+    if (box) box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les règles ou index Firebase.</div>`;
+  }));
+}
+function startOfDay(d){
+  const x = new Date(d);
+  if (Number.isNaN(x.getTime())) return startOfDay(new Date());
+  x.setHours(0,0,0,0);
+  return x;
+}
+function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
+function endOfDay(d){ const x = startOfDay(d); x.setHours(23,59,59,999); return x; }
+function planningDateLabel(d){ return d.toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' }); }
+function planningDayShort(d){ return d.toLocaleDateString('fr-FR', { weekday:'short' }).replace('.', '').toUpperCase(); }
+function renderPlanningBoard(){
+  const box = document.querySelector('#planning-board');
+  if (!box) return;
+  const start = qgPlanningState.startDate || startOfDay(new Date());
+  const days = Number(qgPlanningState.days || 14);
+  const dates = Array.from({length:days}, (_,i)=>addDays(start,i));
+  const end = endOfDay(dates[dates.length-1]);
+  const term = (document.querySelector('#planning-search')?.value || '').toLowerCase();
+  const mode = qgPlanningState.mode || 'sites';
+  const resources = (mode === 'agents' ? qgPlanningState.agents : qgPlanningState.sites)
+    .map(r => ({...r, label: mode === 'agents' ? (`${r.prenom || ''} ${r.nom || ''}`.trim() || r.email || r.id) : (r.name || r.siteNom || r.id), sub: mode === 'agents' ? (r.telephone || r.email || '') : (r.clientName || r.address || '') }))
+    .filter(r => !term || `${r.label} ${r.sub}`.toLowerCase().includes(term) || qgPlanningState.missions.some(m => `${m.siteNom} ${m.agentNom} ${m.type}`.toLowerCase().includes(term) && ((mode==='agents' && m.agentId===r.id) || (mode==='sites' && m.siteId===r.id))));
+  const rangeMissions = qgPlanningState.missions.filter(m => {
+    const t = m.scheduledStart?.toDate?.()?.getTime();
+    return t && t >= start.getTime() && t <= end.getTime() && !['cancelled'].includes(m.status);
+  });
+  const header = `<div class="planning-grid planning-header" style="--days:${days}"><div class="planning-resource-head">${mode === 'agents' ? 'Collaborateurs' : 'Sites'}</div>${dates.map(d=>`<div class="planning-day-head"><strong>${planningDateLabel(d)}</strong><span>${planningDayShort(d)}</span></div>`).join('')}</div>`;
+  const rows = resources.map((res, rowIndex) => {
+    const cells = dates.map(d => {
+      const ds = startOfDay(d).getTime(), de = endOfDay(d).getTime();
+      const missions = rangeMissions.filter(m => {
+        const t = m.scheduledStart?.toDate?.()?.getTime();
+        return t && t >= ds && t <= de && ((mode === 'agents' && m.agentId === res.id) || (mode === 'sites' && m.siteId === res.id));
+      });
+      return `<div class="planning-cell">${missions.map(m => planningMissionChip(m, mode, rowIndex)).join('')}</div>`;
+    }).join('');
+    return `<div class="planning-grid planning-row" style="--days:${days}"><div class="planning-resource"><strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span></div>${cells}</div>`;
+  }).join('');
+  const emptyRows = resources.length ? '' : `<div class="empty">Aucun ${mode === 'agents' ? 'collaborateur' : 'site'} à afficher.</div>`;
+  box.innerHTML = `<div class="planning-scroll">${header}${rows || emptyRows}</div>`;
+  box.querySelectorAll('[data-mission-pdf]').forEach(btn => btn.addEventListener('click', () => printMissionById(btn.dataset.missionPdf)));
+}
+function planningMissionChip(m, mode, rowIndex=0){
+  const start = m.scheduledStart?.toDate?.(); const end = m.scheduledEnd?.toDate?.();
+  const time = start ? start.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}) : '--:--';
+  const fin = end ? end.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}) : '--:--';
+  const label = mode === 'agents' ? (m.siteNom || 'Site') : (m.agentNom || 'Agent');
+  const palette = ['azure','green','orange','violet','pink','blue'];
+  const cls = palette[Math.abs(hashCode(m.siteId || m.agentId || String(rowIndex))) % palette.length];
+  return `<button class="planning-mission ${cls}" data-mission-pdf="${safe(m.id)}" title="${safe(label)} · ${safe(m.type || 'Mission')}"><strong>${safe(time)}-${safe(fin)}</strong><span>${safe(label)}</span></button>`;
+}
+function hashCode(value){
+  return String(value).split('').reduce((acc,ch)=>((acc<<5)-acc)+ch.charCodeAt(0),0);
+}
+
+function listenMissionsList(selector){
+  const box = document.querySelector(selector); if (!box) return;
+  const q = query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(100));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()}));
+    qgMissionsCache = rows;
+    box.innerHTML = rows.length ? rows.map(missionItem).join('') : `<div class="empty">Aucune mission planifiée.</div>`;
+    document.querySelectorAll('[data-mission-cancel]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('Annuler cette mission ?')) return;
+      await updateDoc(docRef('missions', btn.dataset.missionCancel), { status:'cancelled', updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
+      await addAudit('mission_cancelled', { missionId:btn.dataset.missionCancel });
+      toast('Mission annulée', 'warning');
+    }));
+    document.querySelectorAll('[data-mission-pdf]').forEach(btn => btn.addEventListener('click', () => printMissionById(btn.dataset.missionPdf)));
+    document.querySelectorAll('[data-mission-duplicate]').forEach(btn => btn.addEventListener('click', () => duplicateMissionFlow(rows.find(m=>m.id===btn.dataset.missionDuplicate))));
+  }, () => box.innerHTML = `<div class="empty">Missions indisponibles. Un index Firestore peut être requis.</div>`));
+}
+async function duplicateMissionFlow(m){
+  if (!m) return;
+  const nextStart = m.scheduledStart?.toDate ? addDays(m.scheduledStart.toDate(), 7) : addDays(new Date(), 1);
+  const nextEnd = m.scheduledEnd?.toDate ? addDays(m.scheduledEnd.toDate(), 7) : addDays(nextStart, 0);
+  showModal('Dupliquer mission', `<form id="duplicate-mission-form"><div class="setup-box">Duplique cette vacation pour accélérer la planification PC.</div><div class="form-grid"><div class="field"><label>Nouveau début</label><input class="input" type="datetime-local" name="scheduledStart" value="${toLocalInputValue(nextStart)}" required></div><div class="field"><label>Nouvelle fin</label><input class="input" type="datetime-local" name="scheduledEnd" value="${toLocalInputValue(nextEnd)}" required></div></div><button class="btn primary full" type="submit">Créer la copie</button></form>`);
+  document.querySelector('#duplicate-mission-form')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const scheduledStart = fromLocalInputValue(fd.get('scheduledStart'));
+    const scheduledEnd = fromLocalInputValue(fd.get('scheduledEnd'));
+    await addDoc(collectionRef('missions'), {
+      agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, type:m.type || 'Surveillance', instructions:m.instructions || '',
+      scheduledStart, scheduledEnd, status:'planned', copiedFrom:m.id, createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+    });
+    await addAudit('mission_duplicated', { missionId:m.id });
+    closeModal();
+    toast('Mission dupliquée', 'success');
+  });
+}
+function missionItem(m){
+  const late = missionIsLate(m);
+  const color = late ? 'red' : missionStatusColor(m.status);
+  const delay = m.actualStart && m.scheduledStart ? Math.round(((m.actualStart.toDate?.()?.getTime()||0) - (m.scheduledStart.toDate?.()?.getTime()||0))/60000) : null;
+  return `<div class="item mission-row ${late?'late':''}"><div class="item-main"><div class="item-title">${safe(m.siteNom)} · ${safe(m.agentNom)} <span class="pill ${color}">${late?'Retard':missionStatusLabel(m.status)}</span></div><div class="item-meta">Prévu : ${dateText(m.scheduledStart)} → ${dateText(m.scheduledEnd)}<br>Type : ${safe(m.type || 'Mission')} ${delay!==null ? `<br>Pointage : ${delay>0?`+${delay} min`:`${delay} min`}`:''}${typeof m.conformityScore==='number'?`<br>Conformité : ${m.conformityScore}%`:''}</div></div><div class="item-actions"><button class="btn small" data-mission-pdf="${safe(m.id)}">Rapport PDF</button><button class="btn small ghost" data-mission-duplicate="${safe(m.id)}">Dupliquer</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn small ghost" data-mission-cancel="${safe(m.id)}">Annuler</button>`:''}</div></div>`;
+}
+function renderQGNotifications(){
+  currentRoute = 'notifications';
+  const body = `<section class="card"><div class="card-title"><div><h2>Centre de notifications QG</h2><p>Alertes d’exploitation calculées en temps réel</p></div></div><div id="notifications-list" class="list"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Notifications QG', 'Retards, inactivité, SOS et non-conformités', body));
+  listenQGNotifications('#notifications-list', 100);
+}
+function listenQGNotifications(selector, max=10){
+  const box = document.querySelector(selector); if (!box) return;
+  const state = { missions:[], shifts:[], users:[], alerts:[], reports:[], flash:[] };
+  const redraw = () => { const rows = buildQGNotifications(state).slice(0,max); qgNotificationsCache = rows; box.innerHTML = rows.length ? rows.map(notificationItem).join('') : `<div class="empty">Aucune notification opérationnelle.</div>`; };
+  const bind = (name, q) => unsubscribeList.push(onSnapshot(q, snap => { state[name] = snap.docs.map(d=>({id:d.id,...d.data()})); redraw(); }, redraw));
+  bind('missions', query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(200)));
+  bind('shifts', query(collectionRef('shifts'), orderBy('createdAt','desc'), limit(200)));
+  bind('users', query(collectionRef('users'), limit(200)));
+  bind('alerts', query(collectionRef('alerts'), orderBy('createdAt','desc'), limit(100)));
+  bind('reports', query(collectionRef('reports'), orderBy('createdAt','desc'), limit(100)));
+  bind('flash', query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(30)));
+}
+function buildQGNotifications(state){
+  const now = Date.now();
+  const rows = [];
+  state.alerts.filter(a => ['active','taken'].includes(a.statut)).forEach(a => rows.push({level:'red', title:`SOS/PTI actif · ${a.agentNom || 'Agent'}`, meta:`${a.siteActuelNom || 'Site'} · ${dateText(a.createdAt || a.heure)}`, body:a.message || 'Alerte critique en cours'}));
+  state.missions.forEach(m => {
+    const start = m.scheduledStart?.toDate?.()?.getTime(); const end = m.scheduledEnd?.toDate?.()?.getTime();
+    if (start && now > start + 10*60000 && !['active','completed','cancelled'].includes(m.status)) rows.push({level:'red', title:`Prise de poste en retard · ${m.agentNom}`, meta:`${m.siteNom} · prévu ${dateText(m.scheduledStart)}`, body:'Mission non démarrée dans le délai prévu.'});
+    if (end && now > end + 15*60000 && m.status === 'active') rows.push({level:'orange', title:`Mission non clôturée · ${m.agentNom}`, meta:`${m.siteNom} · fin prévue ${dateText(m.scheduledEnd)}`, body:'La mission dépasse son horaire de fin sans clôture.'});
+  });
+  state.users.filter(u => u.statut === 'en_poste').forEach(u => {
+    const last = u.lastSeen?.toDate?.()?.getTime();
+    if (last && now - last > 45*60000) rows.push({level:'orange', title:`Agent sans activité récente · ${u.prenom || ''} ${u.nom || ''}`, meta:`${u.siteActuelNom || 'Site inconnu'} · dernière activité ${dateText(u.lastSeen)}`, body:'Contrôle recommandé par le QG.'});
+  });
+  state.reports.filter(r => r.severity === 'Critique' && r.status !== 'treated').forEach(r => rows.push({level:'red', title:`Rapport critique non traité · ${r.agentNom}`, meta:`${r.siteNom} · ${dateText(r.createdAt)}`, body:r.message || 'Rapport critique'}));
+  state.flash.filter(f => f.priority === 'Critique').forEach(f => {
+    const sent = f.sentAt?.toDate?.()?.getTime();
+    if (sent && now - sent > 10*60000 && Object.keys(f.readBy || {}).length === 0) rows.push({level:'orange', title:`Flash critique non lu`, meta:`Envoyé ${dateText(f.sentAt)}`, body:f.title || f.message || 'Message sans lecture confirmée'});
+  });
+  return rows.sort((a,b)=>(a.level==='red'?-1:0) - (b.level==='red'?-1:0));
+}
+function notificationItem(n){
+  return `<div class="item notification ${n.level}"><div class="item-main"><div class="item-title">${safe(n.title)}</div><div class="item-meta">${safe(n.meta)}</div><div style="margin-top:6px">${safe(n.body)}</div></div></div>`;
+}
+async function printMissionGroup(group){
+  const reports = group?.reports || [];
+  const first = reports[0] || {};
+  if (first.missionId) return printMissionById(first.missionId);
+  let shift = {};
+  if (first.shiftId) {
+    const snap = await getDoc(docRef('shifts', first.shiftId)).catch(()=>null);
+    if (snap?.exists?.()) shift = { id:snap.id, ...snap.data() };
+  }
+  const mission = { id:group?.key || first.shiftId || 'mission', siteNom:first.siteNom, agentNom:first.agentNom, scheduledStart:shift.scheduledStart, scheduledEnd:shift.scheduledEnd };
+  printMissionReport({ mission, shift, reports });
+}
+async function printMissionById(missionId){
+  const mission = qgMissionsCache.find(m=>m.id===missionId) || (await getDoc(docRef('missions', missionId))).data();
+  if (!mission) return toast('Mission introuvable.', 'error');
+  const reportsSnap = await getDocs(query(collectionRef('reports'), where('missionId','==',missionId))).catch(()=>({docs:[]}));
+  const shiftsSnap = await getDocs(query(collectionRef('shifts'), where('missionId','==',missionId))).catch(()=>({docs:[]}));
+  const reports = reportsSnap.docs.map(d=>({id:d.id,...d.data()}));
+  const shift = shiftsSnap.docs.map(d=>({id:d.id,...d.data()}))[0] || {};
+  printMissionReport({ mission:{id:missionId,...mission}, shift, reports });
+}
+function printMissionReport({ mission, shift={}, reports=[] }){
+  const html = missionReportHtml({ mission, shift, reports });
+  document.querySelector('#print-root')?.remove();
+  const root = document.createElement('div');
+  root.id = 'print-root';
+  root.className = 'print-root';
+  root.innerHTML = html;
+  document.body.appendChild(root);
+  toast('Rapport préparé. Choisis “Imprimer” puis “Enregistrer en PDF”.', 'success');
+  const cleanup = () => setTimeout(() => root.remove(), 500);
+  window.addEventListener('afterprint', cleanup, { once:true });
+  setTimeout(() => window.print(), 250);
+  setTimeout(() => root.remove(), 15000);
+}
+function missionReportHtml({ mission, shift={}, reports=[] }){
+  const logo = new URL('./assets/logo.png', location.href).href;
+  const rows = reports.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td></tr>`).join('') || '<tr><td colspan="4">Aucun rapport MCI sur cette mission.</td></tr>';
+  return `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>Rapport opérationnel de sécurité</h1><p>Sentinelle Pro · Export généré le ${new Date().toLocaleString('fr-FR')}</p></div></header><section><h2>${safe(mission.siteNom || shift.siteNom || 'Site')}</h2><p class="report-meta">Agent : ${safe(mission.agentNom || shift.agentNom || '—')} · Mission : ${safe(mission.id || '')}<br>Prévu : ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br>Réalisé : ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid"><div><strong>${reports.length}</strong><span>Rapports</span></div><div><strong>${shift.roundsCount || mission.roundsCount || 0}</strong><span>Rondes</span></div><div><strong>${shift.incidentsCount || mission.incidentsCount || 0}</strong><span>Événements</span></div><div><strong>${shift.conformityScore ?? mission.conformityScore ?? '—'}%</strong><span>Conformité</span></div></section><section><h3>Main courante de mission</h3><table><thead><tr><th>Heure</th><th>Catégorie</th><th>Gravité</th><th>Message</th></tr></thead><tbody>${rows}</tbody></table></section><section class="report-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement. Les horodatages proviennent de Firebase/serveur lorsque disponibles.</footer></article>`;
+}
+
+function renderQGReports(){
+  currentRoute = 'reports';
+  const body = `<section class="card fixed-mobile-card"><div class="card-title"><div><h2>Journal MCI</h2><p>Classement par mission, filtres et traitement des rapports</p></div><button class="btn small" id="export-reports">Télécharger MCI</button></div>
+    <div class="form-grid mci-filters">
+      <div class="field"><label>Recherche</label><input class="input" id="report-search" placeholder="Agent, site, mission, message..."></div>
+      <div class="field"><label>Vue</label><select class="select" id="report-view-mode"><option value="missions">Par mission</option><option value="table">Table complète</option></select></div>
+      <div class="field"><label>Site</label><select class="select" id="site-filter"><option value="">Tous les sites</option></select></div>
+      <div class="field"><label>Agent</label><select class="select" id="agent-filter"><option value="">Tous les agents</option></select></div>
+      <div class="field"><label>Gravité</label><select class="select" id="severity-filter"><option value="">Toutes</option><option>Normal</option><option>À surveiller</option><option>Important</option><option>Critique</option></select></div>
+      <div class="field"><label>Catégorie</label><select class="select" id="category-filter"><option value="">Toutes</option><option>Ronde</option><option>Anomalie</option><option>Incident</option><option>Information</option><option>Intervention</option><option>Consigne reçue</option><option>Prise de service</option><option>Fin de service</option></select></div>
+    </div>
+    <div id="reports-summary" class="mission-kpis"></div>
+    <div id="reports-table" class="table-wrap"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Supervision MCI', 'Journal de bord temps réel', body));
+  let rows = [];
+  const reportsQuery = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(1000));
+  const redraw = () => renderReportsTable(rows);
+  unsubscribeList.push(onSnapshot(reportsQuery, snap => {
+    rows = snap.docs.map(d=>({id:d.id,...d.data()}));
+    refreshReportFilters(rows);
+    redraw();
+  }));
+  unsubscribeList.push(onSnapshot(collectionRef('sites'), snap => {
+    qgAllSitesCache = snap.docs.map(d=>({id:d.id,...d.data()}));
+    refreshReportFilters(rows);
+    redraw();
+  }));
+  unsubscribeList.push(onSnapshot(collectionRef('users'), snap => {
+    qgAllAgentsCache = snap.docs.map(d=>({id:d.id,...d.data()}));
+    refreshReportFilters(rows);
+    redraw();
+  }));
+  ['report-search','severity-filter','category-filter','site-filter','agent-filter','report-view-mode'].forEach(id => {
+    document.querySelector(`#${id}`)?.addEventListener('input', redraw);
+    document.querySelector(`#${id}`)?.addEventListener('change', redraw);
+  });
+  document.querySelector('#export-reports').addEventListener('click', () => exportCSV(filterReports(rows), 'mci-reports-filtres.csv'));
+}
+function refreshReportFilters(rows){
+  refreshSiteFilter(rows);
+  refreshAgentFilter(rows);
+}
+function refreshSiteFilter(rows){
+  const el = document.querySelector('#site-filter');
+  if (!el) return;
+  const previous = el.value;
+  const sitesMap = new Map();
+  qgAllSitesCache.forEach(site => {
+    const key = site.id || site.siteId || site.name;
+    if (key) sitesMap.set(String(key), site.name || site.siteNom || String(key));
+  });
+  rows.forEach(report => {
+    const key = report.siteId || report.siteNom;
+    if (key && !sitesMap.has(String(key))) sitesMap.set(String(key), report.siteNom || String(key));
+  });
+  const options = [...sitesMap.entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]), 'fr'));
+  el.innerHTML = `<option value="">Tous les sites</option>` + options.map(([value,label]) => `<option value="${safe(value)}">${safe(label)}</option>`).join('');
+  if (options.some(([value]) => value === previous)) el.value = previous;
+}
+function refreshAgentFilter(rows){
+  const el = document.querySelector('#agent-filter');
+  if (!el) return;
+  const previous = el.value;
+  const agentsMap = new Map();
+  qgAllAgentsCache.filter(u => !u.role || ['agent','superviseur','admin'].includes(u.role)).forEach(user => {
+    const label = `${user.prenom || ''} ${user.nom || ''}`.trim() || user.email || user.id;
+    const key = user.uid || user.id || label;
+    if (key) agentsMap.set(String(key), label);
+  });
+  rows.forEach(report => {
+    const key = report.agentId || report.agentNom;
+    if (key && !agentsMap.has(String(key))) agentsMap.set(String(key), report.agentNom || String(key));
+  });
+  const options = [...agentsMap.entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]), 'fr'));
+  el.innerHTML = `<option value="">Tous les agents</option>` + options.map(([value,label]) => `<option value="${safe(value)}">${safe(label)}</option>`).join('');
+  if (options.some(([value]) => value === previous)) el.value = previous;
+}
+function fillSelect(selector, values, firstLabel){
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const previous = el.value;
+  el.innerHTML = `<option value="">${firstLabel}</option>` + values.map(v => `<option value="${safe(v)}">${safe(v)}</option>`).join('');
+  if (values.includes(previous)) el.value = previous;
+}
+function filterReports(rows){
+  const term = document.querySelector('#report-search')?.value.toLowerCase() || '';
+  const sev = document.querySelector('#severity-filter')?.value || '';
+  const category = document.querySelector('#category-filter')?.value || '';
+  const site = document.querySelector('#site-filter')?.value || '';
+  const agent = document.querySelector('#agent-filter')?.value || '';
+  const selectedSite = site ? qgAllSitesCache.find(s => [s.id, s.siteId, s.name].map(v=>String(v||'')).includes(site)) : null;
+  const selectedAgent = agent ? qgAllAgentsCache.find(u => [u.id, u.uid, `${u.prenom || ''} ${u.nom || ''}`.trim(), u.email].map(v=>String(v||'')).includes(agent)) : null;
+  return rows.filter(r => {
+    const mission = missionKey(r);
+    const haystack = `${r.agentNom} ${r.siteNom} ${r.category} ${r.severity} ${r.message} ${mission}`.toLowerCase();
+    const siteOk = !site || r.siteId === site || r.siteNom === site || (selectedSite && (r.siteId === selectedSite.id || r.siteId === selectedSite.siteId || r.siteNom === selectedSite.name));
+    const selectedAgentName = selectedAgent ? `${selectedAgent.prenom || ''} ${selectedAgent.nom || ''}`.trim() : '';
+    const agentOk = !agent || r.agentId === agent || r.agentNom === agent || (selectedAgent && (r.agentId === selectedAgent.id || r.agentId === selectedAgent.uid || r.agentNom === selectedAgentName));
+    return (!sev || r.severity === sev)
+      && (!category || r.category === category)
+      && siteOk
+      && agentOk
+      && haystack.includes(term);
+  });
+}
+function missionKey(r){
+  if (r.shiftId) return String(r.shiftId);
+  const d = r.createdAt?.toDate ? r.createdAt.toDate() : new Date(r.createdAt || Date.now());
+  const day = Number.isNaN(d.getTime()) ? 'date-inconnue' : d.toISOString().slice(0,10);
+  return `mission-${r.agentId || r.agentNom || 'agent'}-${r.siteId || r.siteNom || 'site'}-${day}`;
+}
+function missionTitle(group){
+  const first = group.reports[0] || {};
+  return `${first.siteNom || 'Site non renseigné'} · ${first.agentNom || 'Agent non renseigné'}`;
+}
+function buildMissionGroups(rows){
+  const map = new Map();
+  rows.forEach(r => {
+    const key = missionKey(r);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  });
+  return [...map.entries()].map(([key, reports]) => {
+    const sorted = reports.slice().sort((a,b)=>(b.createdAt?.toDate?.()?.getTime() || 0) - (a.createdAt?.toDate?.()?.getTime() || 0));
+    const times = reports.map(r => r.createdAt?.toDate?.()?.getTime()).filter(Boolean).sort((a,b)=>a-b);
+    return {
+      key,
+      reports: sorted,
+      count: reports.length,
+      incidents: reports.filter(r => ['Incident','Intervention','Anomalie'].includes(r.category)).length,
+      critical: reports.filter(r => r.severity === 'Critique').length,
+      important: reports.filter(r => ['Important','Critique'].includes(r.severity)).length,
+      firstAt: times[0] ? new Date(times[0]) : null,
+      lastAt: times[times.length-1] ? new Date(times[times.length-1]) : null,
+      treated: reports.filter(r => r.status === 'treated').length
+    };
+  }).sort((a,b)=>(b.lastAt?.getTime() || 0) - (a.lastAt?.getTime() || 0));
+}
+function renderReportsSummary(rows, groups){
+  const box = document.querySelector('#reports-summary');
+  if (!box) return;
+  const openCritical = rows.filter(r => r.severity === 'Critique' && r.status !== 'treated').length;
+  box.innerHTML = `
+    <div class="mini-kpi"><strong>${groups.length}</strong><span>Missions</span></div>
+    <div class="mini-kpi"><strong>${rows.length}</strong><span>Rapports</span></div>
+    <div class="mini-kpi orange"><strong>${rows.filter(r => ['Incident','Intervention','Anomalie'].includes(r.category)).length}</strong><span>Événements</span></div>
+    <div class="mini-kpi ${openCritical ? 'red' : 'green'}"><strong>${openCritical}</strong><span>Critiques ouverts</span></div>`;
+}
+function renderReportsTable(rows){
+  const filtered = filterReports(rows);
+  const groups = buildMissionGroups(filtered);
+  renderReportsSummary(filtered, groups);
+  const box = document.querySelector('#reports-table');
+  const mode = document.querySelector('#report-view-mode')?.value || 'missions';
+  if (!filtered.length) return box.innerHTML = `<div class="empty">Aucun rapport trouvé.</div>`;
+  if (mode === 'missions') return renderMissionView(box, groups);
+  box.innerHTML = `<table class="table"><thead><tr><th>Mission</th><th>Heure</th><th>Agent</th><th>Site</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Statut</th><th>Action</th></tr></thead><tbody>${filtered.map(r => `<tr><td><span class="mission-badge">${safe(shortMissionId(r))}</span></td><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${safe(r.status || 'new')}</td><td><button class="btn small" data-report-detail="${safe(r.id)}">Détail</button></td></tr>`).join('')}</tbody></table>`;
+  document.querySelectorAll('[data-report-detail]').forEach(btn => btn.addEventListener('click', () => showReportDetail(filtered.find(r=>r.id===btn.dataset.reportDetail))));
+}
+function shortMissionId(r){
+  const key = missionKey(r);
+  return key.length > 10 ? key.slice(0, 8).toUpperCase() : key.toUpperCase();
+}
+function renderMissionView(box, groups){
+  qgReportMissionGroups = groups;
+  box.innerHTML = `<div class="mission-list">${groups.map((g, index) => {
+    const first = g.reports[0] || {};
+    const color = g.critical ? 'red' : g.important ? 'orange' : 'green';
+    const last = g.lastAt ? g.lastAt.toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' }) : '—';
+    const firstAt = g.firstAt ? g.firstAt.toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' }) : '—';
+    return `<div class="mission-card ${color}">
+      <div class="mission-head">
+        <div><div class="mission-title">${safe(missionTitle(g))}</div><div class="mission-meta">Mission ${safe(shortMissionId(first))} · Début ${safe(firstAt)} · Dernier rapport ${safe(last)}</div></div>
+        <span class="pill ${color}">${g.critical ? 'Critique' : g.important ? 'À surveiller' : 'Normal'}</span>
+      </div>
+      <div class="mission-stats"><span>${g.count} rapports</span><span>${g.incidents} événements</span><span>${g.treated}/${g.count} traités</span></div>
+      <div class="mission-last">${safe(g.reports[0]?.category || 'Rapport')} — ${safe(g.reports[0]?.message || '').slice(0,150)}${(g.reports[0]?.message || '').length > 150 ? '…' : ''}</div>
+      <div class="btn-row"><button class="btn small primary" data-mission-detail="${index}">Voir la mission</button><button class="btn small" data-mission-export="${index}">Export CSV</button><button class="btn small" data-mission-print="${index}">PDF</button></div>
+    </div>`;
+  }).join('')}</div>`;
+  document.querySelectorAll('[data-mission-detail]').forEach(btn => btn.addEventListener('click', () => showMissionDetail(Number(btn.dataset.missionDetail))));
+  document.querySelectorAll('[data-mission-export]').forEach(btn => btn.addEventListener('click', () => {
+    const g = qgReportMissionGroups[Number(btn.dataset.missionExport)];
+    if (g) exportCSV(g.reports, `mission-${g.key}.csv`);
+  }));
+  document.querySelectorAll('[data-mission-print]').forEach(btn => btn.addEventListener('click', () => {
+    const g = qgReportMissionGroups[Number(btn.dataset.missionPrint)];
+    if (g) printMissionGroup(g);
+  }));
+}
+function showMissionDetail(index){
+  const g = qgReportMissionGroups[index];
+  if (!g) return;
+  const rows = g.reports.map(r => `<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${safe(r.status || 'new')}</td><td><button class="btn small" data-report-detail-modal="${safe(r.id)}">Détail</button></td></tr>`).join('');
+  showModal('Main courante par mission', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(missionTitle(g))}</div><div class="item-meta">Mission ${safe(g.key)}<br>${g.count} rapports · ${g.incidents} événements · ${g.critical} critique(s)</div></div></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Heure</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Statut</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div><div class="btn-row"><button class="btn primary" id="export-current-mission">Exporter CSV</button><button class="btn" id="print-current-mission">Rapport PDF</button></div>`);
+  document.querySelector('#export-current-mission')?.addEventListener('click', () => exportCSV(g.reports, `mission-${g.key}.csv`));
+  document.querySelector('#print-current-mission')?.addEventListener('click', () => printMissionGroup(g));
+  document.querySelectorAll('[data-report-detail-modal]').forEach(btn => btn.addEventListener('click', () => showReportDetail(g.reports.find(r=>r.id===btn.dataset.reportDetailModal))));
+}
+function showReportDetail(r){
+  showModal('Détail rapport MCI', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(r.category)} · ${safe(r.severity)}</div><div class="item-meta">${safe(r.agentNom)} · ${safe(r.siteNom)} · ${dateText(r.createdAt)}</div><p>${safe(r.message)}</p>${r.photoUrl?`<img src="${safe(r.photoUrl)}" style="border-radius:16px;margin-top:12px">`:''}${r.gps?`<p class="muted">GPS : ${r.gps.lat}, ${r.gps.lng}</p>`:''}</div></div></div><div class="field"><label>Note superviseur</label><textarea class="textarea" id="supervisor-note" placeholder="Ajouter une note...">${safe(r.supervisorNote || '')}</textarea></div><button class="btn primary full" id="mark-treated">Marquer comme traité</button>`);
+  document.querySelector('#mark-treated')?.addEventListener('click', async () => {
+    await updateDoc(docRef('reports', r.id), { status:'treated', supervisorNote:document.querySelector('#supervisor-note').value, treatedBy:currentUser.uid, treatedAt:serverTimestamp() });
+    await addAudit('report_treated', { reportId:r.id });
+    closeModal(); toast('Rapport traité', 'success');
+  });
+}
+
+function renderQGDevice(){
+  currentRoute = 'device';
+  const body = `<section class="card"><div class="card-title"><div><h2>Dispositif opérationnel</h2><p>Liste vivante des agents</p></div></div><div id="device-list" class="list"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Dispositif', 'Agents, statuts et activité terrain', body));
+  const q = query(collectionRef('users'), orderBy('nom'));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()}));
+    const box = document.querySelector('#device-list');
+    box.innerHTML = rows.map(u => `<div class="item"><div class="item-main"><div class="item-title">${safe(u.prenom)} ${safe(u.nom)} <span class="pill ${u.statut==='en_poste'?'green':u.statut==='alerte'?'red':''}">${safe(u.statut || 'actif')}</span></div><div class="item-meta">Rôle : ${safe(u.role)}<br>Site : ${safe(u.siteActuelNom || u.siteActuel || '—')}<br>Dernière activité : ${dateText(u.lastSeen)}<br>Téléphone : ${safe(u.telephone || '—')}</div></div><div class="item-actions">${u.telephone?`<a class="btn small" href="tel:${safe(u.telephone)}">Appeler</a>`:''}</div></div>`).join('') || `<div class="empty">Aucun agent.</div>`;
+  }));
+}
+
+function renderQGAgents(){
+  currentRoute = 'agents';
+  const body = `<section class="card"><div class="card-title"><div><h2>Gestion Agents</h2><p>Profils, rôles et statut</p></div><button class="btn primary small" id="add-agent-profile">Ajouter profil</button></div><div id="agents-table" class="table-wrap"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Gestion Agents', 'Administration opérationnelle des accès', body));
+  document.querySelector('#add-agent-profile').addEventListener('click', () => showAgentForm());
+  const q = query(collectionRef('users'), orderBy('nom'));
+  unsubscribeList.push(onSnapshot(q, snap => renderAgentsTable(snap.docs.map(d=>({id:d.id,...d.data()})))));
+}
+function renderAgentsTable(rows){
+  const box = document.querySelector('#agents-table');
+  if (!rows.length) return box.innerHTML = `<div class="empty">Aucun profil agent.</div>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button></td></tr>`).join('')}</tbody></table>`;
+  document.querySelectorAll('[data-edit-agent]').forEach(btn => btn.addEventListener('click', () => showAgentForm(rows.find(u=>u.id===btn.dataset.editAgent))));
+}
+function showAgentForm(u={}){
+  const isEdit = !!u.id;
+  showModal(isEdit?'Modifier profil':'Créer compte agent', `<form id="agent-form">
+    ${!isEdit ? `<div class="setup-box">Création directe : l’application crée le compte Firebase Auth puis le profil sécurisé dans Firestore. Si le compte existe déjà, colle simplement son UID Firebase Auth.</div>` : ''}
+    <div class="form-grid">
+      <div class="field"><label>UID Firebase Auth ${isEdit?'':'(optionnel si nouveau compte)'}</label><input class="input mono" name="uid" value="${safe(u.id || u.uid || '')}" ${isEdit?'readonly':''} placeholder="Coller l’UID si le compte existe déjà"></div>
+      <div class="field"><label>Email de connexion</label><input class="input" name="email" type="email" value="${safe(u.email || '')}" required></div>
+      ${!isEdit ? `<div class="field"><label>Mot de passe initial</label><input class="input" name="password" type="password" minlength="6" placeholder="Minimum 6 caractères"></div><div class="field"><label>Confirmer mot de passe</label><input class="input" name="passwordConfirm" type="password" minlength="6"></div>` : ''}
+      <div class="field"><label>Prénom</label><input class="input" name="prenom" value="${safe(u.prenom || '')}" required></div>
+      <div class="field"><label>Nom</label><input class="input" name="nom" value="${safe(u.nom || '')}" required></div>
+      <div class="field"><label>Téléphone</label><input class="input" name="telephone" value="${safe(u.telephone || '')}"></div>
+      <div class="field"><label>Matricule</label><input class="input" name="matricule" value="${safe(u.matricule || '')}"></div>
+      <div class="field"><label>Rôle</label><select class="select" name="role"><option ${u.role==='agent'?'selected':''}>agent</option><option ${u.role==='superviseur'?'selected':''}>superviseur</option><option ${u.role==='admin'?'selected':''}>admin</option></select></div>
+      <div class="field"><label>Statut</label><select class="select" name="statut"><option ${u.statut==='actif'?'selected':''}>actif</option><option ${u.statut==='hors_poste'?'selected':''}>hors_poste</option><option ${u.statut==='désactivé'?'selected':''}>désactivé</option></select></div>
+    </div><button class="btn primary full" type="submit">${isEdit?'Enregistrer profil':'Créer compte et profil'}</button></form>`, 'wide');
+  document.querySelector('#agent-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const fd = new FormData(form);
+    let uid = String(fd.get('uid') || '').trim();
+    const email = String(fd.get('email') || '').trim();
+    const password = String(fd.get('password') || '');
+    const passwordConfirm = String(fd.get('passwordConfirm') || '');
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    try {
+      if (!isEdit && !uid) {
+        if (password.length < 6) throw new Error('Mot de passe : minimum 6 caractères.');
+        if (password !== passwordConfirm) throw new Error('Les mots de passe ne correspondent pas.');
+        uid = await createAuthAccountFromAdmin(email, password);
+      }
+      if (!uid) throw new Error('UID Firebase Auth manquant.');
+      await setDoc(docRef('users', uid), {
+        uid, email,
+        prenom:fd.get('prenom'), nom:fd.get('nom'), telephone:fd.get('telephone'), matricule:fd.get('matricule'),
+        role:fd.get('role'), statut:fd.get('statut'),
+        isOnline:u.isOnline ?? false,
+        siteActuel:u.siteActuel ?? null,
+        siteActuelNom:u.siteActuelNom ?? null,
+        updatedAt:serverTimestamp(), updatedBy:currentUser.uid,
+        createdAt:u.createdAt || serverTimestamp(), createdBy:u.createdBy || currentUser.uid
+      }, { merge:true });
+      await addAudit(isEdit?'user_profile_updated':'user_account_created', { uid, role:fd.get('role') });
+      closeModal(); toast(isEdit?'Profil enregistré':'Compte et profil créés', 'success');
+    } catch(error) {
+      console.error(error);
+      toast(userFriendlyError(error, 'Création impossible. Vérifie les droits Firebase et les champs.'), 'error');
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+async function createAuthAccountFromAdmin(email, password){
+  const secondaryApp = initializeApp(firebaseConfig, `admin-create-${Date.now()}-${id()}`);
+  const secondaryAuth = getAuth(secondaryApp);
+  try {
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+    await signOut(secondaryAuth).catch(()=>{});
+    return cred.user.uid;
+  } catch(error) {
+    if (error?.code === 'auth/email-already-in-use') throw new Error('Cet email existe déjà dans Authentication. Colle son UID Firebase Auth dans le champ UID, puis enregistre le profil.');
+    throw error;
+  } finally {
+    await deleteApp(secondaryApp).catch(()=>{});
+  }
+}
+
+function renderQGSites(){
+  currentRoute = 'sites';
+  const body = `<section class="card"><div class="card-title"><div><h2>Gestion Sites</h2><p>Consignes, contacts, points de ronde</p></div><button class="btn primary small" id="add-site">Ajouter site</button></div><div id="sites-table" class="table-wrap"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Gestion Sites', 'Configuration opérationnelle des missions', body));
+  document.querySelector('#add-site').addEventListener('click', () => showSiteForm());
+  const q = query(collectionRef('sites'), orderBy('name'));
+  unsubscribeList.push(onSnapshot(q, snap => renderSitesTable(snap.docs.map(d=>({id:d.id,...d.data()})))));
+}
+function renderSitesTable(rows){
+  const box = document.querySelector('#sites-table');
+  if (!rows.length) return box.innerHTML = `<div class="empty">Aucun site configuré.</div>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Site</th><th>Client</th><th>Adresse</th><th>Contact urgence</th><th>Actif</th><th>Action</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${safe(s.name)}</td><td>${safe(s.clientName || '')}</td><td>${safe(s.address || '')}</td><td>${safe(s.emergencyContact || '')}</td><td>${s.isActive?'Oui':'Non'}</td><td><button class="btn small" data-edit-site="${safe(s.id)}">Modifier</button><button class="btn small" data-points-site="${safe(s.id)}">Points</button></td></tr>`).join('')}</tbody></table>`;
+  document.querySelectorAll('[data-edit-site]').forEach(btn => btn.addEventListener('click', () => showSiteForm(rows.find(s=>s.id===btn.dataset.editSite))));
+  document.querySelectorAll('[data-points-site]').forEach(btn => btn.addEventListener('click', () => showCheckpointsManager(btn.dataset.pointsSite)));
+}
+function showSiteForm(s={}){
+  showModal(s.id?'Modifier site':'Ajouter site', `<form id="site-form"><div class="form-grid">
+    <div class="field"><label>Nom du site</label><input class="input" name="name" value="${safe(s.name || '')}" required></div>
+    <div class="field"><label>Client</label><input class="input" name="clientName" value="${safe(s.clientName || '')}"></div>
+    <div class="field"><label>Adresse</label><input class="input" name="address" value="${safe(s.address || '')}"></div>
+    <div class="field"><label>Contact client</label><input class="input" name="contactName" value="${safe(s.contactName || '')}"></div>
+    <div class="field"><label>Téléphone client</label><input class="input" name="contactPhone" value="${safe(s.contactPhone || '')}"></div>
+    <div class="field"><label>Urgence</label><input class="input" name="emergencyContact" value="${safe(s.emergencyContact || '')}"></div>
+    <div class="field"><label>WhatsApp QG</label><input class="input" name="whatsappQG" value="${safe(s.whatsappQG || DEFAULT_QG_WHATSAPP)}"></div>
+    <div class="field"><label>Actif</label><select class="select" name="isActive"><option value="true" ${s.isActive!==false?'selected':''}>Oui</option><option value="false" ${s.isActive===false?'selected':''}>Non</option></select></div>
+  </div><div class="field"><label>Consignes principales</label><textarea class="textarea" name="instructions">${safe(s.instructions || '')}</textarea></div><button class="btn primary full" type="submit">Enregistrer site</button></form>`, 'wide');
+  document.querySelector('#site-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const fd = new FormData(form);
+    const siteId = s.id || `site_${Date.now()}`;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    try {
+      await setDoc(docRef('sites', siteId), {
+        siteId,
+        name:fd.get('name'), clientName:fd.get('clientName'), address:fd.get('address'),
+        contactName:fd.get('contactName'), contactPhone:fd.get('contactPhone'), emergencyContact:fd.get('emergencyContact'),
+        whatsappQG:fd.get('whatsappQG'), instructions:fd.get('instructions'), isActive:fd.get('isActive')==='true',
+        updatedAt:serverTimestamp(), updatedBy:currentUser.uid,
+        createdAt:s.createdAt || serverTimestamp(), createdBy:s.createdBy || currentUser.uid
+      }, { merge:true });
+      await addAudit('site_saved', { siteId });
+      closeModal(); toast('Site enregistré', 'success');
+    } catch(error) {
+      console.error(error);
+      toast(userFriendlyError(error, 'Site impossible à enregistrer. Vérifie ton rôle admin et les règles Firestore.'), 'error');
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+}
+async function showCheckpointsManager(siteId){
+  showModal('Points de ronde', `<div class="card compact"><form id="checkpoint-form"><div class="form-grid"><div class="field"><label>Nom point</label><input class="input" name="name" required></div><div class="field"><label>Zone</label><input class="input" name="zone"></div><div class="field"><label>Ordre</label><input class="input" name="order" type="number" value="1"></div><div class="field"><label>QR code</label><input class="input mono" name="qrCode" value="QR-${Date.now()}"></div></div><div class="field"><label>Description</label><input class="input" name="description"></div><button class="btn primary full" type="submit">Ajouter point</button></form></div><div class="divider"></div><div id="checkpoint-list" class="list"><div class="empty">Chargement...</div></div>`, 'wide');
+  const renderList = async () => {
+    const snap = await getDocs(query(collectionRef('roundCheckpoints'), where('siteId','==',siteId))).catch(()=>({docs:[]}));
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.order||0)-(b.order||0));
+    document.querySelector('#checkpoint-list').innerHTML = rows.length ? rows.map(p=>`<div class="item"><div class="item-main"><div class="item-title">${safe(p.name)}</div><div class="item-meta">Zone : ${safe(p.zone||'—')} · Ordre : ${safe(p.order||'—')}<br>QR : <span class="mono">${safe(p.qrCode||p.id)}</span></div></div><div class="item-actions"><button class="btn small" data-print-qr="${safe(p.qrCode||p.id)}">Imprimer QR</button></div></div>`).join('') : `<div class="empty">Aucun point.</div>`;
+    document.querySelectorAll('[data-print-qr]').forEach(btn => btn.addEventListener('click', () => printQRCode(btn.dataset.printQr)));
+  };
+  document.querySelector('#checkpoint-form').addEventListener('submit', async e => {
+    e.preventDefault(); const fd = new FormData(e.currentTarget);
+    await addDoc(collectionRef('roundCheckpoints'), { siteId, name:fd.get('name'), zone:fd.get('zone'), order:Number(fd.get('order')||0), qrCode:fd.get('qrCode'), description:fd.get('description'), isActive:true, createdAt:serverTimestamp(), createdBy:currentUser.uid });
+    await addAudit('checkpoint_created', { siteId }); e.currentTarget.reset(); toast('Point créé', 'success'); renderList();
+  });
+  renderList();
+}
+function printQRCode(code){
+  const url = `https://api.qrserver.com/v1/create-qr-code/?size=360x360&data=${encodeURIComponent(code)}`;
+  const w = window.open('', '_blank');
+  w.document.write(`<title>QR Point de ronde</title><body style="font-family:Arial;text-align:center;padding:40px"><h1>Point de ronde</h1><img src="${url}"><p>${safe(code)}</p><script>setTimeout(()=>print(),600)<\/script></body>`);
+}
+
+function renderQGAlerts(){
+  currentRoute = 'alerts';
+  const body = `<section class="card"><div class="card-title"><div><h2>Alertes SOS/PTI</h2><p>Prise en charge et clôture tracée</p></div></div><div id="alerts-list" class="list"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Alertes critiques', 'Traitement prioritaire des urgences terrain', body));
+  const q = query(collectionRef('alerts'), orderBy('createdAt','desc'), limit(100));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    const box = document.querySelector('#alerts-list');
+    box.innerHTML = snap.empty ? `<div class="empty">Aucune alerte.</div>` : snap.docs.map(d=>alertItem({id:d.id,...d.data()})).join('');
+    bindAlertActions();
+  }));
+}
+function bindAlertActions(){
+  document.querySelectorAll('[data-take-alert]').forEach(btn => btn.addEventListener('click', async () => {
+    await updateDoc(docRef('alerts', btn.dataset.takeAlert), { statut:'taken', takenAt:serverTimestamp(), takenBy:currentUser.uid });
+    await addAudit('alert_taken', { alertId:btn.dataset.takeAlert }); toast('Alerte prise en charge', 'success');
+  }));
+  document.querySelectorAll('[data-close-alert]').forEach(btn => btn.addEventListener('click', () => closeAlertFlow(btn.dataset.closeAlert)));
+}
+function closeAlertFlow(alertId){
+  const reason = prompt('Justification obligatoire de clôture :');
+  if (!reason || reason.trim().length < 5) return toast('Justification trop courte.', 'warning');
+  updateDoc(docRef('alerts', alertId), { statut:'closed', closedAt:serverTimestamp(), closedBy:currentUser.uid, closeReason:reason.trim() })
+    .then(()=>addAudit('alert_closed', { alertId, reason:reason.trim() }))
+    .then(()=>toast('Alerte clôturée avec trace', 'success'))
+    .catch(()=>toast('Erreur clôture alerte', 'error'));
+}
+
+function renderQGFlash(){
+  currentRoute = 'flash';
+  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div></div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target"><option value="all">Tous les agents</option><option value="working">Agents en poste</option></select></div></div><button class="btn primary full" type="submit">Envoyer en temps réel</button></form></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
+  render(page('Messages Flash QG', 'Communication descendante immédiate', body));
+  document.querySelector('#flash-form').addEventListener('submit', async e => {
+    e.preventDefault(); const fd = new FormData(e.currentTarget);
+    await addDoc(collectionRef('flashMessages'), { title:fd.get('title'), message:fd.get('message'), priority:fd.get('priority'), target:fd.get('target'), sentBy:currentUser.uid, sentAt:serverTimestamp(), readBy:{}, status:'sent' });
+    await addAudit('flash_sent', { priority:fd.get('priority'), target:fd.get('target') }); e.currentTarget.reset(); toast('Message Flash envoyé', 'success');
+  });
+  const q = query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(30));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    const box = document.querySelector('#flash-history');
+    box.innerHTML = snap.empty ? `<div class="empty">Aucun Flash envoyé.</div>` : snap.docs.map(d=>{ const f={id:d.id,...d.data()}; return `<div class="item"><div class="item-main"><div class="item-title">${safe(f.title)} <span class="pill ${f.priority==='Critique'?'red':f.priority==='Urgent'?'orange':'blue'}">${safe(f.priority)}</span></div><div class="item-meta">${dateText(f.sentAt)} · Cible ${safe(f.target)}<br>${safe(f.message)}<br>Lectures : ${Object.keys(f.readBy || {}).length}</div></div></div>`}).join('');
+  }));
+}
+
+function renderQGHistory(){
+  currentRoute = 'history';
+  const body = `<section class="grid cols-3"><button class="card stat blue" id="export-reports-all"><div class="stat-label">Exporter</div><div class="stat-value">MCI</div></button><button class="card stat orange" id="export-rounds-all"><div class="stat-label">Exporter</div><div class="stat-value">Rondes</div></button><button class="card stat red" id="export-alerts-all"><div class="stat-label">Exporter</div><div class="stat-value">SOS</div></button></section><section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Audit logs</h2><p>Actions sensibles tracées</p></div></div><div id="audit-list" class="timeline"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Historique / Exports', 'Traçabilité et extractions professionnelles', body));
+  document.querySelector('#export-reports-all').onclick = () => exportCollection('reports','reports.csv');
+  document.querySelector('#export-rounds-all').onclick = () => exportCollection('rounds','rounds.csv');
+  document.querySelector('#export-alerts-all').onclick = () => exportCollection('alerts','alerts.csv');
+  const q = query(collectionRef('auditLogs'), orderBy('createdAt','desc'), limit(50));
+  unsubscribeList.push(onSnapshot(q, snap => document.querySelector('#audit-list').innerHTML = snap.empty ? `<div class="empty">Aucun audit log.</div>` : snap.docs.map(d=>{const a=d.data(); return `<div class="timeline-entry"><div class="item-title">${safe(a.action)}</div><div class="item-meta">${dateText(a.createdAt)} · ${safe(a.userId)}</div><div>${safe(JSON.stringify(a.details || {}))}</div></div>`}).join('')));
+}
+async function exportCollection(name, filename){
+  const snap = await getDocs(query(collectionRef(name), limit(500)));
+  exportCSV(snap.docs.map(d=>({id:d.id,...d.data()})), filename);
+  await addAudit('export_data', { collection:name });
+}
+async function exportCSV(rows, filename){
+  if (!rows.length) return toast('Aucune donnée à exporter.', 'warning');
+  const safeFilename = filename || `export-${Date.now()}.csv`;
+  const { csv, preview, textReport } = buildExportPayload(rows, safeFilename);
+  const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  showModal('Export MCI sécurisé', `<div class="download-panel export-safe-panel">
+    <p class="muted">Le téléchargement direct peut être bloqué sur iPhone/PWA. Cette version propose plusieurs sorties fiables : téléchargement, partage, impression PDF et copie.</p>
+    <div class="grid cols-2 export-actions">
+      <a class="btn primary full" href="${safe(url)}" download="${safe(safeFilename)}" target="_blank" rel="noopener">Télécharger CSV</a>
+      <button class="btn full" id="share-export-file">Partager fichier</button>
+      <button class="btn full" id="print-export-report">Imprimer / PDF</button>
+      <button class="btn full" id="copy-export-csv">Copier CSV</button>
+      <button class="btn full" id="copy-export-text">Copier rapport texte</button>
+      <button class="btn ghost full" id="open-export-page">Ouvrir page d’export</button>
+    </div>
+    <div class="divider"></div>
+    <div class="field"><label>Aperçu export</label><textarea class="textarea mono" id="export-preview" readonly rows="10">${safe(preview)}</textarea></div>
+    <p class="muted">Méthode la plus stable sur iPhone : Imprimer / PDF → Partager → Enregistrer dans Fichiers. Sinon : Copier CSV.</p>
+  </div>`, 'wide');
+  document.querySelector('#copy-export-csv')?.addEventListener('click', () => copyText(csv.replace(/^﻿/, ''), 'CSV copié.'));
+  document.querySelector('#copy-export-text')?.addEventListener('click', () => copyText(textReport, 'Rapport texte copié.'));
+  document.querySelector('#print-export-report')?.addEventListener('click', () => printRowsReport(rows, safeFilename));
+  document.querySelector('#open-export-page')?.addEventListener('click', () => openExportPage(rows, safeFilename));
+  document.querySelector('#share-export-file')?.addEventListener('click', async () => {
+    try {
+      if (!navigator.canShare || !navigator.share) throw new Error('Partage non supporté');
+      const file = new File([blob], safeFilename, { type:'text/csv' });
+      if (!navigator.canShare({ files:[file] })) throw new Error('Partage fichier non supporté');
+      await navigator.share({ files:[file], title:safeFilename, text:'Export Sentinelle Pro' });
+      toast('Export partagé.', 'success');
+    } catch(error) {
+      toast('Partage indisponible. Utilise Copier CSV ou Imprimer/PDF.', 'warning');
+    }
+  });
+  setTimeout(() => URL.revokeObjectURL(url), 180000);
+}
+function buildExportPayload(rows, filename){
+  const flat = rows.map(row => Object.fromEntries(Object.entries(row).map(([k,v]) => [k, v?.toDate ? v.toDate().toISOString() : typeof v === 'object' ? JSON.stringify(v) : v])));
+  const headers = [...new Set(flat.flatMap(r=>Object.keys(r)))];
+  const csv = '﻿' + [headers.join(';'), ...flat.map(r => headers.map(h => `"${String(r[h] ?? '').replace(/"/g,'""')}"`).join(';'))].join('\n');
+  const preview = csv.replace(/^﻿/, '').split('\n').slice(0, 14).join('\n');
+  const textReport = [`Sentinelle Pro — ${filename}`, `Export généré le ${new Date().toLocaleString('fr-FR')}`, `Lignes : ${rows.length}`, ''].concat(rows.map((r, i) => {
+    const when = dateText(r.createdAt || r.scannedAt || r.heure || r.sentAt || r.scheduledStart);
+    return `${i+1}. ${when} — ${r.siteNom || r.siteName || r.siteId || 'Site'} — ${r.agentNom || r.agentId || 'Agent'} — ${r.category || r.type || r.status || 'Événement'} — ${r.severity || ''}\n${r.message || r.instructions || ''}`;
+  })).join('\n\n');
+  return { csv, preview, textReport };
+}
+async function copyText(text, successMessage){
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(successMessage || 'Copié.', 'success');
+  } catch(error) {
+    const textarea = document.querySelector('#export-preview');
+    textarea?.focus(); textarea?.select();
+    toast('Copie automatique bloquée. Sélectionne le texte puis copie.', 'warning');
+  }
+}
+function openExportPage(rows, filename){
+  const html = exportReportHtml(rows, filename, false);
+  const blob = new Blob([html], { type:'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const opened = window.open(url, '_blank', 'noopener');
+  if (!opened) toast('Ouverture bloquée. Utilise Imprimer/PDF ou Copier CSV.', 'warning');
+  setTimeout(() => URL.revokeObjectURL(url), 180000);
+}
+function printRowsReport(rows, filename){
+  document.querySelector('#print-root')?.remove();
+  const root = document.createElement('div');
+  root.id = 'print-root';
+  root.className = 'print-root';
+  root.innerHTML = exportReportHtml(rows, filename, true);
+  document.body.appendChild(root);
+  toast('Rapport prêt. Dans l’écran d’impression, choisis “Enregistrer en PDF”.', 'success');
+  window.addEventListener('afterprint', () => setTimeout(()=>root.remove(), 500), { once:true });
+  setTimeout(() => window.print(), 250);
+  setTimeout(() => root.remove(), 20000);
+}
+function exportReportHtml(rows, filename, innerOnly=false){
+  const logo = new URL('./assets/logo.png', location.href).href;
+  const flat = rows.map(row => Object.fromEntries(Object.entries(row).map(([k,v]) => [k, v?.toDate ? dateText(v) : typeof v === 'object' ? JSON.stringify(v) : v])));
+  const preferred = ['createdAt','scheduledStart','agentNom','siteNom','category','severity','message','status'];
+  const all = [...new Set(flat.flatMap(r=>Object.keys(r)))];
+  const headers = [...preferred.filter(h=>all.includes(h)), ...all.filter(h=>!preferred.includes(h)).slice(0,8)];
+  const table = `<table><thead><tr>${headers.map(h=>`<th>${safe(h)}</th>`).join('')}</tr></thead><tbody>${flat.map(r=>`<tr>${headers.map(h=>`<td>${safe(r[h] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  const doc = `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>Export opérationnel Sentinelle Pro</h1><p>${safe(filename)} · généré le ${new Date().toLocaleString('fr-FR')}</p></div></header><section class="report-grid"><div><strong>${rows.length}</strong><span>Lignes exportées</span></div><div><strong>${new Date().toLocaleDateString('fr-FR')}</strong><span>Date</span></div><div><strong>CSV/PDF</strong><span>Format</span></div><div><strong>QG</strong><span>Origine</span></div></section><section>${table}</section><footer>Document généré automatiquement par Sentinelle Pro.</footer></article>`;
+  if (innerOnly) return doc;
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${safe(filename)}</title><style>body{font-family:Montserrat,Arial,sans-serif;margin:0;background:#f4f8fb;color:#050A13}.report-doc{max-width:1100px;margin:24px auto;background:white;padding:32px;border-radius:18px}.report-doc header{display:flex;gap:18px;align-items:center;border-bottom:1px solid #dbe3ee;padding-bottom:18px}.report-doc img{width:74px;height:74px;object-fit:contain}.report-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}.report-grid div{background:#f4f8fb;border-radius:14px;padding:14px}.report-grid strong{display:block;font-size:22px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #e5edf6;padding:8px;text-align:left;vertical-align:top}button{position:fixed;right:18px;bottom:18px;padding:12px 16px;border:0;border-radius:999px;background:#009cff;color:white;font-weight:700}@media print{button{display:none}.report-doc{margin:0;box-shadow:none}}</style></head><body>${doc}<button onclick="window.print()">Imprimer / PDF</button></body></html>`;
+}
+
+// -------------------- PUSH NOTIFICATIONS --------------------
+async function registerPushNotifications(){
+  try {
+    if (!('Notification' in window)) return toast('Notifications non supportées sur cet appareil.', 'warning');
+    if (!('serviceWorker' in navigator)) return toast('Service worker indisponible : notifications impossibles.', 'warning');
+    if (!firebaseConfig.vapidKey || String(firebaseConfig.vapidKey).includes('REMPLACE_MOI')) {
+      return showModal('Notifications à configurer', `<div class="setup-box">Pour recevoir les Flash même écran verrouillé, ajoute la clé Web Push VAPID dans <strong>firebase-config.js</strong> puis installe l’app sur l’écran d’accueil.</div><p class="muted">Firebase Console → Project settings → Cloud Messaging → Web Push certificates → Generate key pair.</p>`);
+    }
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') return toast('Autorisation notifications refusée.', 'warning');
+    const reg = await navigator.serviceWorker.ready;
+    const mod = await import('https://www.gstatic.com/firebasejs/10.12.5/firebase-messaging.js');
+    const messaging = mod.getMessaging(fbApp);
+    const token = await mod.getToken(messaging, { vapidKey: firebaseConfig.vapidKey, serviceWorkerRegistration: reg });
+    if (!token) throw new Error('Token push non généré. Vérifie le domaine HTTPS et la clé VAPID.');
+    const tokenId = `${currentUser.uid}_${token.slice(-24).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+    await setDoc(docRef('pushTokens', tokenId), {
+      token,
+      userId:currentUser.uid,
+      userNom:`${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
+      role:currentProfile.role,
+      siteActuel:currentProfile.siteActuel || null,
+      siteActuelNom:currentProfile.siteActuelNom || null,
+      userAgent:navigator.userAgent,
+      platform:navigator.platform || '',
+      enabled:true,
+      createdAt:serverTimestamp(),
+      updatedAt:serverTimestamp()
+    }, { merge:true });
+    mod.onMessage(messaging, payload => {
+      const title = payload?.notification?.title || payload?.data?.title || 'Message Flash';
+      const body = payload?.notification?.body || payload?.data?.message || 'Nouveau message du QG';
+      toast(`${title} — ${body}`, 'warning');
+    });
+    await addAudit('push_enabled', { tokenId });
+    toast('Notifications activées pour cet appareil.', 'success');
+  } catch(error) {
+    console.error(error);
+    toast(userFriendlyError(error, 'Activation notifications impossible.'), 'error');
+  }
+}
+
+// -------------------- FLASH / SOS / UTILS --------------------
+function flashTargetsMe(f){
+  if (!currentProfile || rolePortal(currentProfile.role) !== 'agent') return false;
+  if (f.target === 'all') return true;
+  if (f.target === 'working') return currentProfile.statut === 'en_poste';
+  if (f.target === `agent:${currentUser.uid}`) return true;
+  if (currentProfile.siteActuel && f.target === `site:${currentProfile.siteActuel}`) return true;
+  return false;
+}
+function startFlashListener(){
+  if (!currentUser || rolePortal(currentProfile.role) !== 'agent') return;
+  const q = query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(5));
+  latestFlashUnsub = onSnapshot(q, snap => {
+    snap.docs.map(d => ({id:d.id,...d.data()})).filter(flashTargetsMe).forEach(f => {
+      if (!f.readBy?.[currentUser.uid] && !document.querySelector(`[data-flash-overlay="${CSS.escape(f.id)}"]`)) showFlashOverlay(f);
+    });
+  });
+}
+function showFlashOverlay(f){
+  const div = document.createElement('div');
+  div.className = 'flash-overlay';
+  div.dataset.flashOverlay = f.id;
+  div.innerHTML = `<div class="flash-card ${f.priority === 'Critique' ? 'critique':''}"><div class="flash-priority">${safe(f.priority || 'Information')}</div><h2>${safe(f.title)}</h2><p>${safe(f.message)}</p><button class="btn primary full" data-confirm-flash="${safe(f.id)}">Confirmer lecture</button></div>`;
+  document.body.appendChild(div);
+  div.querySelector('[data-confirm-flash]').addEventListener('click', async () => { await markFlashRead(f.id); div.remove(); });
+  if (navigator.vibrate) navigator.vibrate([120,80,120]);
+}
+async function markFlashRead(flashId){
+  const field = `readBy.${currentUser.uid}`;
+  await updateDoc(docRef('flashMessages', flashId), { [field]: { readAt: Timestamp.now(), agentNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() } });
+  await addAudit('flash_read', { flashId });
+  toast('Lecture confirmée', 'success');
+}
+
+function bindSos(){
+  const btn = document.querySelector('#sos-btn');
+  const help = document.querySelector('#sos-help');
+  if (!btn) return;
+  const start = e => {
+    e.preventDefault();
+    if (sosArming) return;
+    sosArming = true;
+    btn.classList.add('arming');
+    help?.classList.remove('hidden');
+    if (navigator.vibrate) navigator.vibrate(70);
+    sosTimer = setTimeout(triggerSOS, 3000);
+  };
+  const stop = () => {
+    if (!sosArming) return;
+    clearTimeout(sosTimer);
+    sosTimer = null;
+    sosArming = false;
+    btn.classList.remove('arming');
+    help?.classList.add('hidden');
+  };
+  btn.addEventListener('pointerdown', start);
+  btn.addEventListener('pointerup', stop);
+  btn.addEventListener('pointerleave', stop);
+  btn.addEventListener('pointercancel', stop);
+}
+async function triggerSOS(){
+  sosArming = false;
+  document.querySelector('#sos-btn')?.classList.remove('arming');
+  document.querySelector('#sos-help')?.classList.add('hidden');
+  if (!isOnline()) {
+    alert('Réseau indisponible — appelez directement le QG ou les secours. L’alerte SOS n’a pas été transmise.');
+    return;
+  }
+  const confirmSend = confirm('Déclencher une alerte SOS/PTI au QG ?');
+  if (!confirmSend) return;
+  try {
+    const shift = await findActiveShift();
+    const gps = await getGPS();
+    const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
+    const alertDoc = await addDoc(collectionRef('alerts'), {
+      agentId: currentUser.uid, agentNom, siteActuel: shift?.siteId || currentProfile.siteActuel || null, siteActuelNom: shift?.siteNom || currentProfile.siteActuelNom || null,
+      positionGPS: gps, heure: serverTimestamp(), typeAlerte:'SOS/PTI', statut:'active', message:'Alerte PTI déclenchée par l’agent', niveau:'critique', createdAt:serverTimestamp(), createdBy:currentUser.uid
+    });
+    await updateDoc(docRef('users', currentUser.uid), { statut:'alerte', lastSeen:serverTimestamp() }).catch(()=>{});
+    await addAudit('sos_triggered', { alertId: alertDoc.id, siteId: shift?.siteId || null });
+    if (navigator.vibrate) navigator.vibrate([200,80,200,80,200]);
+    showSOSSent(alertDoc.id);
+  } catch(error){
+    console.error(error);
+    alert('L’alerte SOS n’a pas pu être transmise. Appelez directement le QG ou les secours.');
+  }
+}
+function showSOSSent(alertId){
+  showModal('Alerte envoyée au QG', `<div class="setup-box danger-copy">QG notifié. Restez en sécurité.</div><div class="grid cols-2"><a class="btn danger full" href="tel:112">Appeler secours 112</a><button class="btn full" id="false-alert">Fausse alerte</button></div><p class="muted" style="font-size:12px;margin-top:14px">La fausse alerte est tracée et ne supprime pas silencieusement l’historique.</p>`);
+  document.querySelector('#false-alert')?.addEventListener('click', async () => {
+    const reason = prompt('Confirme la fausse alerte avec une justification :');
+    if (!reason || reason.trim().length < 5) return toast('Justification trop courte.', 'warning');
+    await updateDoc(docRef('alerts', alertId), { statut:'false_alert_requested', falseAlertReason:reason.trim(), falseAlertAt:serverTimestamp(), falseAlertBy:currentUser.uid });
+    await addAudit('sos_false_alert_requested', { alertId, reason:reason.trim() });
+    toast('Fausse alerte signalée au QG', 'warning'); closeModal();
+  });
+}
+
+function userFriendlyError(error, fallback){
+  const msg = String(error?.message || '');
+  const code = String(error?.code || '');
+  if (msg && !msg.includes('FirebaseError')) return msg;
+  if (code.includes('permission-denied')) return 'Permission refusée par Firebase. Vérifie que ton profil Firestore a bien role: "admin" et que les règles V4.1 sont publiées.';
+  if (code.includes('auth/weak-password')) return 'Mot de passe trop faible : minimum 6 caractères.';
+  if (code.includes('auth/invalid-email')) return 'Email invalide.';
+  if (code.includes('auth/email-already-in-use')) return 'Cet email existe déjà dans Authentication. Colle son UID dans le formulaire puis enregistre le profil.';
+  return fallback;
+}
+
+async function addAudit(action, details={}){
+  if (!db || !currentUser) return;
+  try {
+    await addDoc(collectionRef('auditLogs'), { action, details, userId: currentUser.uid, userRole: currentProfile?.role || null, createdAt: serverTimestamp(), userAgent:navigator.userAgent });
+  } catch(e) { console.warn('audit failed', e); }
+}
+function showModal(title, body, size=''){
+  closeModal();
+  const div = document.createElement('div');
+  div.className = 'modal-backdrop';
+  div.id = 'modal-root';
+  div.innerHTML = `<div class="modal ${size === 'wide' ? 'wide':''}"><div class="modal-head"><h2>${safe(title)}</h2><button class="btn small ghost" id="modal-close">Fermer</button></div>${body}</div>`;
+  document.body.appendChild(div);
+  document.querySelector('#modal-close').addEventListener('click', closeModal);
+  div.addEventListener('click', e => { if (e.target === div) closeModal(); });
+}
+function closeModal(){ document.querySelector('#modal-root')?.remove(); }
+
+window.addEventListener('beforeunload', () => {
+  if (currentUser && db) updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen:serverTimestamp() }).catch(()=>{});
+});
