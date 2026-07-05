@@ -15,3 +15,9 @@ export const firebaseConfig = {
 
 // Optionnel : mets le numéro QG par défaut au format international sans espace.
 export const DEFAULT_QG_WHATSAPP = "+33600000000";
+
+export const pushConfig = {
+  pushProvider: "onesignal",
+  oneSignalAppId: "TON_APP_ID_ONESIGNAL",
+  pushWorkerUrl: "https://ton-worker.ton-compte.workers.dev"
+};
