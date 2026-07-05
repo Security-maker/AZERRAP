@@ -19,5 +19,5 @@ export const DEFAULT_QG_WHATSAPP = "+33600000000";
 export const pushConfig = {
   pushProvider: "onesignal",
   oneSignalAppId: "227f2a95-c6d1-464c-bfae-cdea09247cbe",
-  pushWorkerUrl: "https://ton-worker.ton-compte.workers.dev"
+  pushWorkerUrl: "https://sp-push.nacerito83.workers.dev/"
 };
