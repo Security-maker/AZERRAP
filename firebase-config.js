@@ -20,7 +20,7 @@ export const pushConfig = {
   pushProvider: "onesignal",
   oneSignalAppId: "227f2a95-c6d1-464c-bfae-cdea09247cbe",
   pushWorkerUrl: "https://sp-push.nacerito83.workers.dev/",
-  securityIntelWorkerUrl: "https://sp-intel.nacerito83.workers.dev/"
+  securityIntelWorkerUrl: "https://sp-intel.nacerito83.workers.dev"
 };
 
 
