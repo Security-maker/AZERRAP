@@ -1,0 +1,121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function userDoc(uid) { return get(/databases/$(database)/documents/users/$(uid)).data; }
+    function role() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? userDoc(request.auth.uid).role : null; }
+    function isAdmin() { return role() in ['admin', 'superviseur']; }
+    function isStrictAdmin() { return role() == 'admin'; }
+    function isAgent() { return role() == 'agent'; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow create: if isAdmin();
+      allow delete: if isStrictAdmin();
+      allow update: if isAdmin() || (isSelf(uid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeen','isOnline','statut','siteActuel','siteActuelNom']));
+    }
+
+    match /sites/{siteId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if isStrictAdmin();
+    }
+
+    match /documents/{documentId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if isStrictAdmin();
+    }
+
+    match /generatedDocuments/{documentId} {
+      allow read, create, update: if isAdmin();
+      allow delete: if isStrictAdmin();
+    }
+
+    match /missions/{missionId} {
+      allow read: if isAdmin() || (isAgent() && resource.data.agentId == request.auth.uid);
+      allow create: if isAdmin();
+      allow delete: if isStrictAdmin();
+      allow update: if isAdmin() || (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.agentId == resource.data.agentId);
+    }
+
+    match /shifts/{shiftId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid) || (isAgent() && resource.data.status == 'completed' && resource.data.siteId == userDoc(request.auth.uid).siteActuel);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;
+      allow update: if isAdmin() || (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.agentId == resource.data.agentId);
+      allow delete: if isStrictAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid && request.resource.data.isLocked == true;
+      allow update: if isAdmin();
+      allow delete: if isStrictAdmin();
+    }
+
+    match /alerts/{alertId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid && request.resource.data.niveau == 'critique';
+      allow update: if isAdmin() || (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['statut','falseAlertReason','falseAlertAt','falseAlertBy']));
+      allow delete: if isStrictAdmin();
+    }
+
+    match /rounds/{roundId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;
+      allow update: if isAdmin() || (isAgent() && resource.data.agentId == request.auth.uid);
+      allow delete: if isStrictAdmin();
+    }
+
+    match /roundCheckpoints/{checkpointId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if isStrictAdmin();
+    }
+
+    match /roundCheckpointsLogs/{logId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;
+      allow update: if false;
+      allow delete: if isStrictAdmin();
+    }
+
+    match /flashMessages/{flashId} {
+      allow read: if signedIn();
+      allow create: if isAdmin();
+      allow delete: if isStrictAdmin();
+      allow update: if isAdmin() || (isAgent() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']));
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /pushTokens/{tokenId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow delete: if isStrictAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /securityIntelLogs/{logId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.requestedBy == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.requestedBy == request.auth.uid;
+      allow update: if false;
+      allow delete: if isStrictAdmin();
+    }
+
+    match /settings/{settingId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if isStrictAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

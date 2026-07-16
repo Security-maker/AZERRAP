@@ -23,7 +23,9 @@ import {
   onSnapshot,
   serverTimestamp,
   Timestamp,
-  runTransaction
+  runTransaction,
+  deleteDoc,
+  writeBatch
 } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
 
 const $app = document.querySelector('#app');
@@ -40,6 +42,11 @@ let unsubscribeList = [];
 let latestFlashUnsub = null;
 let mapInstance = null;
 let mapMarkers = [];
+let mapSiteLayer = null;
+let mapAgentLayer = null;
+let mapBoundsCache = [];
+let mapSitePoints = [];
+let mapAgentPoints = [];
 let sosTimer = null;
 let sosArming = false;
 let activeShiftCache = null;
@@ -100,13 +107,17 @@ function page(title, subtitle, body, options={}){
   const gpsPill = portal === 'agent' ? `<span class="pill ${currentProfile?.statut === 'en_poste' ? 'green' : ''}">${currentProfile?.statut === 'en_poste' ? 'GPS actif pendant le service' : 'GPS inactif hors poste'}</span>` : '';
   return `
     <div class="layout ${portal}">
-      <aside class="sidebar">
-        <div class="brand">
-          <img src="assets/logo.png" alt="Sentinelle Pro">
-          <div><div class="brand-name">Sentinelle Pro</div><div class="brand-kicker">Centre opérationnel</div></div>
+      <div class="drawer-backdrop" id="drawer-backdrop" data-action="close-menu"></div>
+      <aside class="nav-drawer" id="nav-drawer" aria-hidden="true">
+        <div class="drawer-head">
+          <div class="brand drawer-brand">
+            <img src="assets/logo.png" alt="Sentinelle Pro">
+            <div><div class="brand-name">Sentinelle Pro</div><div class="brand-kicker">Centre opérationnel</div></div>
+          </div>
+          <button class="icon-btn" data-action="close-menu" aria-label="Fermer le menu">×</button>
         </div>
-        <nav class="nav">${nav}</nav>
-        <div class="side-footer">
+        <nav class="nav drawer-nav">${nav}</nav>
+        <div class="side-footer drawer-footer">
           <div><strong>${safe(profileName || 'Utilisateur')}</strong></div>
           <div>${safe(currentProfile?.role || '')}</div>
           <div class="divider"></div>
@@ -114,22 +125,20 @@ function page(title, subtitle, body, options={}){
         </div>
       </aside>
       <main class="main">
-        <div class="mobile-brand">
-          <img src="assets/logo.png" alt="Azzera">
-          <div><strong>AZZERA</strong><span>Sentinelle Pro</span></div>
-        </div>
         <div class="topbar">
-          <div class="page-title"><h1>${safe(title)}</h1><p>${safe(subtitle || '')}</p></div>
+          <div class="topbar-leading">
+            <button class="menu-toggle" data-action="toggle-menu" aria-label="Ouvrir le menu"><span></span><span></span><span></span></button>
+            <img src="assets/logo.png" alt="Sentinelle Pro" class="topbar-logo">
+            <div class="page-title"><h1>${safe(title)}</h1><p>${safe(subtitle || '')}</p></div>
+          </div>
           <div class="top-actions">
             ${gpsPill}
             <span class="pill ${navigator.onLine ? 'green':'red'}">${navigator.onLine ? 'En ligne':'Hors ligne'}</span>
             <span class="pill blue" id="clock-pill">${nowText()}</span>
-            <button class="btn ghost small" data-action="logout">Quitter</button>
           </div>
         </div>
         ${body}
       </main>
-      <nav class="mobile-tabbar">${nav}</nav>
       ${portal === 'agent' ? sosButton() : ''}
     </div>
   `;
@@ -145,7 +154,7 @@ function agentNav(){
 }
 function qgNav(){
   return [
-    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▣','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('history','⇩','Exports')
+    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents'), navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('history','⇩','Exports')
   ].join('');
 }
 function sosButton(){
@@ -202,11 +211,26 @@ function render(html){
 }
 
 function bindGlobalEvents(){
-  document.querySelectorAll('[data-route]').forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.route)));
+  const layout = document.querySelector('.layout');
+  const openMenu = () => {
+    layout?.classList.add('drawer-open');
+    document.querySelector('#nav-drawer')?.setAttribute('aria-hidden','false');
+    document.body.classList.add('menu-open');
+  };
+  const closeMenu = () => {
+    layout?.classList.remove('drawer-open');
+    document.querySelector('#nav-drawer')?.setAttribute('aria-hidden','true');
+    document.body.classList.remove('menu-open');
+  };
+  document.querySelectorAll('[data-action="toggle-menu"]').forEach(btn => btn.addEventListener('click', openMenu));
+  document.querySelectorAll('[data-action="close-menu"]').forEach(btn => btn.addEventListener('click', closeMenu));
+  document.querySelectorAll('[data-route]').forEach(btn => btn.addEventListener('click', () => { closeMenu(); navigate(btn.dataset.route); }));
   document.querySelectorAll('[data-action="logout"]').forEach(btn => btn.addEventListener('click', async () => {
+    closeMenu();
     if (currentUser) await updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen: serverTimestamp() }).catch(()=>{});
     await signOut(auth);
   }));
+  document.onkeydown = e => { if (e.key === 'Escape') closeMenu(); };
   bindSos();
 }
 
@@ -217,7 +241,7 @@ function navigate(route){
   if (portal === 'agent') {
     ({ home:renderAgentHome, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, intel:renderAgentIntel }[route] || renderAgentHome)();
   } else {
-    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, history:renderQGHistory }[route] || renderQGHome)();
+    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, history:renderQGHistory }[route] || renderQGHome)();
   }
 }
 
@@ -727,6 +751,7 @@ function listenAgentFlashList(){
 
 // -------------------- QG --------------------
 function roleAllowedAdmin(){ return ['admin','superviseur'].includes(currentProfile?.role); }
+function isStrictAdmin(){ return currentProfile?.role === 'admin'; }
 
 async function renderQGHome(){
   currentRoute = 'home';
@@ -738,7 +763,7 @@ async function renderQGHome(){
       <div class="card stat blue"><div class="stat-label">Missions jour</div><div class="stat-value" id="stat-missions">—</div></div>
     </section>
     <section class="grid cols-2" style="margin-top:16px">
-      <div class="card"><div class="card-title"><div><h2>Carte opérationnelle</h2><p>Agents en poste et positions connues</p></div></div><div id="qg-map" class="map"></div></div>
+      <div class="card map-card"><div class="card-title"><div><h2>Carte opérationnelle</h2><p>Agents actifs, sites et accès Google Maps</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div><div class="map-legend"><span><i class="legend-dot agent"></i>Agent</span><span><i class="legend-dot site"></i>Site</span></div><div id="qg-map" class="map premium-map"></div></div>
       <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, inactivité, SOS, critiques</p></div><button class="btn small" data-route="notifications">Voir tout</button></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
     </section>
     <section class="grid cols-2" style="margin-top:16px">
@@ -793,20 +818,68 @@ function alertItem(a, compact=false){
 async function initQGMap(){
   const el = document.querySelector('#qg-map'); if (!el) return;
   if (!window.L) { el.innerHTML = '<div class="empty" style="margin:20px">Carte indisponible. Connexion CDN Leaflet requise.</div>'; return; }
-  mapInstance = L.map('qg-map', { zoomControl:true }).setView([46.6, 2.4], 5);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'© OpenStreetMap' }).addTo(mapInstance);
+  if (mapInstance) { try { mapInstance.remove(); } catch(e){} }
+  mapMarkers = []; mapBoundsCache = []; mapSitePoints = []; mapAgentPoints = [];
+  mapInstance = L.map('qg-map', { zoomControl:false, attributionControl:true }).setView([46.6, 2.4], 5);
+  L.control.zoom({ position:'bottomright' }).addTo(mapInstance);
+  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' }).addTo(mapInstance);
+  const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' });
+  mapSiteLayer = L.layerGroup().addTo(mapInstance);
+  mapAgentLayer = L.layerGroup().addTo(mapInstance);
+  L.control.layers({ 'Nuit':dark, 'Clair':light }, { 'Agents en poste':mapAgentLayer, 'Sites':mapSiteLayer }, { collapsed:true, position:'topright' }).addTo(mapInstance);
+
+  const markerIcon = (type, label='') => L.divIcon({
+    className:'sp-map-icon-shell',
+    html:`<div class="sp-map-marker ${type}"><span>${safe(label || (type==='agent'?'A':'S'))}</span></div>`,
+    iconSize:[40,40], iconAnchor:[20,20], popupAnchor:[0,-22]
+  });
+  const syncBounds = () => { mapBoundsCache = [...mapSitePoints, ...mapAgentPoints]; };
+  const googleLink = (lat,lng) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
+  const fitAll = () => {
+    if (mapBoundsCache.length) mapInstance.fitBounds(mapBoundsCache, { padding:[42,42], maxZoom:14 });
+    else mapInstance.setView([46.6,2.4],5);
+  };
+
+  unsubscribeList.push(onSnapshot(collectionRef('sites'), snap => {
+    mapSiteLayer.clearLayers();
+    mapSitePoints = [];
+    snap.docs.forEach(d => {
+      const s = { id:d.id, ...d.data() };
+      const gps = s.gps || {};
+      const lat = Number(gps.lat ?? s.latitude ?? s.lat);
+      const lng = Number(gps.lng ?? s.longitude ?? s.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      const marker = L.marker([lat,lng], { icon:markerIcon('site', 'S') }).addTo(mapSiteLayer)
+        .bindPopup(`<div class="map-popup"><strong>${safe(s.name || 'Site')}</strong><span>${safe(s.clientName || '')}</span><span>${safe(s.address || '')}</span><a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a></div>`);
+      mapMarkers.push(marker); mapSitePoints.push([lat,lng]);
+    });
+    syncBounds(); setTimeout(fitAll, 80);
+  }, ()=>{}));
+
   const q = query(collectionRef('shifts'), where('status','==','active'));
   unsubscribeList.push(onSnapshot(q, snap => {
-    mapMarkers.forEach(m => m.remove()); mapMarkers = [];
-    const points = [];
+    mapAgentLayer.clearLayers();
+    mapAgentPoints = [];
     snap.docs.forEach(d => {
-      const s = d.data(); const gps = s.positionGPS;
-      if (!gps?.lat || !gps?.lng) return;
-      const marker = L.marker([gps.lat, gps.lng]).addTo(mapInstance).bindPopup(`<strong>${safe(s.agentNom)}</strong><br>${safe(s.siteNom)}`);
-      mapMarkers.push(marker); points.push([gps.lat, gps.lng]);
+      const s = { id:d.id, ...d.data() }; const gps = s.positionGPS || {};
+      const lat = Number(gps.lat); const lng = Number(gps.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      const initials = String(s.agentNom || 'A').split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
+      const marker = L.marker([lat,lng], { icon:markerIcon('agent', initials) }).addTo(mapAgentLayer)
+        .bindPopup(`<div class="map-popup"><strong>${safe(s.agentNom || 'Agent')}</strong><span>${safe(s.siteNom || 'Site')}</span><span>Prise de poste : ${dateText(s.startTime)}</span><a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a></div>`);
+      mapMarkers.push(marker); mapAgentPoints.push([lat,lng]);
     });
-    if (points.length) mapInstance.fitBounds(points, { padding:[40,40], maxZoom:14 });
+    syncBounds(); setTimeout(fitAll, 80);
   }));
+
+  document.querySelector('#map-reset')?.addEventListener('click', fitAll);
+  document.querySelector('#map-locate')?.addEventListener('click', async()=>{
+    const gps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+    if (!gps) return toast('Position indisponible ou refusée.', 'warning');
+    mapInstance.setView([gps.lat,gps.lng], 15);
+    L.circleMarker([gps.lat,gps.lng], { radius:10, color:'#00B8FF', fillColor:'#00B8FF', fillOpacity:.28, weight:3 }).addTo(mapInstance).bindPopup('Votre position').openPopup();
+  });
+  setTimeout(()=>mapInstance.invalidateSize(), 120);
 }
 function listenQGMissionsPreview(){
   const box = document.querySelector('#qg-missions-preview'); if (!box) return;
@@ -1251,7 +1324,7 @@ function missionReportHtml({ mission, shift={}, reports=[] }){
 
 function renderQGReports(){
   currentRoute = 'reports';
-  const body = `<section class="card fixed-mobile-card"><div class="card-title"><div><h2>Journal MCI</h2><p>Classement par mission, filtres et traitement des rapports</p></div><button class="btn small" id="export-reports">Télécharger MCI</button></div>
+  const body = `<section class="card fixed-mobile-card"><div class="card-title"><div><h2>Journal MCI</h2><p>Classement par mission, filtres et traitement des rapports</p></div><div class="btn-row"><button class="btn small" data-route="documents">Documents</button><button class="btn small" id="export-reports">Télécharger MCI</button>${isStrictAdmin()?'<button class="btn small danger" id="purge-reports">Supprimer les MCI filtrées</button>':''}</div></div>
     <div class="form-grid mci-filters">
       <div class="field"><label>Recherche</label><input class="input" id="report-search" placeholder="Agent, site, mission, message..."></div>
       <div class="field"><label>Vue</label><select class="select" id="report-view-mode"><option value="missions">Par mission</option><option value="table">Table complète</option></select></div>
@@ -1286,6 +1359,7 @@ function renderQGReports(){
     document.querySelector(`#${id}`)?.addEventListener('change', redraw);
   });
   document.querySelector('#export-reports').addEventListener('click', () => exportCSV(filterReports(rows), 'mci-reports-filtres.csv'));
+  document.querySelector('#purge-reports')?.addEventListener('click', () => requestDeleteReports(filterReports(rows), 'les MCI actuellement filtrées'));
 }
 function refreshReportFilters(rows){
   refreshSiteFilter(rows);
@@ -1405,8 +1479,9 @@ function renderReportsTable(rows){
   const mode = document.querySelector('#report-view-mode')?.value || 'missions';
   if (!filtered.length) return box.innerHTML = `<div class="empty">Aucun rapport trouvé.</div>`;
   if (mode === 'missions') return renderMissionView(box, groups);
-  box.innerHTML = `<table class="table"><thead><tr><th>Mission</th><th>Heure</th><th>Agent</th><th>Site</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Statut</th><th>Action</th></tr></thead><tbody>${filtered.map(r => `<tr><td><span class="mission-badge">${safe(shortMissionId(r))}</span></td><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${safe(r.status || 'new')}</td><td><button class="btn small" data-report-detail="${safe(r.id)}">Détail</button></td></tr>`).join('')}</tbody></table>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Mission</th><th>Heure</th><th>Agent</th><th>Site</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Statut</th><th>Action</th></tr></thead><tbody>${filtered.map(r => `<tr><td><span class="mission-badge">${safe(shortMissionId(r))}</span></td><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${safe(r.status || 'new')}</td><td><div class="table-actions"><button class="btn small" data-report-detail="${safe(r.id)}">Détail</button>${isStrictAdmin()?`<button class="btn small danger" data-report-delete="${safe(r.id)}">Supprimer</button>`:''}</div></td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('[data-report-detail]').forEach(btn => btn.addEventListener('click', () => showReportDetail(filtered.find(r=>r.id===btn.dataset.reportDetail))));
+  document.querySelectorAll('[data-report-delete]').forEach(btn => btn.addEventListener('click', () => requestDeleteReports(filtered.filter(r=>r.id===btn.dataset.reportDelete), 'ce rapport MCI')));
 }
 function shortMissionId(r){
   const key = missionKey(r);
@@ -1426,7 +1501,7 @@ function renderMissionView(box, groups){
       </div>
       <div class="mission-stats"><span>${g.count} rapports</span><span>${g.incidents} événements</span><span>${g.treated}/${g.count} traités</span></div>
       <div class="mission-last">${safe(g.reports[0]?.category || 'Rapport')} — ${safe(g.reports[0]?.message || '').slice(0,150)}${(g.reports[0]?.message || '').length > 150 ? '…' : ''}</div>
-      <div class="btn-row"><button class="btn small primary" data-mission-detail="${index}">Voir la mission</button><button class="btn small" data-mission-export="${index}">Export CSV</button><button class="btn small" data-mission-print="${index}">PDF</button></div>
+      <div class="btn-row"><button class="btn small primary" data-mission-detail="${index}">Voir la mission</button><button class="btn small" data-mission-export="${index}">Export CSV</button><button class="btn small" data-mission-print="${index}">PDF</button><button class="btn small success" data-mission-archive="${index}">Archiver document</button>${isStrictAdmin()?`<button class="btn small danger" data-mission-delete="${index}">Supprimer MCI</button>`:''}</div>
     </div>`;
   }).join('')}</div>`;
   document.querySelectorAll('[data-mission-detail]').forEach(btn => btn.addEventListener('click', () => showMissionDetail(Number(btn.dataset.missionDetail))));
@@ -1437,6 +1512,14 @@ function renderMissionView(box, groups){
   document.querySelectorAll('[data-mission-print]').forEach(btn => btn.addEventListener('click', () => {
     const g = qgReportMissionGroups[Number(btn.dataset.missionPrint)];
     if (g) printMissionGroup(g);
+  }));
+  document.querySelectorAll('[data-mission-archive]').forEach(btn => btn.addEventListener('click', () => {
+    const g = qgReportMissionGroups[Number(btn.dataset.missionArchive)];
+    if (g) archiveMissionGroup(g);
+  }));
+  document.querySelectorAll('[data-mission-delete]').forEach(btn => btn.addEventListener('click', () => {
+    const g = qgReportMissionGroups[Number(btn.dataset.missionDelete)];
+    if (g) requestDeleteReports(g.reports, `les ${g.count} MCI de cette mission`);
   }));
 }
 function showMissionDetail(index){
@@ -1449,12 +1532,13 @@ function showMissionDetail(index){
   document.querySelectorAll('[data-report-detail-modal]').forEach(btn => btn.addEventListener('click', () => showReportDetail(g.reports.find(r=>r.id===btn.dataset.reportDetailModal))));
 }
 function showReportDetail(r){
-  showModal('Détail rapport MCI', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(r.category)} · ${safe(r.severity)}</div><div class="item-meta">${safe(r.agentNom)} · ${safe(r.siteNom)} · ${dateText(r.createdAt)}</div><p>${safe(r.message)}</p>${r.photoUrl?`<img src="${safe(r.photoUrl)}" style="border-radius:16px;margin-top:12px">`:''}${r.gps?`<p class="muted">GPS : ${r.gps.lat}, ${r.gps.lng}</p>`:''}</div></div></div><div class="field"><label>Note superviseur</label><textarea class="textarea" id="supervisor-note" placeholder="Ajouter une note...">${safe(r.supervisorNote || '')}</textarea></div><button class="btn primary full" id="mark-treated">Marquer comme traité</button>`);
+  showModal('Détail rapport MCI', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(r.category)} · ${safe(r.severity)}</div><div class="item-meta">${safe(r.agentNom)} · ${safe(r.siteNom)} · ${dateText(r.createdAt)}</div><p>${safe(r.message)}</p>${r.photoUrl?`<img src="${safe(r.photoUrl)}" style="border-radius:16px;margin-top:12px">`:''}${r.gps?`<p class="muted">GPS : ${r.gps.lat}, ${r.gps.lng}</p>`:''}</div></div></div><div class="field"><label>Note superviseur</label><textarea class="textarea" id="supervisor-note" placeholder="Ajouter une note...">${safe(r.supervisorNote || '')}</textarea></div><div class="btn-row"><button class="btn primary" id="mark-treated">Marquer comme traité</button>${isStrictAdmin()?'<button class="btn danger" id="delete-current-report">Supprimer définitivement</button>':''}</div>`);
   document.querySelector('#mark-treated')?.addEventListener('click', async () => {
     await updateDoc(docRef('reports', r.id), { status:'treated', supervisorNote:document.querySelector('#supervisor-note').value, treatedBy:currentUser.uid, treatedAt:serverTimestamp() });
     await addAudit('report_treated', { reportId:r.id });
     closeModal(); toast('Rapport traité', 'success');
   });
+  document.querySelector('#delete-current-report')?.addEventListener('click', () => { closeModal(); requestDeleteReports([r], 'ce rapport MCI'); });
 }
 
 
@@ -1615,9 +1699,81 @@ function renderQGAgents(){
 function renderAgentsTable(rows){
   const box = document.querySelector('#agents-table');
   if (!rows.length) return box.innerHTML = `<div class="empty">Aucun profil agent.</div>`;
-  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button></td></tr>`).join('')}</tbody></table>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><div class="table-actions"><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button>${isStrictAdmin() && u.id !== currentUser.uid ? `<button class="btn small danger" data-delete-agent="${safe(u.id)}">Supprimer</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('[data-edit-agent]').forEach(btn => btn.addEventListener('click', () => showAgentForm(rows.find(u=>u.id===btn.dataset.editAgent))));
+  document.querySelectorAll('[data-delete-agent]').forEach(btn => btn.addEventListener('click', () => requestDeleteAgent(rows.find(u=>u.id===btn.dataset.deleteAgent))));
 }
+
+function confirmDestructiveAction({ title, message, confirmWord='SUPPRIMER', actionLabel='Supprimer', onConfirm }){
+  if (!isStrictAdmin()) return toast('Action réservée au compte admin.', 'error');
+  showModal(title, `<div class="setup-box danger-copy">${safe(message)}</div><div class="field"><label>Écris ${safe(confirmWord)} pour confirmer</label><input class="input mono" id="danger-confirm-input" autocomplete="off"></div><button class="btn danger full" id="danger-confirm-button" disabled>${safe(actionLabel)}</button>`);
+  const input = document.querySelector('#danger-confirm-input');
+  const button = document.querySelector('#danger-confirm-button');
+  input?.addEventListener('input', () => { button.disabled = input.value.trim().toUpperCase() !== confirmWord.toUpperCase(); });
+  button?.addEventListener('click', async()=>{
+    button.disabled = true;
+    try { await onConfirm(); closeModal(); }
+    catch(error){ console.error(error); button.disabled = false; toast(userFriendlyError(error, 'Suppression impossible.'), 'error'); }
+  });
+}
+async function deleteQueryDocuments(q, collectionName){
+  const snap = await getDocs(q).catch(()=>({docs:[]}));
+  const refs = snap.docs.map(d=>docRef(collectionName,d.id));
+  for (let i=0;i<refs.length;i+=400){
+    const batch = writeBatch(db);
+    refs.slice(i,i+400).forEach(ref=>batch.delete(ref));
+    await batch.commit();
+  }
+  return refs.length;
+}
+function requestDeleteAgent(user){
+  if (!user || user.id === currentUser.uid) return toast('Tu ne peux pas supprimer ton propre compte admin.', 'warning');
+  confirmDestructiveAction({
+    title:'Supprimer cet agent',
+    message:`Le profil de ${user.prenom || ''} ${user.nom || ''} sera supprimé de Firestore et son accès à Sentinelle Pro sera bloqué. Son compte Firebase Authentication restera présent tant qu’il n’est pas supprimé depuis la console Firebase. Les historiques de missions sont conservés.`,
+    onConfirm: async()=>{
+      await addAudit('agent_profile_deleted', { uid:user.id, email:user.email || '', nom:`${user.prenom||''} ${user.nom||''}`.trim() });
+      await deleteQueryDocuments(query(collectionRef('pushTokens'), where('userId','==',user.id)), 'pushTokens');
+      await deleteDoc(docRef('users', user.id));
+      toast('Agent supprimé et accès bloqué.', 'success');
+    }
+  });
+}
+function requestDeleteSite(site){
+  if (!site) return;
+  confirmDestructiveAction({
+    title:'Supprimer ce site',
+    message:`Le site “${site.name || site.id}” et ses points de ronde seront supprimés. Les anciennes missions et MCI restent conservées pour la traçabilité, sauf suppression séparée depuis le journal MCI.`,
+    onConfirm: async()=>{
+      await addAudit('site_deleted', { siteId:site.id, name:site.name || '' });
+      await deleteQueryDocuments(query(collectionRef('roundCheckpoints'), where('siteId','==',site.id)), 'roundCheckpoints');
+      await deleteDoc(docRef('sites', site.id));
+      toast('Site supprimé.', 'success');
+    }
+  });
+}
+async function deleteReportRows(rows){
+  const ids = [...new Set((rows||[]).map(r=>r.id).filter(Boolean))];
+  for (let i=0;i<ids.length;i+=400){
+    const batch = writeBatch(db);
+    ids.slice(i,i+400).forEach(reportId=>batch.delete(docRef('reports',reportId)));
+    await batch.commit();
+  }
+  return ids.length;
+}
+function requestDeleteReports(rows, label='ces MCI'){
+  if (!rows?.length) return toast('Aucune MCI à supprimer.', 'warning');
+  confirmDestructiveAction({
+    title:'Suppression définitive des MCI',
+    message:`Tu vas supprimer définitivement ${rows.length} rapport(s) : ${label}. Cette action est réservée à l’admin et ne peut pas être annulée.`,
+    onConfirm: async()=>{
+      await addAudit('reports_deleted', { count:rows.length, reportIds:rows.slice(0,30).map(r=>r.id), scope:label });
+      const count = await deleteReportRows(rows);
+      toast(`${count} MCI supprimée(s).`, 'success');
+    }
+  });
+}
+
 function showAgentForm(u={}){
   const isEdit = !!u.id;
   showModal(isEdit?'Modifier profil':'Créer compte agent', `<form id="agent-form">
@@ -1697,9 +1853,10 @@ function renderQGSites(){
 function renderSitesTable(rows){
   const box = document.querySelector('#sites-table');
   if (!rows.length) return box.innerHTML = `<div class="empty">Aucun site configuré.</div>`;
-  box.innerHTML = `<table class="table"><thead><tr><th>Site</th><th>Client</th><th>Adresse</th><th>Contact urgence</th><th>Actif</th><th>Action</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${safe(s.name)}</td><td>${safe(s.clientName || '')}</td><td>${safe(s.address || '')}</td><td>${safe(s.emergencyContact || '')}</td><td>${s.isActive?'Oui':'Non'}</td><td><button class="btn small" data-edit-site="${safe(s.id)}">Modifier</button><button class="btn small" data-points-site="${safe(s.id)}">Points</button></td></tr>`).join('')}</tbody></table>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Site</th><th>Client</th><th>Adresse</th><th>Contact urgence</th><th>Actif</th><th>Action</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${safe(s.name)}</td><td>${safe(s.clientName || '')}</td><td>${safe(s.address || '')}</td><td>${safe(s.emergencyContact || '')}</td><td>${s.isActive?'Oui':'Non'}</td><td><div class="table-actions"><button class="btn small" data-edit-site="${safe(s.id)}">Modifier</button><button class="btn small" data-points-site="${safe(s.id)}">Points</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-site="${safe(s.id)}">Supprimer</button>`:''}</div></td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('[data-edit-site]').forEach(btn => btn.addEventListener('click', () => showSiteForm(rows.find(s=>s.id===btn.dataset.editSite))));
   document.querySelectorAll('[data-points-site]').forEach(btn => btn.addEventListener('click', () => showCheckpointsManager(btn.dataset.pointsSite)));
+  document.querySelectorAll('[data-delete-site]').forEach(btn => btn.addEventListener('click', () => requestDeleteSite(rows.find(s=>s.id===btn.dataset.deleteSite))));
 }
 function showSiteForm(s={}){
   showModal(s.id?'Modifier site':'Ajouter site', `<form id="site-form"><div class="form-grid">
@@ -1710,6 +1867,8 @@ function showSiteForm(s={}){
     <div class="field"><label>Téléphone client</label><input class="input" name="contactPhone" value="${safe(s.contactPhone || '')}"></div>
     <div class="field"><label>Urgence</label><input class="input" name="emergencyContact" value="${safe(s.emergencyContact || '')}"></div>
     <div class="field"><label>WhatsApp QG</label><input class="input" name="whatsappQG" value="${safe(s.whatsappQG || DEFAULT_QG_WHATSAPP)}"></div>
+    <div class="field"><label>Latitude carte</label><input class="input mono" name="latitude" type="number" step="any" value="${safe(s.gps?.lat ?? s.latitude ?? '')}" placeholder="43.433"></div>
+    <div class="field"><label>Longitude carte</label><input class="input mono" name="longitude" type="number" step="any" value="${safe(s.gps?.lng ?? s.longitude ?? '')}" placeholder="6.737"></div>
     <div class="field"><label>Actif</label><select class="select" name="isActive"><option value="true" ${s.isActive!==false?'selected':''}>Oui</option><option value="false" ${s.isActive===false?'selected':''}>Non</option></select></div>
   </div><div class="field"><label>Consignes principales</label><textarea class="textarea" name="instructions">${safe(s.instructions || '')}</textarea></div><button class="btn primary full" type="submit">Enregistrer site</button></form>`, 'wide');
   document.querySelector('#site-form').addEventListener('submit', async e => {
@@ -1725,6 +1884,7 @@ function showSiteForm(s={}){
         name:fd.get('name'), clientName:fd.get('clientName'), address:fd.get('address'),
         contactName:fd.get('contactName'), contactPhone:fd.get('contactPhone'), emergencyContact:fd.get('emergencyContact'),
         whatsappQG:fd.get('whatsappQG'), instructions:fd.get('instructions'), isActive:fd.get('isActive')==='true',
+        gps: (fd.get('latitude') !== '' && fd.get('longitude') !== '') ? { lat:Number(fd.get('latitude')), lng:Number(fd.get('longitude')) } : (s.gps || null),
         updatedAt:serverTimestamp(), updatedBy:currentUser.uid,
         createdAt:s.createdAt || serverTimestamp(), createdBy:s.createdBy || currentUser.uid
       }, { merge:true });
@@ -1827,6 +1987,165 @@ async function renderQGFlash(){
     const box = document.querySelector('#flash-history');
     box.innerHTML = snap.empty ? `<div class="empty">Aucun Flash envoyé.</div>` : snap.docs.map(d=>{ const f={id:d.id,...d.data()}; return `<div class="item"><div class="item-main"><div class="item-title">${safe(f.title)} <span class="pill ${f.priority==='Critique'?'red':f.priority==='Urgent'?'orange':'blue'}">${safe(f.priority)}</span></div><div class="item-meta">${dateText(f.sentAt)} · Cible ${safe(f.target)}<br>${safe(f.message)}<br>Lectures : ${Object.keys(f.readBy || {}).length} · Push : ${safe(f.pushStatus || '—')}</div></div></div>`}).join('');
   }));
+}
+
+
+// -------------------- CENTRE DOCUMENTS QG --------------------
+function isoDateValue(value){
+  if (!value) return null;
+  const d = value.toDate ? value.toDate() : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI'}[type] || type || 'Document'); }
+function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'' }; }
+function compactRound(r){ return { id:r.id||'', scannedAt:isoDateValue(r.scannedAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', checkpointName:r.checkpointName||'', scanMethod:r.scanMethod||'', isValid:r.isValid !== false }; }
+function compactAlert(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt || r.heure), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteActuel||r.siteId||'', siteNom:r.siteActuelNom||r.siteNom||'', typeAlerte:r.typeAlerte||'SOS/PTI', statut:r.statut||'', niveau:r.niveau||'', message:r.message||'', closeReason:r.closeReason||r.closureReason||'' }; }
+function compactMission(m){ return { id:m.id||'', agentId:m.agentId||'', agentNom:m.agentNom||'', siteId:m.siteId||'', siteNom:m.siteNom||'', type:m.type||'', instructions:m.instructions||'', status:m.status||'', scheduledStart:isoDateValue(m.scheduledStart), scheduledEnd:isoDateValue(m.scheduledEnd), actualStart:isoDateValue(m.actualStart), actualEnd:isoDateValue(m.actualEnd), conformityScore:m.conformityScore ?? null, roundsCount:m.roundsCount||0, incidentsCount:m.incidentsCount||0 }; }
+function compactShift(s){ return { id:s.id||'', agentId:s.agentId||'', agentNom:s.agentNom||'', siteId:s.siteId||'', siteNom:s.siteNom||'', startTime:isoDateValue(s.startTime), completedAt:isoDateValue(s.completedAt), scheduledStart:isoDateValue(s.scheduledStart), scheduledEnd:isoDateValue(s.scheduledEnd), roundsCount:s.roundsCount||0, incidentsCount:s.incidentsCount||0, conformityScore:s.conformityScore ?? null, signatureName:s.signatureName||'', handoverNote:s.handoverNote||'' }; }
+function inPeriod(value, from, to){
+  const d = value?.toDate ? value.toDate() : new Date(value || 0);
+  if (Number.isNaN(d.getTime())) return false;
+  return (!from || d >= from) && (!to || d <= to);
+}
+async function renderQGDocuments(){
+  currentRoute = 'documents';
+  const today = new Date();
+  const monthAgo = new Date(today); monthAgo.setDate(monthAgo.getDate()-30);
+  const body = `<section class="grid cols-2 documents-layout">
+    <div class="card"><div class="card-title"><div><h2>Générateur de documents</h2><p>Crée puis archive un document dans Sentinelle Pro</p></div></div>
+      <form id="document-generator-form">
+        <div class="form-grid"><div class="field"><label>Type de document</label><select class="select" name="type" id="document-type"><option value="mci">Main courante MCI</option><option value="mission">Rapport de mission</option><option value="rounds">Rapport de rondes</option><option value="alerts">Rapport SOS / PTI</option></select></div><div class="field"><label>Site</label><select class="select" name="siteId" id="document-site"><option value="">Tous les sites</option></select></div></div>
+        <div class="field hidden" id="document-mission-wrap"><label>Mission</label><select class="select" name="missionId" id="document-mission"><option value="">Choisir une mission</option></select></div>
+        <div class="form-grid" id="document-period-wrap"><div class="field"><label>Du</label><input class="input" name="dateFrom" type="date" value="${monthAgo.toISOString().slice(0,10)}"></div><div class="field"><label>Au</label><input class="input" name="dateTo" type="date" value="${today.toISOString().slice(0,10)}"></div></div>
+        <div class="field"><label>Titre personnalisé (optionnel)</label><input class="input" name="title" placeholder="Ex : Main courante hebdomadaire — Site Alpha"></div>
+        <button class="btn primary full" type="submit">Générer et archiver</button>
+      </form>
+      <div class="setup-box" style="margin-top:14px">Sans Firebase Storage, Sentinelle Pro archive un instantané structuré dans Firestore puis régénère le PDF ou le CSV à la demande.</div>
+    </div>
+    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes et SOS</p></div><div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option></select></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
+  </section>`;
+  render(page('Documents', 'Génération, archivage et téléchargement opérationnel', body));
+  const [sitesSnap, missionsSnap] = await Promise.all([
+    getDocs(query(collectionRef('sites'), orderBy('name'))).catch(()=>({docs:[]})),
+    getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(300))).catch(()=>({docs:[]}))
+  ]);
+  const sites = sitesSnap.docs.map(d=>({id:d.id,...d.data()}));
+  const missions = missionsSnap.docs.map(d=>({id:d.id,...d.data()}));
+  document.querySelector('#document-site').innerHTML = `<option value="">Tous les sites</option>` + sites.map(s=>`<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
+  document.querySelector('#document-mission').innerHTML = `<option value="">Choisir une mission</option>` + missions.map(m=>`<option value="${safe(m.id)}">${safe(m.siteNom||'Site')} · ${safe(m.agentNom||'Agent')} · ${dateText(m.scheduledStart)}</option>`).join('');
+  const updateForm = () => {
+    const missionMode = document.querySelector('#document-type')?.value === 'mission';
+    document.querySelector('#document-mission-wrap')?.classList.toggle('hidden', !missionMode);
+    document.querySelector('#document-period-wrap')?.classList.toggle('hidden', missionMode);
+  };
+  document.querySelector('#document-type')?.addEventListener('change', updateForm); updateForm();
+  document.querySelector('#document-generator-form')?.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const btn=e.currentTarget.querySelector('button[type="submit"]'); btn.disabled=true;
+    try { await generateAndArchiveDocument(new FormData(e.currentTarget), {sites, missions}); toast('Document archivé.', 'success'); }
+    catch(error){ console.error(error); toast(userFriendlyError(error,'Génération impossible.'),'error'); }
+    finally { btn.disabled=false; }
+  });
+  listenGeneratedDocuments();
+}
+async function generateAndArchiveDocument(fd, caches={}){
+  const type = String(fd.get('type')||'mci');
+  const siteId = String(fd.get('siteId')||'');
+  const site = (caches.sites||[]).find(s=>s.id===siteId);
+  const titleInput = String(fd.get('title')||'').trim();
+  const from = fd.get('dateFrom') ? new Date(`${fd.get('dateFrom')}T00:00:00`) : null;
+  const to = fd.get('dateTo') ? new Date(`${fd.get('dateTo')}T23:59:59`) : null;
+  let payload={}, rowCount=0, title='', missionId=null;
+  if (type === 'mission'){
+    missionId = String(fd.get('missionId')||'');
+    if (!missionId) throw new Error('Choisis une mission.');
+    const missionSnap = await getDoc(docRef('missions',missionId));
+    if (!missionSnap.exists()) throw new Error('Mission introuvable.');
+    const mission = {id:missionSnap.id,...missionSnap.data()};
+    const [reportsSnap,shiftsSnap] = await Promise.all([
+      getDocs(query(collectionRef('reports'),where('missionId','==',missionId))).catch(()=>({docs:[]})),
+      getDocs(query(collectionRef('shifts'),where('missionId','==',missionId))).catch(()=>({docs:[]}))
+    ]);
+    const reports = reportsSnap.docs.map(d=>compactReport({id:d.id,...d.data()}));
+    const shift = shiftsSnap.docs.length ? compactShift({id:shiftsSnap.docs[0].id,...shiftsSnap.docs[0].data()}) : {};
+    payload={mission:compactMission(mission),shift,rows:reports}; rowCount=reports.length;
+    title=titleInput || `Rapport mission — ${mission.siteNom || 'Site'} — ${mission.agentNom || 'Agent'}`;
+  } else {
+    const config = type==='mci' ? {collection:'reports',date:'createdAt',compact:compactReport} : type==='rounds' ? {collection:'roundCheckpointsLogs',date:'scannedAt',compact:compactRound} : {collection:'alerts',date:'createdAt',compact:compactAlert};
+    const snap = await getDocs(query(collectionRef(config.collection), limit(1200))).catch(()=>({docs:[]}));
+    let rows=snap.docs.map(d=>({id:d.id,...d.data()}));
+    rows=rows.filter(r=>(!siteId || r.siteId===siteId || r.siteActuel===siteId) && inPeriod(r[config.date] || r.heure,from,to));
+    rowCount=rows.length;
+    const compactRows=rows.slice(0,350).map(config.compact);
+    payload={rows:compactRows,truncated:rowCount>compactRows.length};
+    title=titleInput || `${documentTypeLabel(type)} — ${site?.name || 'Tous sites'} — ${fd.get('dateFrom')||''} au ${fd.get('dateTo')||''}`;
+  }
+  await addDoc(collectionRef('generatedDocuments'), { type,title,siteId:siteId||null,siteNom:site?.name||null,missionId,rowCount,payload,status:'active',createdAt:serverTimestamp(),createdBy:currentUser.uid,createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() });
+  await addAudit('generated_document_created',{type,title,rowCount,siteId:siteId||null,missionId});
+}
+function listenGeneratedDocuments(){
+  const box=document.querySelector('#generated-documents-list'); if(!box)return;
+  let rows=[];
+  const redraw=()=>{
+    const type=document.querySelector('#documents-filter')?.value||'';
+    const filtered=rows.filter(d=>!type||d.type===type);
+    box.innerHTML=filtered.length?filtered.map(d=>`<div class="item document-item"><div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Ouvrir</button><button class="btn small" data-download-generated-doc="${safe(d.id)}">Télécharger</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}">Supprimer</button>`:''}</div></div>`).join(''):`<div class="empty">Aucun document archivé.</div>`;
+    document.querySelectorAll('[data-open-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>openGeneratedDocument(rows.find(d=>d.id===btn.dataset.openGeneratedDoc))));
+    document.querySelectorAll('[data-download-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>downloadGeneratedDocument(rows.find(d=>d.id===btn.dataset.downloadGeneratedDoc))));
+    document.querySelectorAll('[data-delete-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteGeneratedDocument(rows.find(d=>d.id===btn.dataset.deleteGeneratedDoc))));
+  };
+  document.querySelector('#documents-filter')?.addEventListener('change',redraw);
+  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Publie les règles Firestore V4.9.</div>'));
+}
+function generatedDocumentHtml(d){
+  const p=d?.payload||{};
+  if(d.type==='mission') return missionReportHtml({mission:p.mission||{},shift:p.shift||{},reports:p.rows||[]});
+  const logo=new URL('./assets/logo.png',location.href).href;
+  const rows=p.rows||[];
+  let headers=[],body='';
+  if(d.type==='mci'){
+    headers=['Date','Agent','Site','Catégorie','Gravité','Message'];
+    body=rows.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td></tr>`).join('');
+  } else if(d.type==='rounds'){
+    headers=['Date','Agent','Site','Point','Méthode','Validité'];
+    body=rows.map(r=>`<tr><td>${dateText(r.scannedAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.checkpointName)}</td><td>${safe(r.scanMethod)}</td><td>${r.isValid?'Valide':'Refusé'}</td></tr>`).join('');
+  } else {
+    headers=['Date','Agent','Site','Alerte','Statut','Message'];
+    body=rows.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.typeAlerte)}</td><td>${safe(r.statut)}</td><td>${safe(r.message)}</td></tr>`).join('');
+  }
+  return `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><p>Sentinelle Pro · Document archivé le ${dateText(d.createdAt)}</p></div></header><section><p class="report-meta">Type : ${safe(documentTypeLabel(d.type))} · Site : ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||rows.length} ligne(s)</p>${p.truncated?'<p><strong>Attention :</strong> aperçu limité aux 350 premières lignes.</p>':''}</section><section><table><thead><tr>${headers.map(h=>`<th>${safe(h)}</th>`).join('')}</tr></thead><tbody>${body||`<tr><td colspan="${headers.length}">Aucune donnée.</td></tr>`}</tbody></table></section><footer>Document généré automatiquement par Sentinelle Pro.</footer></article>`;
+}
+function openGeneratedDocument(d){
+  if(!d)return;
+  showModal('Document archivé',`<div class="document-preview">${generatedDocumentHtml(d)}</div><div class="btn-row"><button class="btn primary" id="print-generated-document">Imprimer / PDF</button><button class="btn" id="download-generated-document">Télécharger CSV</button></div>`,'wide');
+  document.querySelector('#print-generated-document')?.addEventListener('click',()=>printGeneratedDocument(d));
+  document.querySelector('#download-generated-document')?.addEventListener('click',()=>downloadGeneratedDocument(d));
+}
+function printGeneratedDocument(d){
+  document.querySelector('#print-root')?.remove();
+  const root=document.createElement('div');root.id='print-root';root.className='print-root';root.innerHTML=generatedDocumentHtml(d);document.body.appendChild(root);
+  toast('Document préparé. Choisis Imprimer puis Enregistrer en PDF.','success');
+  window.addEventListener('afterprint',()=>setTimeout(()=>root.remove(),400),{once:true});setTimeout(()=>window.print(),220);setTimeout(()=>root.remove(),15000);
+}
+function downloadGeneratedDocument(d){
+  if(!d)return;
+  if(d.type==='mission') return printGeneratedDocument(d);
+  exportCSV(d.payload?.rows||[],`${String(d.title||d.type||'document').replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'').toLowerCase()}.csv`);
+}
+function requestDeleteGeneratedDocument(d){
+  if(!d)return;
+  confirmDestructiveAction({title:'Supprimer le document',message:`Le document “${d.title||d.id}” sera supprimé définitivement de la rubrique Documents.`,onConfirm:async()=>{await addAudit('generated_document_deleted',{documentId:d.id,title:d.title||''});await deleteDoc(docRef('generatedDocuments',d.id));toast('Document supprimé.','success');}});
+}
+async function archiveMissionGroup(group){
+  const first=group?.reports?.[0]||{};
+  let mission={},shift={};
+  if(first.missionId){const ms=await getDoc(docRef('missions',first.missionId)).catch(()=>null);if(ms?.exists?.())mission={id:ms.id,...ms.data()};}
+  if(first.shiftId){const ss=await getDoc(docRef('shifts',first.shiftId)).catch(()=>null);if(ss?.exists?.())shift={id:ss.id,...ss.data()};}
+  if(!mission.id) mission={id:first.missionId||group.key,agentId:first.agentId,agentNom:first.agentNom,siteId:first.siteId,siteNom:first.siteNom,scheduledStart:shift.scheduledStart,scheduledEnd:shift.scheduledEnd};
+  const reports=(group.reports||[]).map(compactReport);
+  await addDoc(collectionRef('generatedDocuments'),{type:'mission',title:`Rapport mission — ${mission.siteNom||'Site'} — ${mission.agentNom||'Agent'}`,siteId:mission.siteId||null,siteNom:mission.siteNom||null,missionId:mission.id||null,rowCount:reports.length,payload:{mission:compactMission(mission),shift:compactShift(shift),rows:reports},status:'active',createdAt:serverTimestamp(),createdBy:currentUser.uid,createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim()});
+  await addAudit('mission_document_archived',{missionId:mission.id||null,rowCount:reports.length});
+  toast('Rapport archivé dans Documents.','success');
 }
 
 function renderQGHistory(){

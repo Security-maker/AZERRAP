@@ -1,118 +1,60 @@
-# Sentinelle Pro V4.7 — Notifications GitHub Edition
+# Sentinelle Pro V4.9 — Command Center
 
-Version GitHub + Firebase Spark + OneSignal + Cloudflare Worker.
+Patch GitHub Pages + Firebase Spark, sans Firebase Storage.
 
-## Ce que cette version ajoute
+## Nouveautés
 
-- Notifications écran verrouillé via OneSignal.
-- Bouton agent : Activer notifications écran verrouillé.
-- Identification OneSignal par UID Firebase.
-- Tags OneSignal : rôle, statut, site actuel.
-- Flash QG envoyé dans l’application + tentative de notification push.
-- Cibles Flash : tous les agents, agents en poste, site précis, agent précis.
-- Cloudflare Worker inclus pour envoyer les notifications sans exposer la clé REST OneSignal dans GitHub.
+### Navigation
+- Suppression du menu fixe en bas.
+- Nouveau bouton hamburger en haut à gauche.
+- Volet latéral déroulant côté Agent et QG.
+- Plus d’espace pour le planning et le dashboard sur ordinateur.
 
-## Ce qui reste inchangé
+### Carte opérationnelle premium
+- Fond de carte sombre ou clair.
+- Marqueurs distincts pour les agents et les sites.
+- Affichage/masquage des calques Agents et Sites.
+- Bouton « Ma position ».
+- Bouton « Tout afficher ».
+- Lien « Ouvrir dans Google Maps » dans chaque fiche de position.
+- Les sites peuvent maintenant recevoir une latitude et une longitude depuis Gestion Sites.
 
-- GitHub Pages héberge l’application.
-- Firebase Spark conserve Auth + Firestore.
-- Firebase Storage n’est pas utilisé.
-- Firebase Cloud Functions n’est pas obligatoire.
+### Centre Documents QG
+- Nouvelle rubrique `Documents`.
+- Génération et archivage de :
+  - mains courantes MCI ;
+  - rapports de mission ;
+  - historiques de rondes ;
+  - rapports SOS/PTI.
+- Impression / enregistrement PDF.
+- Téléchargement CSV.
+- Archivage dans Firestore via la collection `generatedDocuments`.
+- Bouton « Archiver document » directement depuis une mission du journal MCI.
 
-## Fichiers à remplacer sur GitHub
+### Suppressions réservées au rôle admin
+- Suppression d’un profil agent.
+- Suppression d’un site et de ses points de ronde.
+- Suppression d’un rapport MCI.
+- Suppression de toutes les MCI d’une mission.
+- Suppression de toutes les MCI correspondant aux filtres affichés.
+- Suppression d’un document généré.
+- Confirmation renforcée : il faut écrire `SUPPRIMER`.
 
-Remplace tout sauf ton fichier `firebase-config.js` si tu as déjà tes clés Firebase dedans.
+Le rôle `superviseur` peut continuer à exploiter l’interface QG, mais il ne peut pas effectuer ces suppressions.
 
-Si tu remplaces `firebase-config.js`, remets tes clés Firebase puis complète la partie `pushConfig`.
+## Limite importante sur la suppression d’un agent
 
-## Configuration Firebase
+La version GitHub/Firebase Spark supprime le profil Firestore de l’agent, ses abonnements push et bloque donc son accès à Sentinelle Pro. Son compte reste visible dans Firebase Authentication.
 
-Dans Firebase, publie uniquement les règles Firestore avec le fichier `firestore.rules`.
+Pour effacer complètement le compte Authentication, il faut le supprimer manuellement dans :
 
-Storage n’est pas nécessaire.
+`Firebase > Authentication > Utilisateurs`
 
-## Configuration OneSignal
+Cette limite évite d’exposer des droits Firebase Admin dans le code public GitHub.
 
-1. Crée un compte OneSignal.
-2. Crée une application Web Push.
-3. Renseigne ton URL GitHub Pages.
-4. Dans les paramètres Web Push, indique le fichier service worker OneSignal :
-   - Path : `/NOM_DU_REPO/push/onesignal/`
-   - Filename : `OneSignalSDKWorker.js`
-   - Scope : `/NOM_DU_REPO/push/onesignal/`
+## Mise à jour depuis la V4.8
 
-Exemple si ton app est ici :
-`https://nacer.github.io/sentinelle-pro/`
-
-Alors :
-- Path : `/sentinelle-pro/push/onesignal/`
-- Scope : `/sentinelle-pro/push/onesignal/`
-
-## Configuration firebase-config.js
-
-```js
-export const pushConfig = {
-  pushProvider: "onesignal",
-  oneSignalAppId: "TON_APP_ID_ONESIGNAL",
-  pushWorkerUrl: "https://ton-worker.ton-compte.workers.dev"
-};
-```
-
-## Configuration Cloudflare Worker
-
-Le code du Worker est dans :
-
-`worker/onesignal-worker.js`
-
-Dans Cloudflare Workers, crée ces variables/secrets :
-
-- `ONESIGNAL_APP_ID`
-- `ONESIGNAL_REST_API_KEY`
-- `SENTINELLE_PUSH_SECRET`
-- `ALLOWED_ORIGIN` optionnel, ex: `https://tonpseudo.github.io`
-
-La clé `SENTINELLE_PUSH_SECRET` doit ensuite être collée côté admin dans :
-
-Flash QG > Configurer la clé d’envoi push sur ce PC
-
-## Activation côté agent
-
-Sur iPhone :
-
-1. Ouvrir l’app depuis Safari.
-2. Ajouter à l’écran d’accueil.
-3. Ouvrir l’app depuis l’icône créée.
-4. Se connecter agent.
-5. Appuyer sur “Activer notifications écran verrouillé”.
-6. Accepter l’autorisation iOS.
-
-Sur Android / ordinateur :
-
-1. Ouvrir l’app.
-2. Se connecter agent.
-3. Appuyer sur “Activer notifications écran verrouillé”.
-4. Accepter l’autorisation navigateur.
-
-## Test
-
-1. Agent : active les notifications.
-2. Admin : va dans Flash QG.
-3. Envoie un Flash à l’agent ou aux agents en poste.
-4. Le Flash apparaît dans l’app.
-5. Si OneSignal + Worker sont bien configurés, une notification push est envoyée.
-
-## Important
-
-Sur iPhone, les notifications web exigent une PWA installée sur l’écran d’accueil. Si l’app est ouverte uniquement dans Safari, iOS ne déclenche pas les notifications écran verrouillé.
-
-
-# V4.8.2 — Veille Sécurité IA assistée
-
-Cette version ajoute un module **Veille Sécurité** côté QG et côté Agent.
-
-## Fichiers à remplacer depuis la V4.7
-
-Remplace :
+Remplace sur GitHub :
 
 - `app.js`
 - `style.css`
@@ -120,45 +62,37 @@ Remplace :
 - `firestore.rules`
 - `README.md`
 
-Ajoute :
+Tu peux aussi remplacer `worker/security-intel-worker.js` par celui du ZIP si tu veux conserver la version la plus récente de la veille.
 
-- `worker/security-intel-worker.js`
+Ne remplace pas `firebase-config.js` si tes clés Firebase, OneSignal et les URL Cloudflare y sont déjà renseignées.
 
-Ne remplace pas `firebase-config.js` si tes clés Firebase sont déjà dedans. Ajoute seulement dans `pushConfig` :
+## Règles Firestore obligatoires
 
-```js
-securityIntelWorkerUrl: "https://ton-worker-intel.ton-compte.workers.dev"
-```
+Après la mise à jour :
 
-## Configuration Cloudflare Worker Veille
+1. Firebase Console.
+2. Firestore Database.
+3. Règles.
+4. Coller le nouveau fichier `firestore.rules`.
+5. Cliquer sur Publier.
 
-1. Cloudflare > Workers & Pages > Create Worker.
-2. Nom court : `sp-intel`.
-3. Déploie le Hello World.
-4. Clique sur Edit code.
-5. Colle le contenu de `worker/security-intel-worker.js`.
-6. Save and deploy.
-7. Copie l’URL du Worker.
-8. Mets cette URL dans `firebase-config.js` dans `pushConfig.securityIntelWorkerUrl`.
+La V4.9 utilise une nouvelle collection :
 
-## Variable Cloudflare conseillée
+`generatedDocuments`
 
-Dans le Worker `sp-intel` > Settings > Variables and Secrets :
+## Carte des sites
 
-- `ALLOWED_ORIGIN` = `https://tonpseudo.github.io`
+Dans `Gestion Sites > Ajouter/Modifier`, renseigne :
 
-## Firebase Rules
+- latitude ;
+- longitude.
 
-Publie le nouveau `firestore.rules` dans Firebase > Firestore Database > Règles.
+Sans coordonnées, le site reste utilisable dans l’application mais ne sera pas affiché sur la carte.
 
-Nouvelle collection utilisée :
+## Actualiser la PWA
 
-- `securityIntelLogs`
+Après l’envoi sur GitHub Pages, ouvre :
 
-## Utilisation
+`https://tonpseudo.github.io/ton-repo/?fresh=49`
 
-Côté QG : menu **Veille** > saisir une ville > analyser.
-
-Côté Agent : menu **Veille** > saisir une ville > analyser.
-
-Le module exploite des sources publiques via Cloudflare Worker. Il ne doit pas être utilisé comme source officielle unique. Confirme toujours avec les canaux officiels, la préfecture, le client ou le QG.
+Sur iPhone, supprime l’ancienne icône de l’écran d’accueil puis réinstalle la PWA si l’ancien cache reste visible.

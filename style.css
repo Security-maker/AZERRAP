@@ -484,3 +484,59 @@ body {
   .intel-score { width:58px; height:58px; font-size:22px; }
   .intel-signal { grid-template-columns:1fr; gap:6px; }
 }
+
+/* =========================================================
+   V4.9 — Command Center : menu tiroir, carte premium, documents
+   ========================================================= */
+body.menu-open{overflow:hidden}
+.layout{display:block;min-height:100dvh;width:100%;overflow-x:hidden}
+.main{width:min(1680px,100%);margin:0 auto;padding:20px 28px 56px;min-width:0}
+.sidebar,.mobile-tabbar,.mobile-brand{display:none!important}
+.topbar{position:sticky;top:0;z-index:25;margin:-20px -12px 22px;padding:calc(12px + var(--safe-top)) 12px 12px;background:rgba(5,10,19,.88);backdrop-filter:blur(16px) saturate(150%);border-bottom:1px solid rgba(244,248,251,.08)}
+.topbar-leading{display:flex;align-items:center;gap:13px;min-width:0;flex:1}
+.topbar-logo{width:42px;height:42px;object-fit:contain;flex:0 0 auto}
+.page-title{min-width:0}.page-title h1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.menu-toggle,.icon-btn{width:46px;height:46px;border-radius:15px;border:1px solid var(--border);background:rgba(244,248,251,.06);display:grid;place-items:center;color:var(--cold);flex:0 0 auto}
+.menu-toggle{gap:4px;padding:12px}
+.menu-toggle span{display:block;width:21px;height:2px;border-radius:999px;background:var(--cold)}
+.icon-btn{font-size:28px;line-height:1}
+.drawer-backdrop{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.66);opacity:0;pointer-events:none;transition:opacity .22s ease}
+.nav-drawer{position:fixed;left:0;top:0;bottom:0;z-index:70;width:min(340px,88vw);padding:18px 16px calc(18px + var(--safe-bottom));background:linear-gradient(180deg,#071428,#050a13);border-right:1px solid var(--border);transform:translateX(-104%);transition:transform .24s ease;display:flex;flex-direction:column;box-shadow:24px 0 60px rgba(0,0,0,.48);overflow-y:auto}
+.layout.drawer-open .nav-drawer{transform:translateX(0)}
+.layout.drawer-open .drawer-backdrop{opacity:1;pointer-events:auto}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.drawer-brand{padding:0;border:0;min-width:0}.drawer-brand img{width:48px;height:48px}.drawer-brand .brand-name{font-size:17px}
+.drawer-nav{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:16px 0}
+.drawer-nav .nav-btn{height:58px;border:1px solid rgba(244,248,251,.07);background:rgba(244,248,251,.035);padding:0 12px}
+.drawer-nav .nav-btn.active{background:rgba(0,156,255,.16);border-color:rgba(0,184,255,.32)}
+.drawer-footer{margin-top:auto}
+
+.map-card{overflow:hidden}
+.map-actions{justify-content:flex-end}.map-legend{display:flex;gap:16px;flex-wrap:wrap;margin:-2px 0 12px;color:var(--metal);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.map-legend span{display:flex;align-items:center;gap:7px}.legend-dot{width:10px;height:10px;border-radius:999px;display:inline-block}.legend-dot.agent{background:var(--green);box-shadow:0 0 0 4px rgba(0,208,132,.13)}.legend-dot.site{background:var(--electric);box-shadow:0 0 0 4px rgba(0,184,255,.13)}
+.premium-map{height:520px;border-color:rgba(0,184,255,.22);box-shadow:inset 0 0 0 1px rgba(255,255,255,.025)}
+.premium-map .leaflet-control-layers,.premium-map .leaflet-bar a{background:#081b33;color:#f4f8fb;border-color:rgba(244,248,251,.14)}
+.premium-map .leaflet-control-layers-expanded{border-radius:14px;padding:10px 12px}.premium-map .leaflet-control-layers label{color:#f4f8fb}
+.sp-map-icon-shell{background:transparent!important;border:0!important}
+.sp-map-marker{width:40px;height:40px;border-radius:15px;display:grid;place-items:center;font-weight:900;font-size:12px;color:#03111d;border:3px solid rgba(255,255,255,.9);box-shadow:0 8px 22px rgba(0,0,0,.48)}
+.sp-map-marker.agent{background:var(--green)}.sp-map-marker.site{background:var(--electric);border-radius:12px 12px 12px 3px;transform:rotate(-45deg)}.sp-map-marker.site span{transform:rotate(45deg)}
+.map-popup{display:grid;gap:5px;min-width:190px;font-family:Montserrat,sans-serif}.map-popup strong{font-size:14px}.map-popup span{color:#506070;font-size:11px}.map-popup a{color:#0078cc;font-weight:800;margin-top:4px}
+
+.table-actions{display:flex;gap:7px;flex-wrap:wrap;min-width:max-content}
+.documents-layout{align-items:start}.documents-layout>.card{min-height:420px}
+.document-item{align-items:center}.document-preview{max-height:58vh;overflow:auto;background:#fff;border-radius:18px;padding:18px;color:#111}.document-preview .report-doc{display:block!important}
+.hidden{display:none!important}
+
+@media (min-width:1200px){
+  .drawer-nav{grid-template-columns:1fr 1fr}.main{padding-left:34px;padding-right:34px}.premium-map{height:560px}
+}
+@media (max-width:900px){
+  .main{padding:12px 12px calc(34px + var(--safe-bottom))}.topbar{margin:-12px -4px 18px;padding-left:4px;padding-right:4px;align-items:flex-start;flex-direction:column}.topbar-leading{width:100%}.top-actions{width:100%;display:flex;gap:7px}.top-actions .pill{width:auto;flex:1;text-align:center}.page-title h1{font-size:22px}.page-title p{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.topbar-logo{display:none}.premium-map{height:430px}.documents-layout{grid-template-columns:1fr!important}.sos-fixed{bottom:calc(18px + var(--safe-bottom))}
+}
+@media (max-width:560px){
+  .drawer-nav{grid-template-columns:1fr}.drawer-nav .nav-btn{height:52px}.main{padding-left:9px;padding-right:9px}.topbar{margin-left:0;margin-right:0}.menu-toggle{width:43px;height:43px}.top-actions{display:grid;grid-template-columns:1fr 1fr}.top-actions .pill{width:100%}.card{padding:14px;border-radius:20px}.premium-map{height:365px}.map-actions{display:grid;grid-template-columns:1fr 1fr;width:100%}.map-actions .btn{width:100%}.document-item .item-actions{grid-template-columns:1fr}.table-actions{display:grid;grid-template-columns:1fr;min-width:130px}.table-actions .btn{width:100%}
+}
+@media print{
+  .nav-drawer,.drawer-backdrop,.menu-toggle,.topbar,.sos-fixed,.sos-help{display:none!important}
+  .main{padding:0;width:100%;max-width:none}
+}
