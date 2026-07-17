@@ -1,77 +1,41 @@
-# Sentinelle Pro V5.1 — Documents PDF & Dashboard propre
+# Sentinelle Pro V5.1.1 — Correctif carte opérationnelle
 
-Cette version corrige les points remontés après la V5.0.
+Correctif ciblé pour la carte QG.
 
-## Nouveautés V5.1
+## Corrections
 
-### Dashboard QG allégé
-- La carte opérationnelle passe en pleine largeur.
-- Le bloc “Missions à venir” est retiré du Dashboard pour ne plus polluer l’accueil.
-- Le Dashboard garde uniquement : statistiques, carte, notifications QG, SOS/PTI et derniers rapports MCI.
+- Correction des tuiles Leaflet qui s'affichaient en gros blocs décalés.
+- Ajout de règles CSS critiques Leaflet directement dans `style.css`.
+- Stabilisation de la carte après chargement, redimensionnement et changement de layout.
+- Cache PWA mis à jour en V5.1.1.
 
-### Suivi missions moins polluant
-Dans la page Missions, le bloc “Suivi missions” devient “Suivi prioritaire”. Il affiche uniquement :
-- missions en cours ;
-- missions en retard ;
-- missions du jour non terminées.
+## Fichiers à remplacer sur GitHub
 
-Le planning complet reste disponible dans la grille PC.
+Remplace uniquement :
 
-### Carte plus lisible
-- Carte claire par défaut.
-- Carte plus grande.
-- Marqueurs plus visibles.
-- Couleur du site utilisée sur les marqueurs.
-- Message d’aide si aucun site n’a encore latitude/longitude.
-- Accès Google Maps depuis les marqueurs.
+- `style.css`
+- `app.js`
+- `service-worker.js`
 
-### Documents PDF
-Le générateur de Documents archive maintenant les documents comme des documents PDF dans la rubrique Documents.
+Ne remplace pas `firebase-config.js`.
 
-Types gérés :
-- MCI ;
-- rapports de mission ;
-- rondes ;
-- SOS/PTI ;
-- factures.
+## Après upload GitHub
 
-Chaque document peut être :
-- aperçu ;
-- téléchargé en PDF ;
-- imprimé depuis l’aperçu ;
-- exporté en CSV si besoin ;
-- supprimé par l’admin.
+Ouvre l'application avec :
 
-Important : cette version n’utilise toujours pas Firebase Storage. Les documents sont archivés comme données structurées dans Firestore puis régénérés en PDF à la demande via le navigateur. C’est le meilleur compromis sans plan Blaze.
+`?fresh=511`
 
-### Factures PDF
-Le bouton PDF des factures télécharge un PDF et archive une copie dans Documents > Factures.
+Exemple :
 
-## Mise à jour GitHub depuis V5.0
+`https://security-maker.github.io/AZERRAP/?fresh=511`
 
-Remplace :
+Puis recharge la page. Si l'ancienne PWA reste en cache, supprime l'icône de l'écran d'accueil et réinstalle-la depuis Safari.
 
-```text
-app.js
-style.css
-index.html
-service-worker.js
-README.md
-```
 
-Ne remplace pas :
+## V5.2 — Documents premium Azzera Protect
 
-```text
-firebase-config.js
-```
-
-Si tu utilises encore l’ancien cache PWA, ouvre ensuite :
-
-```text
-https://security-maker.github.io/AZERRAP/?fresh=51
-```
-
-Puis supprime/réinstalle l’icône de l’écran d’accueil si besoin.
-
-## Firebase
-Les règles V5.0 restent compatibles avec la V5.1. Tu peux republier `firestore.rules` si besoin, mais aucune nouvelle collection n’est nécessaire.
+- Nouveau générateur PDF conforme à la charte Azzera Protect.
+- Couleurs utilisées : Bleu Obsidian `#141c25`, Bleu Azur `#64d0ff`, blanc et gris métal.
+- En-tête Azzera Protect / Sécurité privée, slogan, sections structurées, métriques, tableaux premium.
+- Aperçu HTML et PDF harmonisés.
+- Toujours sans Firebase Storage : les documents restent archivés en Firestore puis régénérés en PDF à la demande.
