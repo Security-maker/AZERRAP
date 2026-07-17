@@ -64,6 +64,7 @@ let billingProfileCache = null;
 let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14, status: '', density: 'comfort' };
 let oneSignalInitialized = false;
 let oneSignalInitPromise = null;
+let oneSignalSdkLoadPromise = null;
 
 const rolePortal = role => role === 'agent' ? 'agent' : 'qg';
 const nowText = () => new Date().toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
@@ -3093,12 +3094,62 @@ function oneSignalScopePath(){
 function oneSignalWorkerPath(){
   return new URL('./push/onesignal/OneSignalSDKWorker.js', location.href).pathname;
 }
+function loadOneSignalSdk(){
+  if (window.OneSignal?.init) return Promise.resolve();
+  if (oneSignalSdkLoadPromise) return oneSignalSdkLoadPromise;
+
+  oneSignalSdkLoadPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-sentinelle-onesignal-sdk="true"]');
+    const timeout = window.setTimeout(() => reject(new Error('Chargement OneSignal trop long. Vérifie la connexion internet.')), 15000);
+
+    const loaded = () => {
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const failed = () => {
+      window.clearTimeout(timeout);
+      oneSignalSdkLoadPromise = null;
+      reject(new Error('Le SDK OneSignal n’a pas pu être chargé.'));
+    };
+
+    if (existing) {
+      if (existing.dataset.loaded === 'true') return loaded();
+      existing.addEventListener('load', loaded, { once:true });
+      existing.addEventListener('error', failed, { once:true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
+    script.defer = true;
+    script.dataset.sentinelleOnesignalSdk = 'true';
+    script.addEventListener('load', () => {
+      script.dataset.loaded = 'true';
+      loaded();
+    }, { once:true });
+    script.addEventListener('error', failed, { once:true });
+    document.head.appendChild(script);
+  });
+
+  return oneSignalSdkLoadPromise;
+}
+
 async function initOneSignal(){
   if (!pushIsConfigured()) return null;
+  if (oneSignalInitialized && window.OneSignal?.init) return window.OneSignal;
   if (oneSignalInitPromise) return oneSignalInitPromise;
+
   oneSignalInitPromise = new Promise((resolve, reject) => {
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    window.OneSignalDeferred.push(async function(OneSignal) {
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      oneSignalInitPromise = null;
+      reject(new Error('Initialisation OneSignal trop longue. Vérifie le fichier OneSignalSDKWorker.js et la configuration OneSignal.'));
+    }, 20000);
+
+    const start = async OneSignal => {
+      if (settled) return;
       try {
         if (!oneSignalInitialized) {
           await OneSignal.init({
@@ -3110,10 +3161,34 @@ async function initOneSignal(){
           });
           oneSignalInitialized = true;
         }
+        settled = true;
+        window.clearTimeout(timeout);
         resolve(OneSignal);
-      } catch(error) { reject(error); }
+      } catch(error) {
+        settled = true;
+        window.clearTimeout(timeout);
+        oneSignalInitPromise = null;
+        reject(error);
+      }
+    };
+
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window.OneSignalDeferred.push(start);
+
+    if (window.OneSignal?.init) {
+      start(window.OneSignal);
+      return;
+    }
+
+    loadOneSignalSdk().catch(error => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      oneSignalInitPromise = null;
+      reject(error);
     });
   });
+
   return oneSignalInitPromise;
 }
 async function syncOneSignalIdentity(){
@@ -3131,28 +3206,55 @@ async function syncOneSignalIdentity(){
   return OneSignal;
 }
 async function registerPushNotifications(){
+  const button = document.querySelector('#push-activate-main');
+  const originalLabel = button?.textContent || 'Demander l’autorisation sur cet appareil';
   try {
     if (!pushIsConfigured()) {
       return showModal('Notifications à configurer', `<div class="setup-box">Cette version utilise <strong>OneSignal</strong> pour les notifications écran verrouillé, sans Firebase Blaze.</div><p class="muted">À faire : créer une app OneSignal Web Push, puis remplir <strong>pushConfig.oneSignalAppId</strong> dans firebase-config.js. Pour l’envoi depuis le QG, il faudra aussi renseigner l’URL du Cloudflare Worker.</p>`);
     }
     if (!('serviceWorker' in navigator)) return toast('Service worker indisponible : notifications impossibles.', 'warning');
+    if (typeof Notification === 'undefined') return toast('API Notifications indisponible sur cet appareil.', 'warning');
     if (isIosLike() && !isStandalonePwa()) {
       return showModal('Installation requise sur iPhone', `<div class="setup-box">Sur iPhone, les notifications web fonctionnent uniquement après installation de la PWA sur l’écran d’accueil.</div><ol class="setup-list"><li>Ouvre le lien dans Safari.</li><li>Appuie sur Partager.</li><li>Choisis “Sur l’écran d’accueil”.</li><li>Ouvre Sentinelle Pro depuis l’icône créée.</li><li>Reviens ici puis active les notifications.</li></ol>`);
     }
+
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Ouverture de l’autorisation…';
+    }
+
+    // Sur iOS, la boîte système doit être demandée immédiatement pendant le clic.
+    // Initialiser le SDK avant cette demande peut faire perdre le geste utilisateur et empêcher l’affichage.
+    let nativePermission = Notification.permission;
+    if (nativePermission === 'default') nativePermission = await Notification.requestPermission();
+    if (nativePermission === 'denied') {
+      return showModal('Notifications bloquées', `<div class="setup-box">L’autorisation a été refusée pour Sentinelle Pro.</div><ol class="setup-list"><li>Ouvre Réglages sur l’iPhone.</li><li>Va dans Notifications.</li><li>Choisis Sentinelle Pro.</li><li>Active Autoriser les notifications.</li></ol>`);
+    }
+    if (nativePermission !== 'granted') return toast('Autorisation notifications non accordée.', 'warning');
+
+    if (button) button.textContent = 'Connexion à OneSignal…';
     const OneSignal = await syncOneSignalIdentity();
     if (!OneSignal) throw new Error('OneSignal non initialisé.');
     const supported = await OneSignal.Notifications.isPushSupported();
     if (!supported) return toast('Notifications push non supportées sur cet appareil/navigateur.', 'warning');
-    await OneSignal.Notifications.requestPermission();
-    if (!OneSignal.Notifications.permission) return toast('Autorisation notifications refusée.', 'warning');
+
+    if (!OneSignal.Notifications.permission) await OneSignal.Notifications.requestPermission();
     await OneSignal.User.PushSubscription.optIn();
-    await new Promise(resolve => setTimeout(resolve, 900));
-    const subscriptionId = OneSignal.User.PushSubscription.id || '';
-    const token = OneSignal.User.PushSubscription.token || '';
+
+    let subscriptionId = '';
+    let token = '';
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      subscriptionId = OneSignal.User.PushSubscription.id || '';
+      token = OneSignal.User.PushSubscription.token || '';
+      if (subscriptionId || token) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
     if (!subscriptionId && !token) {
-      showModal('Abonnement push non détecté', `<div class="setup-box">L’autorisation semble accordée, mais OneSignal n’a pas encore renvoyé d’abonnement pour cet appareil.</div><ol class="setup-list"><li>Ferme complètement l’app.</li><li>Rouvre-la depuis l’icône de l’écran d’accueil.</li><li>Retourne sur Agent &gt; Activer notifications.</li><li>Vérifie dans OneSignal &gt; Audience &gt; Subscriptions qu’un appareil apparaît.</li></ol>`);
+      showModal('Autorisation accordée, abonnement en attente', `<div class="setup-box">L’iPhone a bien autorisé les notifications, mais OneSignal n’a pas encore créé l’abonnement.</div><ol class="setup-list"><li>Ferme complètement Sentinelle Pro.</li><li>Rouvre-la depuis l’icône de l’écran d’accueil.</li><li>Retourne dans Push et appuie une seconde fois sur le bouton.</li><li>Vérifie ensuite OneSignal &gt; Audience &gt; Subscriptions.</li></ol>`);
       return;
     }
+
     await setDoc(docRef('pushTokens', `${currentUser.uid}_${subscriptionId || 'onesignal'}`), {
       provider:'onesignal',
       subscriptionId,
@@ -3170,9 +3272,15 @@ async function registerPushNotifications(){
     }, { merge:true });
     await addAudit('onesignal_push_enabled', { subscriptionId });
     toast('Notifications écran verrouillé activées sur cet appareil.', 'success');
+    setTimeout(() => renderPushSetup(), 500);
   } catch(error) {
     console.error(error);
-    toast(userFriendlyError(error, 'Activation notifications impossible.'), 'error');
+    showModal('Activation impossible', `<div class="setup-box">${safe(userFriendlyError(error, 'Activation notifications impossible.'))}</div><p class="muted">Vérifie que le fichier <strong>push/onesignal/OneSignalSDKWorker.js</strong> est accessible et que l’App ID OneSignal correspond au domaine GitHub Pages.</p>`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   }
 }
 function getPushSecret(){

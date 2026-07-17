@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-5-pushcenter';
+const CACHE_NAME = 'sentinelle-pro-v5-5-1-push-permission-fix';
 const APP_SHELL = [
   './',
   './index.html',
