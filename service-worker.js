@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-4-8-stablefix';
+const CACHE_NAME = 'sentinelle-pro-v5-4-9-indexfix';
 const APP_SHELL = [
   './',
   './index.html',
@@ -8,12 +8,13 @@ const APP_SHELL = [
   './manifest.json',
   './offline.html',
   './assets/logo.png',
-  './assets/favicon.png',
-  './push/onesignal/OneSignalSDKWorker.js'
+  './assets/favicon.png'
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => Promise.allSettled(APP_SHELL.map(url => cache.add(url))))
+  );
   self.skipWaiting();
 });
 
@@ -30,8 +31,9 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return;
 
+  // Toujours réseau d'abord pour éviter les anciennes versions GitHub/PWA.
   event.respondWith(
-    fetch(request).then(response => {
+    fetch(request, { cache: 'no-store' }).then(response => {
       const copy = response.clone();
       caches.open(CACHE_NAME).then(cache => cache.put(request, copy)).catch(() => {});
       return response;

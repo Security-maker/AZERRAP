@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQY7Wsj7dDtkZcaM5yr9ggE98u+28U8=" crossorigin="" />
-  <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="./style.css?v=549" />
 </head>
 <body>
   <div id="app" class="app-loading">
@@ -28,20 +28,24 @@
   </div>
 
   <div id="toast-root" class="toast-root"></div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
   <script>
+    // V5.4.9 : aucun minuteur de blocage. L'ancien écran "Démarrage trop long"
+    // pouvait s'afficher même quand l'application était déjà chargée.
     (() => {
       const app = document.getElementById('app');
       const showStartupError = (title, detail) => {
-        if (!app) return;
+        if (!app || window.__SENTINELLE_RENDERED__) return;
         app.className = '';
         app.innerHTML = `
           <div class="login-page">
             <section class="login-card">
               <img src="./assets/logo.png" class="login-logo" alt="Sentinelle Pro">
-              <h1>${title}</h1>
-              <p class="subtitle">Le portail n’a pas pu démarrer.</p>
+              <h1>${String(title || 'Module indisponible')}</h1>
+              <p class="subtitle">Le portail n'a pas pu démarrer.</p>
               <div class="setup-box danger-copy" style="word-break:break-word">${String(detail || 'Erreur inconnue')}</div>
               <button class="btn primary full" id="hard-reload-btn" type="button">Nettoyer le cache et relancer</button>
             </section>
@@ -52,10 +56,12 @@
               const regs = await navigator.serviceWorker.getRegistrations();
               await Promise.all(regs.map(reg => reg.unregister().catch(() => false)));
             }
-            const keys = await caches.keys();
-            await Promise.all(keys.map(key => caches.delete(key)));
+            if ('caches' in window) {
+              const keys = await caches.keys();
+              await Promise.all(keys.map(key => caches.delete(key)));
+            }
           } catch (_) {}
-          location.replace(`${location.pathname}?fresh=542-${Date.now()}`);
+          location.replace(`${location.pathname}?fresh=549-${Date.now()}`);
         });
       };
       window.__sentinelleShowStartupError = showStartupError;
@@ -65,15 +71,10 @@
       window.addEventListener('unhandledrejection', event => {
         if (!window.__SENTINELLE_RENDERED__) showStartupError('Erreur de démarrage', event.reason?.message || event.reason);
       });
-      setTimeout(() => {
-        if (!window.__SENTINELLE_RENDERED__) {
-          showStartupError('Démarrage trop long', 'Firebase ou un module externe ne répond pas. Le bouton ci-dessous nettoie réellement les anciens Service Workers et caches.');
-        }
-      }, 12000);
     })();
   </script>
   <script type="module">
-    import('./app.js?v=542').catch(error => {
+    import('./app.js?v=549').catch(error => {
       console.error(error);
       window.__sentinelleShowStartupError?.('Module principal indisponible', error?.message || error);
     });

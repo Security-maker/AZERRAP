@@ -1,18 +1,15 @@
-# Sentinelle Pro V5.4.7 — Dashboard interactif
+# Sentinelle Pro V5.4.9 — Correctif écran "Démarrage trop long"
 
-Correctifs ciblés :
-- clic/tap fiable sur un agent de la carte avec fiche opérationnelle complète ;
-- cartes statistiques QG cliquables ;
-- détails agents en poste, alertes actives, incidents 24h et missions du jour ;
-- missions de plusieurs jours comptées lorsqu'elles couvrent la journée ;
-- navigation rapide depuis les fiches détaillées.
-
-## GitHub
 Remplacer uniquement :
-- `app.js`
-- `style.css`
-- `service-worker.js`
 
-Ne pas remplacer `firebase-config.js`.
+- index.html
+- service-worker.js
 
-Ouvrir ensuite : `?fresh=547`
+Ne pas remplacer :
+
+- app.js
+- style.css
+- firebase-config.js
+- firestore.rules
+
+Ce patch supprime totalement le minuteur qui affichait à tort "Démarrage trop long" alors que l'application était déjà rendue.
