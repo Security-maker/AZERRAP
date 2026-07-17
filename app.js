@@ -264,7 +264,7 @@ function navBtn(route, icon, label){
 }
 function agentNav(){
   return [
-    navBtn('home','⌂','Accueil'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash'), navBtn('intel','◌','Veille')
+    navBtn('home','⌂','Accueil'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('intel','◌','Veille')
   ].join('');
 }
 function qgNav(){
@@ -272,7 +272,7 @@ function qgNav(){
     navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents')
   ];
   if (isStrictAdmin()) items.push(navBtn('billing','€','Facturation'));
-  items.push(navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('history','⇩','Exports'));
+  items.push(navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('history','⇩','Exports'));
   return items.join('');
 }
 function sosButton(){
@@ -371,9 +371,9 @@ function navigate(route){
   clearSubs();
   const portal = rolePortal(currentProfile.role);
   if (portal === 'agent') {
-    ({ home:renderAgentHome, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, intel:renderAgentIntel }[route] || renderAgentHome)();
+    ({ home:renderAgentHome, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, pushsetup:renderPushSetup, intel:renderAgentIntel }[route] || renderAgentHome)();
   } else {
-    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, history:renderQGHistory }[route] || renderQGHome)();
+    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
   }
 }
 
@@ -3001,6 +3001,76 @@ function exportReportHtml(rows, filename, innerOnly=false){
   const doc = `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>Export opérationnel Sentinelle Pro</h1><p>${safe(filename)} · généré le ${new Date().toLocaleString('fr-FR')}</p></div></header><section class="report-grid"><div><strong>${rows.length}</strong><span>Lignes exportées</span></div><div><strong>${new Date().toLocaleDateString('fr-FR')}</strong><span>Date</span></div><div><strong>CSV/PDF</strong><span>Format</span></div><div><strong>QG</strong><span>Origine</span></div></section><section>${table}</section><footer>Document généré automatiquement par Sentinelle Pro.</footer></article>`;
   if (innerOnly) return doc;
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${safe(filename)}</title><style>body{font-family:Montserrat,Arial,sans-serif;margin:0;background:#f4f8fb;color:#050A13}.report-doc{max-width:1100px;margin:24px auto;background:white;padding:32px;border-radius:18px}.report-doc header{display:flex;gap:18px;align-items:center;border-bottom:1px solid #dbe3ee;padding-bottom:18px}.report-doc img{width:74px;height:74px;object-fit:contain}.report-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}.report-grid div{background:#f4f8fb;border-radius:14px;padding:14px}.report-grid strong{display:block;font-size:22px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #e5edf6;padding:8px;text-align:left;vertical-align:top}button{position:fixed;right:18px;bottom:18px;padding:12px 16px;border:0;border-radius:999px;background:#009cff;color:white;font-weight:700}@media print{button{display:none}.report-doc{margin:0;box-shadow:none}}</style></head><body>${doc}<button onclick="window.print()">Imprimer / PDF</button></body></html>`;
+}
+
+
+function renderPushSetup(){
+  currentRoute = 'pushsetup';
+  const permission = typeof Notification !== 'undefined' ? Notification.permission : 'indisponible';
+  const permissionClass = permission === 'granted' ? 'green' : permission === 'denied' ? 'red' : 'orange';
+  const installed = isStandalonePwa();
+  const ios = isIosLike();
+  const workerUrl = String(pushConfig?.pushWorkerUrl || '').trim();
+  const appId = String(pushConfig?.oneSignalAppId || '').trim();
+  const body = `
+    <section class="grid cols-2">
+      <div class="card">
+        <div class="card-title">
+          <div>
+            <h2>Autorisation notifications</h2>
+            <p>Active cet appareil pour recevoir les Flash QG sur écran verrouillé.</p>
+          </div>
+          <span class="pill ${permissionClass}">${safe(permission)}</span>
+        </div>
+        <div class="setup-box">
+          <strong>État de cet appareil</strong><br>
+          App installée écran d’accueil : <strong>${installed ? 'Oui' : 'Non'}</strong><br>
+          Appareil iOS/iPadOS : <strong>${ios ? 'Oui' : 'Non'}</strong><br>
+          OneSignal App ID : <strong>${pushIsConfigured() ? 'Configuré' : 'Manquant'}</strong><br>
+          Worker Cloudflare : <strong>${pushWorkerIsConfigured() ? 'Configuré' : 'Manquant'}</strong>
+        </div>
+        ${ios && !installed ? `<div class="setup-box warning-copy"><strong>iPhone détecté :</strong><br>ouvre Sentinelle Pro depuis l’icône installée sur l’écran d’accueil, sinon iOS ne montre pas la demande d’autorisation.</div>` : ''}
+        <button class="btn primary full" id="push-activate-main" type="button">Demander l’autorisation sur cet appareil</button>
+        <button class="btn full" id="push-test-local" type="button">Tester une notification locale</button>
+        <p class="muted" style="font-size:12px;margin-top:10px">La fenêtre système ne peut apparaître qu’après un clic manuel. Si elle a déjà été refusée, il faut réactiver les notifications dans les réglages de l’iPhone.</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><div><h2>Diagnostic</h2><p>Contrôle de la configuration push.</p></div></div>
+        <div class="list">
+          <div class="item"><div class="item-main"><div class="item-title">Compte connecté</div><div class="item-meta">${safe(currentProfile?.prenom || '')} ${safe(currentProfile?.nom || '')} · ${safe(currentProfile?.role || '')}</div></div></div>
+          <div class="item"><div class="item-main"><div class="item-title">OneSignal</div><div class="item-meta">${safe(appId || 'Non configuré')}</div></div></div>
+          <div class="item"><div class="item-main"><div class="item-title">Cloudflare Worker</div><div class="item-meta">${safe(workerUrl || 'Non configuré')}</div></div></div>
+        </div>
+        ${rolePortal(currentProfile?.role) === 'qg' ? `<button class="btn full" id="push-diagnose-main" type="button">Diagnostic QG complet</button><button class="btn full" id="push-secret-main" type="button">Configurer la clé d’envoi QG</button>` : ''}
+        <button class="btn ghost full" id="push-refresh-main" type="button">Rafraîchir l’état</button>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-title"><div><h2>Comment l’activer</h2><p>Procédure fiable pour les agents.</p></div></div>
+      <ol class="setup-list">
+        <li>Installer Sentinelle Pro sur l’écran d’accueil du téléphone.</li>
+        <li>Ouvrir l’application depuis l’icône, pas depuis Safari simple.</li>
+        <li>Se connecter au compte agent.</li>
+        <li>Aller dans <strong>Push</strong>.</li>
+        <li>Appuyer sur <strong>Demander l’autorisation</strong> puis accepter.</li>
+        <li>Le QG peut ensuite envoyer un Flash de test.</li>
+      </ol>
+    </section>`;
+  render(page('Notifications Push', 'Autorisation appareil et diagnostic', body));
+  document.querySelector('#push-activate-main')?.addEventListener('click', registerPushNotifications);
+  document.querySelector('#push-refresh-main')?.addEventListener('click', () => renderPushSetup());
+  document.querySelector('#push-diagnose-main')?.addEventListener('click', diagnosePushSetup);
+  document.querySelector('#push-secret-main')?.addEventListener('click', configurePushSecret);
+  document.querySelector('#push-test-local')?.addEventListener('click', async () => {
+    try {
+      if (typeof Notification === 'undefined') return toast('Notifications indisponibles sur ce navigateur.', 'warning');
+      if (Notification.permission !== 'granted') return toast('Autorisation non accordée sur cet appareil.', 'warning');
+      new Notification('Sentinelle Pro', { body:'Notification locale de test. Si tu la vois, l’autorisation système est active.', tag:'sentinelle-local-test' });
+      toast('Notification locale envoyée.', 'success');
+    } catch(error) {
+      toast(userFriendlyError(error, 'Test notification impossible.'), 'error');
+    }
+  });
 }
 
 // -------------------- PUSH NOTIFICATIONS — ONESIGNAL --------------------
