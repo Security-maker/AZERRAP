@@ -56,6 +56,8 @@ let qgNotificationsCache = [];
 let qgMissionsCache = [];
 let qgAllSitesCache = [];
 let qgAllAgentsCache = [];
+let qgInvoicesCache = [];
+let billingProfileCache = null;
 let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14, status: '', density: 'comfort' };
 let oneSignalInitialized = false;
 let oneSignalInitPromise = null;
@@ -66,6 +68,19 @@ const dateText = value => {
   if (!value) return '—';
   const d = value.toDate ? value.toDate() : new Date(value);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
+};
+const dateOnlyText = value => {
+  if (!value) return '—';
+  const d = value.toDate ? value.toDate() : new Date(value);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('fr-FR');
+};
+const money = value => new Intl.NumberFormat('fr-FR', { style:'currency', currency:'EUR' }).format(Number(value || 0));
+const round2 = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+const normalizeHexColor = value => /^#[0-9a-f]{6}$/i.test(String(value || '').trim()) ? String(value).trim().toUpperCase() : null;
+const contrastColor = hex => {
+  const c = normalizeHexColor(hex) || '#009CFF';
+  const r = parseInt(c.slice(1,3),16), g = parseInt(c.slice(3,5),16), b = parseInt(c.slice(5,7),16);
+  return ((r*299 + g*587 + b*114) / 1000) > 150 ? '#03111D' : '#F4F8FB';
 };
 const safe = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const id = () => Math.random().toString(36).slice(2, 10);
@@ -153,9 +168,12 @@ function agentNav(){
   ].join('');
 }
 function qgNav(){
-  return [
-    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents'), navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('history','⇩','Exports')
-  ].join('');
+  const items = [
+    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents')
+  ];
+  if (isStrictAdmin()) items.push(navBtn('billing','€','Facturation'));
+  items.push(navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('history','⇩','Exports'));
+  return items.join('');
 }
 function sosButton(){
   return `<div class="sos-help hidden" id="sos-help">Maintenir 3 secondes pour déclencher. Relâcher annule l’armement.</div><div class="sos-fixed"><button class="sos-btn" id="sos-btn">SOS<br><small>PTI</small></button></div>`;
@@ -241,7 +259,7 @@ function navigate(route){
   if (portal === 'agent') {
     ({ home:renderAgentHome, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, intel:renderAgentIntel }[route] || renderAgentHome)();
   } else {
-    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, history:renderQGHistory }[route] || renderQGHome)();
+    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, history:renderQGHistory }[route] || renderQGHome)();
   }
 }
 
@@ -917,6 +935,7 @@ async function renderQGMissions(){
       <button class="btn primary" id="planning-quick-create" type="button">+ Mission rapide</button>
     </div>
     <div class="planning-helpbar"><span>Astuce PC : clique sur une case vide pour créer une mission sur ce jour. Une mission de plusieurs jours s’étale automatiquement sur toute la période.</span></div>
+    <div id="planning-site-legend" class="planning-site-legend"></div>
     <div id="planning-board" class="planning-board"><div class="empty">Chargement du planning...</div></div>
   </section>`;
   render(page('Missions', 'Planning opérationnel et preuve d’exécution', body));
@@ -996,6 +1015,8 @@ async function createMissionFromForm(fd, options={}){
       agentNom:`${agent.prenom||''} ${agent.nom||''}`.trim(),
       siteId: site.id,
       siteNom:site.name,
+      siteColor: normalizeHexColor(site.planningColor) || planningColorForSite(site.id),
+      hourlyRate: Number(site.hourlyRate || 0),
       scheduledStart: Timestamp.fromDate(startDate),
       scheduledEnd: Timestamp.fromDate(endDate),
       type:fd.get('type') || 'Surveillance',
@@ -1065,7 +1086,7 @@ async function duplicateMissionWithOffset(m, days=7){
   const start = m.scheduledStart?.toDate ? addDays(m.scheduledStart.toDate(), days) : addDays(new Date(), days);
   const end = m.scheduledEnd?.toDate ? addDays(m.scheduledEnd.toDate(), days) : addDays(start, 0);
   await addDoc(collectionRef('missions'), {
-    agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, type:m.type || 'Surveillance', instructions:m.instructions || '',
+    agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, siteColor:m.siteColor || planningColorForSite(m.siteId), hourlyRate:Number(m.hourlyRate || 0), type:m.type || 'Surveillance', instructions:m.instructions || '',
     scheduledStart:Timestamp.fromDate(start), scheduledEnd:Timestamp.fromDate(end), status:'planned', copiedFrom:m.id,
     createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
   });
@@ -1093,9 +1114,23 @@ function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return 
 function endOfDay(d){ const x = startOfDay(d); x.setHours(23,59,59,999); return x; }
 function planningDateLabel(d){ return d.toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' }); }
 function planningDayShort(d){ return d.toLocaleDateString('fr-FR', { weekday:'short' }).replace('.', '').toUpperCase(); }
+function planningColorForSite(siteId){
+  const site = qgPlanningState.sites.find(s => s.id === siteId);
+  const explicit = normalizeHexColor(site?.planningColor);
+  if (explicit) return explicit;
+  const palette = ['#009CFF','#00D084','#FF9F1C','#7C5CFF','#E84DFF','#00B8FF','#FF5C7A','#39C6B3','#F3C543','#6E8BFF'];
+  return palette[Math.abs(hashCode(siteId || 'site')) % palette.length];
+}
+function renderPlanningSiteLegend(){
+  const box = document.querySelector('#planning-site-legend');
+  if (!box) return;
+  const sites = qgPlanningState.sites.slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'fr'));
+  box.innerHTML = sites.length ? `<span class="planning-legend-title">Code couleur sites</span>${sites.map(site => { const color=planningColorForSite(site.id); return `<span class="planning-site-legend-item"><i style="background:${color}"></i>${safe(site.name || site.id)}</span>`; }).join('')}` : '';
+}
 function renderPlanningBoard(){
   const box = document.querySelector('#planning-board');
   if (!box) return;
+  renderPlanningSiteLegend();
   const start = qgPlanningState.startDate || startOfDay(new Date());
   const days = Number(qgPlanningState.days || 14);
   const dates = Array.from({length:days}, (_,i)=>addDays(start,i));
@@ -1127,7 +1162,8 @@ function planningResourceRow({ res, mode, dates, start, end, days, rangeMissions
   const tracks = Math.max(1, ...items.map(i=>i.track + 1));
   const cells = dates.map((d,i)=>`<button type="button" class="planning-bg-cell ${isToday(d)?'today':''}" style="grid-column:${i+1};grid-row:1 / span ${tracks}" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${d.toISOString().slice(0,10)}" title="Créer une mission le ${planningDateLabel(d)}"><span>+</span></button>`).join('');
   const bars = items.map(item => planningMissionBar(item, mode)).join('');
-  return `<div class="planning-row-v46" style="--days:${days};--tracks:${tracks}"><div class="planning-resource planning-resource-v46"><strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane" style="--days:${days};--tracks:${tracks}">${cells}${bars}</div></div>`;
+  const resourceColor = mode === 'sites' ? planningColorForSite(res.id) : null;
+  return `<div class="planning-row-v46" style="--days:${days};--tracks:${tracks}"><div class="planning-resource planning-resource-v46" ${resourceColor?`style="--resource-color:${resourceColor}"`:''}>${resourceColor?`<i class="planning-resource-color" style="background:${resourceColor}"></i>`:''}<strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane" style="--days:${days};--tracks:${tracks}">${cells}${bars}</div></div>`;
 }
 function missionStartMs(m){ return m.scheduledStart?.toDate?.()?.getTime() || null; }
 function missionEndMs(m){
@@ -1168,11 +1204,11 @@ function planningMissionBar(item, mode){
   const fin = end ? end.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}) : '--:--';
   const label = mode === 'agents' ? (m.siteNom || 'Site') : (m.agentNom || 'Agent');
   const days = missionDurationDays(m);
-  const palette = ['azure','green','orange','violet','pink','blue'];
-  const cls = palette[Math.abs(hashCode(m.siteId || m.agentId || m.id)) % palette.length];
+  const siteColor = normalizeHexColor(m.siteColor) || planningColorForSite(m.siteId);
+  const textColor = contrastColor(siteColor);
   const late = missionIsLate(m);
   const status = late ? 'Retard' : missionStatusLabel(m.status);
-  return `<button type="button" class="planning-mission planning-mission-bar ${cls} status-${safe(m.status || 'planned')} ${late?'late':''}" style="grid-column:${item.colStart} / span ${item.span};grid-row:${item.track+1}" data-mission-open="${safe(m.id)}" title="${safe(label)} · ${safe(m.type || 'Mission')}"><strong>${safe(time)}-${safe(fin)}</strong><span>${safe(label)}</span><small>${safe(status)}${days>1?` · ${days}j`:''}</small></button>`;
+  return `<button type="button" class="planning-mission planning-mission-bar site-color status-${safe(m.status || 'planned')} ${late?'late':''}" style="grid-column:${item.colStart} / span ${item.span};grid-row:${item.track+1};--site-color:${siteColor};--site-text:${textColor}" data-mission-open="${safe(m.id)}" title="${safe(label)} · ${safe(m.type || 'Mission')}"><strong>${safe(time)}-${safe(fin)}</strong><span>${safe(label)}</span><small>${safe(status)}${days>1?` · ${days}j`:''}</small></button>`;
 }
 function bindPlanningBoardActions(){
   document.querySelectorAll('[data-mission-open]').forEach(btn => btn.addEventListener('click', e => {
@@ -1226,7 +1262,7 @@ async function duplicateMissionFlow(m){
     const scheduledStart = fromLocalInputValue(fd.get('scheduledStart'));
     const scheduledEnd = fromLocalInputValue(fd.get('scheduledEnd'));
     await addDoc(collectionRef('missions'), {
-      agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, type:m.type || 'Surveillance', instructions:m.instructions || '',
+      agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, siteColor:m.siteColor || planningColorForSite(m.siteId), hourlyRate:Number(m.hourlyRate || 0), type:m.type || 'Surveillance', instructions:m.instructions || '',
       scheduledStart, scheduledEnd, status:'planned', copiedFrom:m.id, createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
     });
     await addAudit('mission_duplicated', { missionId:m.id });
@@ -1853,7 +1889,8 @@ function renderQGSites(){
 function renderSitesTable(rows){
   const box = document.querySelector('#sites-table');
   if (!rows.length) return box.innerHTML = `<div class="empty">Aucun site configuré.</div>`;
-  box.innerHTML = `<table class="table"><thead><tr><th>Site</th><th>Client</th><th>Adresse</th><th>Contact urgence</th><th>Actif</th><th>Action</th></tr></thead><tbody>${rows.map(s=>`<tr><td>${safe(s.name)}</td><td>${safe(s.clientName || '')}</td><td>${safe(s.address || '')}</td><td>${safe(s.emergencyContact || '')}</td><td>${s.isActive?'Oui':'Non'}</td><td><div class="table-actions"><button class="btn small" data-edit-site="${safe(s.id)}">Modifier</button><button class="btn small" data-points-site="${safe(s.id)}">Points</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-site="${safe(s.id)}">Supprimer</button>`:''}</div></td></tr>`).join('')}</tbody></table>`;
+  const billingHead = isStrictAdmin() ? '<th>Tarif horaire</th>' : '';
+  box.innerHTML = `<table class="table"><thead><tr><th>Couleur</th><th>Site</th><th>Client</th><th>Adresse</th>${billingHead}<th>Actif</th><th>Action</th></tr></thead><tbody>${rows.map(s=>{const color=normalizeHexColor(s.planningColor)||planningColorForSite(s.id);return `<tr><td><span class="site-color-swatch" style="background:${color}" title="${color}"></span></td><td>${safe(s.name)}</td><td>${safe(s.clientName || '')}</td><td>${safe(s.address || '')}</td>${isStrictAdmin()?`<td>${s.hourlyRate?money(s.hourlyRate):'—'}</td>`:''}<td>${s.isActive?'Oui':'Non'}</td><td><div class="table-actions"><button class="btn small" data-edit-site="${safe(s.id)}">Modifier</button><button class="btn small" data-points-site="${safe(s.id)}">Points</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-site="${safe(s.id)}">Supprimer</button>`:''}</div></td></tr>`}).join('')}</tbody></table>`;
   document.querySelectorAll('[data-edit-site]').forEach(btn => btn.addEventListener('click', () => showSiteForm(rows.find(s=>s.id===btn.dataset.editSite))));
   document.querySelectorAll('[data-points-site]').forEach(btn => btn.addEventListener('click', () => showCheckpointsManager(btn.dataset.pointsSite)));
   document.querySelectorAll('[data-delete-site]').forEach(btn => btn.addEventListener('click', () => requestDeleteSite(rows.find(s=>s.id===btn.dataset.deleteSite))));
@@ -1869,6 +1906,11 @@ function showSiteForm(s={}){
     <div class="field"><label>WhatsApp QG</label><input class="input" name="whatsappQG" value="${safe(s.whatsappQG || DEFAULT_QG_WHATSAPP)}"></div>
     <div class="field"><label>Latitude carte</label><input class="input mono" name="latitude" type="number" step="any" value="${safe(s.gps?.lat ?? s.latitude ?? '')}" placeholder="43.433"></div>
     <div class="field"><label>Longitude carte</label><input class="input mono" name="longitude" type="number" step="any" value="${safe(s.gps?.lng ?? s.longitude ?? '')}" placeholder="6.737"></div>
+    <div class="field"><label>Couleur planning</label><div class="color-field"><input class="color-input" name="planningColor" type="color" value="${normalizeHexColor(s.planningColor) || planningColorForSite(s.id || 'nouveau-site')}"><span>Différencie ce site sur toutes les vues planning.</span></div></div>
+    ${isStrictAdmin()?`<div class="field"><label>Tarif horaire HT (€)</label><input class="input" name="hourlyRate" type="number" min="0" step="0.01" value="${safe(s.hourlyRate ?? '')}" placeholder="25.00"></div>
+    <div class="field"><label>TVA par défaut (%)</label><input class="input" name="vatRate" type="number" min="0" max="100" step="0.1" value="${safe(s.vatRate ?? '20')}"></div>
+    <div class="field"><label>Email facturation client</label><input class="input" name="billingEmail" type="email" value="${safe(s.billingEmail || '')}"></div>
+    <div class="field"><label>Adresse de facturation</label><input class="input" name="billingAddress" value="${safe(s.billingAddress || s.address || '')}"></div>`:''}
     <div class="field"><label>Actif</label><select class="select" name="isActive"><option value="true" ${s.isActive!==false?'selected':''}>Oui</option><option value="false" ${s.isActive===false?'selected':''}>Non</option></select></div>
   </div><div class="field"><label>Consignes principales</label><textarea class="textarea" name="instructions">${safe(s.instructions || '')}</textarea></div><button class="btn primary full" type="submit">Enregistrer site</button></form>`, 'wide');
   document.querySelector('#site-form').addEventListener('submit', async e => {
@@ -1879,15 +1921,18 @@ function showSiteForm(s={}){
     const submitBtn = form.querySelector('button[type="submit"]');
     submitBtn.disabled = true;
     try {
-      await setDoc(docRef('sites', siteId), {
+      const payload = {
         siteId,
         name:fd.get('name'), clientName:fd.get('clientName'), address:fd.get('address'),
         contactName:fd.get('contactName'), contactPhone:fd.get('contactPhone'), emergencyContact:fd.get('emergencyContact'),
         whatsappQG:fd.get('whatsappQG'), instructions:fd.get('instructions'), isActive:fd.get('isActive')==='true',
+        planningColor: normalizeHexColor(fd.get('planningColor')) || planningColorForSite(siteId),
         gps: (fd.get('latitude') !== '' && fd.get('longitude') !== '') ? { lat:Number(fd.get('latitude')), lng:Number(fd.get('longitude')) } : (s.gps || null),
         updatedAt:serverTimestamp(), updatedBy:currentUser.uid,
         createdAt:s.createdAt || serverTimestamp(), createdBy:s.createdBy || currentUser.uid
-      }, { merge:true });
+      };
+      if (isStrictAdmin()) Object.assign(payload, { hourlyRate:Number(fd.get('hourlyRate') || 0), vatRate:Number(fd.get('vatRate') || 0), billingEmail:fd.get('billingEmail') || '', billingAddress:fd.get('billingAddress') || '' });
+      await setDoc(docRef('sites', siteId), payload, { merge:true });
       await addAudit('site_saved', { siteId });
       closeModal(); toast('Site enregistré', 'success');
     } catch(error) {
@@ -2146,6 +2191,176 @@ async function archiveMissionGroup(group){
   await addDoc(collectionRef('generatedDocuments'),{type:'mission',title:`Rapport mission — ${mission.siteNom||'Site'} — ${mission.agentNom||'Agent'}`,siteId:mission.siteId||null,siteNom:mission.siteNom||null,missionId:mission.id||null,rowCount:reports.length,payload:{mission:compactMission(mission),shift:compactShift(shift),rows:reports},status:'active',createdAt:serverTimestamp(),createdBy:currentUser.uid,createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim()});
   await addAudit('mission_document_archived',{missionId:mission.id||null,rowCount:reports.length});
   toast('Rapport archivé dans Documents.','success');
+}
+
+
+// -------------------- FACTURATION ADMIN --------------------
+function invoiceStatusLabel(status){
+  return ({ draft:'Brouillon', sent:'Envoyée', paid:'Payée', overdue:'En retard', cancelled:'Annulée' }[status || 'draft'] || status || 'Brouillon');
+}
+function invoiceStatusColor(status){
+  return status === 'paid' ? 'green' : status === 'sent' ? 'blue' : status === 'overdue' ? 'red' : status === 'cancelled' ? 'red' : 'orange';
+}
+function invoiceEffectiveStatus(invoice){
+  const due = invoice.dueDate?.toDate?.()?.getTime() || new Date(invoice.dueDate || 0).getTime();
+  if (!['paid','cancelled'].includes(invoice.status) && due && due < startOfDay(new Date()).getTime()) return 'overdue';
+  return invoice.status || 'draft';
+}
+function missionBillableHours(m){
+  const start = m.actualStart?.toDate?.() || m.scheduledStart?.toDate?.();
+  const end = m.actualEnd?.toDate?.() || m.scheduledEnd?.toDate?.();
+  if (!start || !end) return 0;
+  return Math.max(.25, round2((end.getTime() - start.getTime()) / 3600000));
+}
+async function loadBillingProfile(){
+  const snap = await getDoc(docRef('billingSettings','profile')).catch(()=>null);
+  billingProfileCache = snap?.exists?.() ? snap.data() : {};
+  return billingProfileCache;
+}
+async function nextInvoiceNumber(){
+  const counterRef = docRef('billingSettings','counter');
+  const year = new Date().getFullYear();
+  return runTransaction(db, async transaction => {
+    const snap = await transaction.get(counterRef);
+    const data = snap.exists() ? snap.data() : {};
+    const sequence = data.year === year ? Number(data.sequence || 0) + 1 : 1;
+    transaction.set(counterRef, { year, sequence, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }, { merge:true });
+    return `SP-${year}-${String(sequence).padStart(4,'0')}`;
+  });
+}
+async function renderQGBilling(){
+  if (!isStrictAdmin()) { toast('Facturation réservée au compte admin.', 'error'); return renderQGHome(); }
+  currentRoute = 'billing';
+  const body = `<section class="grid cols-4 billing-kpis">
+    <div class="card stat blue"><div class="stat-label">Facturé HT</div><div class="stat-value billing-money" id="billing-total">0 €</div></div>
+    <div class="card stat green"><div class="stat-label">Encaissé TTC</div><div class="stat-value billing-money" id="billing-paid">0 €</div></div>
+    <div class="card stat orange"><div class="stat-label">À encaisser</div><div class="stat-value billing-money" id="billing-due">0 €</div></div>
+    <div class="card stat red"><div class="stat-label">En retard</div><div class="stat-value billing-money" id="billing-overdue">0 €</div></div>
+  </section>
+  <section class="card" style="margin-top:16px">
+    <div class="card-title"><div><h2>Facturation clients</h2><p>Génération depuis les missions terminées, suivi des paiements et PDF</p></div><div class="btn-row"><button class="btn" id="billing-profile">Coordonnées entreprise</button><button class="btn primary" id="billing-create">+ Créer une facture</button></div></div>
+    <div class="form-grid billing-filters"><div class="field"><label>Recherche</label><input class="input" id="billing-search" placeholder="Numéro, client, site..."></div><div class="field"><label>Site</label><select class="select" id="billing-site"><option value="">Tous les sites</option></select></div><div class="field"><label>Statut</label><select class="select" id="billing-status"><option value="">Tous</option><option value="draft">Brouillon</option><option value="sent">Envoyée</option><option value="paid">Payée</option><option value="overdue">En retard</option><option value="cancelled">Annulée</option></select></div></div>
+    <div id="billing-list" class="list"><div class="empty">Chargement des factures...</div></div>
+  </section>`;
+  render(page('Facturation', 'Pilotage administratif réservé au compte admin', body));
+  const [sitesSnap] = await Promise.all([getDocs(query(collectionRef('sites'), orderBy('name'))).catch(()=>getDocs(collectionRef('sites'))), loadBillingProfile()]);
+  const sites = sitesSnap.docs.map(d=>({id:d.id,...d.data()}));
+  document.querySelector('#billing-site').innerHTML = `<option value="">Tous les sites</option>${sites.map(site=>`<option value="${safe(site.id)}">${safe(site.name)}</option>`).join('')}`;
+  document.querySelector('#billing-profile').onclick = () => showBillingProfileModal();
+  document.querySelector('#billing-create').onclick = () => showInvoiceCreateModal(sites);
+  ['#billing-search','#billing-site','#billing-status'].forEach(selector => document.querySelector(selector)?.addEventListener(selector==='#billing-search'?'input':'change', ()=>renderInvoiceList(qgInvoicesCache)));
+  const q = query(collectionRef('invoices'), orderBy('createdAt','desc'), limit(300));
+  unsubscribeList.push(onSnapshot(q, snap => { qgInvoicesCache = snap.docs.map(d=>({id:d.id,...d.data()})); renderInvoiceList(qgInvoicesCache); }, error => {
+    console.error(error); document.querySelector('#billing-list').innerHTML = '<div class="empty">Facturation indisponible. Publie les règles Firestore V5.0.</div>';
+  }));
+}
+function renderInvoiceList(rows){
+  const box = document.querySelector('#billing-list'); if (!box) return;
+  const term = (document.querySelector('#billing-search')?.value || '').toLowerCase();
+  const siteId = document.querySelector('#billing-site')?.value || '';
+  const status = document.querySelector('#billing-status')?.value || '';
+  const filtered = rows.filter(invoice => {
+    const effective = invoiceEffectiveStatus(invoice);
+    if (siteId && invoice.siteId !== siteId) return false;
+    if (status && effective !== status) return false;
+    return !term || `${invoice.number} ${invoice.clientName} ${invoice.siteNom} ${invoice.billingEmail || ''}`.toLowerCase().includes(term);
+  });
+  const active = rows.filter(i=>invoiceEffectiveStatus(i)!=='cancelled');
+  const totalHT = active.reduce((sum,i)=>sum+Number(i.subtotal || 0),0);
+  const paid = active.filter(i=>invoiceEffectiveStatus(i)==='paid').reduce((sum,i)=>sum+Number(i.total || 0),0);
+  const due = active.filter(i=>!['paid','cancelled'].includes(invoiceEffectiveStatus(i))).reduce((sum,i)=>sum+Number(i.total || 0),0);
+  const overdue = active.filter(i=>invoiceEffectiveStatus(i)==='overdue').reduce((sum,i)=>sum+Number(i.total || 0),0);
+  const set = (id,value)=>{const el=document.querySelector(id);if(el)el.textContent=money(value)};
+  set('#billing-total',totalHT);set('#billing-paid',paid);set('#billing-due',due);set('#billing-overdue',overdue);
+  box.innerHTML = filtered.length ? filtered.map(invoiceCard).join('') : '<div class="empty">Aucune facture correspondant aux filtres.</div>';
+  document.querySelectorAll('[data-invoice-open]').forEach(btn=>btn.addEventListener('click',()=>showInvoiceDetail(filtered.find(i=>i.id===btn.dataset.invoiceOpen))));
+  document.querySelectorAll('[data-invoice-print]').forEach(btn=>btn.addEventListener('click',()=>printInvoice(filtered.find(i=>i.id===btn.dataset.invoicePrint))));
+  document.querySelectorAll('[data-invoice-paid]').forEach(btn=>btn.addEventListener('click',()=>updateInvoiceStatus(btn.dataset.invoicePaid,'paid')));
+  document.querySelectorAll('[data-invoice-sent]').forEach(btn=>btn.addEventListener('click',()=>updateInvoiceStatus(btn.dataset.invoiceSent,'sent')));
+  document.querySelectorAll('[data-invoice-cancel]').forEach(btn=>btn.addEventListener('click',()=>updateInvoiceStatus(btn.dataset.invoiceCancel,'cancelled')));
+  document.querySelectorAll('[data-invoice-delete]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteInvoice(filtered.find(i=>i.id===btn.dataset.invoiceDelete))));
+}
+function invoiceCard(invoice){
+  const status = invoiceEffectiveStatus(invoice);
+  const color = normalizeHexColor(invoice.siteColor) || planningColorForSite(invoice.siteId);
+  return `<div class="item invoice-item" style="--invoice-site-color:${color}"><div class="invoice-site-strip"></div><div class="item-main"><div class="item-title">${safe(invoice.number || invoice.id)} · ${safe(invoice.clientName || invoice.siteNom || 'Client')} <span class="pill ${invoiceStatusColor(status)}">${safe(invoiceStatusLabel(status))}</span></div><div class="item-meta">${safe(invoice.siteNom || 'Site')} · période ${dateOnlyText(invoice.periodStart)} → ${dateOnlyText(invoice.periodEnd)}<br>Émise le ${dateOnlyText(invoice.issueDate)} · échéance ${dateOnlyText(invoice.dueDate)} · ${invoice.lines?.length || 0} ligne(s)</div></div><div class="invoice-total"><strong>${money(invoice.total)}</strong><span>TTC</span></div><div class="item-actions invoice-actions"><button class="btn small primary" data-invoice-open="${safe(invoice.id)}">Ouvrir</button><button class="btn small" data-invoice-print="${safe(invoice.id)}">PDF</button>${status==='draft'?`<button class="btn small" data-invoice-sent="${safe(invoice.id)}">Marquer envoyée</button>`:''}${!['paid','cancelled'].includes(status)?`<button class="btn small success" data-invoice-paid="${safe(invoice.id)}">Marquer payée</button><button class="btn small ghost" data-invoice-cancel="${safe(invoice.id)}">Annuler</button>`:''}<button class="btn small danger" data-invoice-delete="${safe(invoice.id)}">Supprimer</button></div></div>`;
+}
+async function showBillingProfileModal(){
+  const profile = await loadBillingProfile();
+  showModal('Coordonnées de facturation', `<form id="billing-profile-form"><div class="setup-box">Ces informations apparaissent sur les factures. Vérifie tes mentions légales et ton régime de TVA avant envoi au client.</div><div class="form-grid">
+    <div class="field"><label>Nom / raison sociale</label><input class="input" name="companyName" value="${safe(profile.companyName || '')}" required></div>
+    <div class="field"><label>Forme juridique</label><input class="input" name="legalForm" value="${safe(profile.legalForm || '')}" placeholder="Micro-entreprise, SAS..."></div>
+    <div class="field"><label>SIRET</label><input class="input" name="siret" value="${safe(profile.siret || '')}"></div>
+    <div class="field"><label>N° TVA intracommunautaire</label><input class="input" name="vatNumber" value="${safe(profile.vatNumber || '')}"></div>
+    <div class="field"><label>Adresse</label><input class="input" name="address" value="${safe(profile.address || '')}"></div>
+    <div class="field"><label>Code postal</label><input class="input" name="postalCode" value="${safe(profile.postalCode || '')}"></div>
+    <div class="field"><label>Ville</label><input class="input" name="city" value="${safe(profile.city || '')}"></div>
+    <div class="field"><label>Email</label><input class="input" type="email" name="email" value="${safe(profile.email || '')}"></div>
+    <div class="field"><label>Téléphone</label><input class="input" name="phone" value="${safe(profile.phone || '')}"></div>
+    <div class="field"><label>IBAN</label><input class="input mono" name="iban" value="${safe(profile.iban || '')}"></div>
+    <div class="field"><label>BIC</label><input class="input mono" name="bic" value="${safe(profile.bic || '')}"></div>
+    <div class="field"><label>Délai de paiement (jours)</label><input class="input" type="number" min="0" max="120" name="paymentDays" value="${safe(profile.paymentDays ?? 30)}"></div>
+    <div class="field"><label>TVA par défaut (%)</label><input class="input" type="number" min="0" max="100" step="0.1" name="defaultVatRate" value="${safe(profile.defaultVatRate ?? 20)}"></div>
+    <div class="field"><label>Mention TVA / paiement</label><input class="input" name="legalNotice" value="${safe(profile.legalNotice || '')}" placeholder="TVA non applicable, art. 293 B du CGI..."></div>
+  </div><button class="btn primary full" type="submit">Enregistrer les coordonnées</button></form>`, 'wide');
+  document.querySelector('#billing-profile-form').addEventListener('submit', async e=>{
+    e.preventDefault(); const fd=new FormData(e.currentTarget); const payload=Object.fromEntries(fd.entries());
+    payload.paymentDays=Number(payload.paymentDays||30);payload.defaultVatRate=Number(payload.defaultVatRate||0);payload.updatedAt=serverTimestamp();payload.updatedBy=currentUser.uid;
+    await setDoc(docRef('billingSettings','profile'),payload,{merge:true});billingProfileCache=payload;await addAudit('billing_profile_saved',{});closeModal();toast('Coordonnées de facturation enregistrées.','success');
+  });
+}
+async function showInvoiceCreateModal(sites){
+  const profile = billingProfileCache || await loadBillingProfile();
+  if (!profile.companyName) toast('Renseigne d’abord les coordonnées de l’entreprise.', 'warning');
+  const today = startOfDay(new Date()); const first = new Date(today.getFullYear(),today.getMonth(),1); const due = addDays(today,Number(profile.paymentDays||30));
+  const options = `<option value="">Choisir un site / client</option>${sites.map(site=>`<option value="${safe(site.id)}">${safe(site.name)} · ${safe(site.clientName||'Client')}</option>`).join('')}`;
+  showModal('Créer une facture', `<form id="invoice-create-form"><div class="setup-box">Les missions terminées de la période seront ajoutées automatiquement. Les missions déjà facturées sont ignorées pour éviter les doublons.</div><div class="form-grid">
+    <div class="field"><label>Site / client</label><select class="select" name="siteId" id="invoice-site-select" required>${options}</select></div>
+    <div class="field"><label>Tarif horaire HT (€)</label><input class="input" type="number" min="0" step="0.01" name="hourlyRate" id="invoice-hourly-rate" required></div>
+    <div class="field"><label>Début période</label><input class="input" type="date" name="periodStart" value="${first.toISOString().slice(0,10)}" required></div>
+    <div class="field"><label>Fin période</label><input class="input" type="date" name="periodEnd" value="${today.toISOString().slice(0,10)}" required></div>
+    <div class="field"><label>Date facture</label><input class="input" type="date" name="issueDate" value="${today.toISOString().slice(0,10)}" required></div>
+    <div class="field"><label>Échéance</label><input class="input" type="date" name="dueDate" value="${due.toISOString().slice(0,10)}" required></div>
+    <div class="field"><label>TVA (%)</label><input class="input" type="number" min="0" max="100" step="0.1" name="vatRate" id="invoice-vat-rate" value="${safe(profile.defaultVatRate ?? 20)}"></div>
+    <div class="field"><label>Référence client</label><input class="input" name="clientReference" placeholder="Bon de commande, contrat..."></div>
+    <div class="field"><label>Complément / forfait</label><input class="input" name="extraLabel" placeholder="Frais, forfait, majoration..."></div>
+    <div class="field"><label>Montant complément HT (€)</label><input class="input" type="number" min="0" step="0.01" name="extraAmount" value="0"></div>
+  </div><div id="invoice-site-preview" class="billing-client-preview muted">Choisis un site.</div><button class="btn primary full" type="submit">Générer la facture</button></form>`, 'wide');
+  const select=document.querySelector('#invoice-site-select');
+  const sync=()=>{const site=sites.find(s=>s.id===select.value);if(!site)return;document.querySelector('#invoice-hourly-rate').value=Number(site.hourlyRate||0);document.querySelector('#invoice-vat-rate').value=Number(site.vatRate ?? profile.defaultVatRate ?? 20);document.querySelector('#invoice-site-preview').innerHTML=`<strong>${safe(site.clientName||site.name)}</strong><br>${safe(site.billingAddress||site.address||'Adresse non renseignée')} · ${safe(site.billingEmail||'Email non renseigné')}`;};
+  select.addEventListener('change',sync);
+  document.querySelector('#invoice-create-form').addEventListener('submit',async e=>{
+    e.preventDefault();const fd=new FormData(e.currentTarget);const site=sites.find(s=>s.id===fd.get('siteId'));if(!site)return toast('Site introuvable.','error');
+    const periodStart=startOfDay(new Date(fd.get('periodStart'))), periodEnd=endOfDay(new Date(fd.get('periodEnd')));if(periodEnd<periodStart)return toast('Période invalide.','warning');
+    const missionsSnap=await getDocs(query(collectionRef('missions'),where('siteId','==',site.id))).catch(()=>({docs:[]}));
+    const existingSnap=await getDocs(query(collectionRef('invoices'),limit(500))).catch(()=>({docs:[]}));
+    const billed=new Set(existingSnap.docs.flatMap(d=>{const x=d.data();return x.status==='cancelled'?[]:(x.missionIds||[])}));
+    const missions=missionsSnap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>m.status==='completed'&&!billed.has(m.id)).filter(m=>{const ms=missionStartMs(m),me=missionEndMs(m);return ms&&me&&ms<=periodEnd.getTime()&&me>=periodStart.getTime()}).sort((a,b)=>missionStartMs(a)-missionStartMs(b));
+    const hourlyRate=Number(fd.get('hourlyRate')||0);const lines=missions.map(m=>{const qty=missionBillableHours(m);return {missionId:m.id,date:m.scheduledStart,description:`${m.type||'Mission'} — ${m.agentNom||'Agent'} — ${dateOnlyText(m.scheduledStart)}`,quantity:qty,unit:'heure',unitPrice:hourlyRate,amount:round2(qty*hourlyRate)};});
+    const extraAmount=Number(fd.get('extraAmount')||0);if(extraAmount>0)lines.push({description:fd.get('extraLabel')||'Complément de facturation',quantity:1,unit:'forfait',unitPrice:extraAmount,amount:round2(extraAmount)});
+    if(!lines.length)return toast('Aucune mission terminée non facturée sur cette période et aucun complément saisi.','warning');
+    const subtotal=round2(lines.reduce((sum,line)=>sum+Number(line.amount||0),0));const vatRate=Number(fd.get('vatRate')||0);const vatAmount=round2(subtotal*vatRate/100);const total=round2(subtotal+vatAmount);const number=await nextInvoiceNumber();
+    const payload={number,clientName:site.clientName||site.name,siteId:site.id,siteNom:site.name,siteColor:normalizeHexColor(site.planningColor)||planningColorForSite(site.id),billingAddress:site.billingAddress||site.address||'',billingEmail:site.billingEmail||'',clientReference:fd.get('clientReference')||'',periodStart:Timestamp.fromDate(periodStart),periodEnd:Timestamp.fromDate(periodEnd),issueDate:Timestamp.fromDate(startOfDay(new Date(fd.get('issueDate')))),dueDate:Timestamp.fromDate(startOfDay(new Date(fd.get('dueDate')))),lines,missionIds:missions.map(m=>m.id),subtotal,vatRate,vatAmount,total,currency:'EUR',status:'draft',createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid};
+    const ref=await addDoc(collectionRef('invoices'),payload);await addAudit('invoice_created',{invoiceId:ref.id,number,siteId:site.id,total});closeModal();toast(`Facture ${number} créée.`, 'success');
+  });
+}
+async function updateInvoiceStatus(invoiceId,status){
+  await updateDoc(docRef('invoices',invoiceId),{status,paidAt:status==='paid'?serverTimestamp():null,sentAt:status==='sent'?serverTimestamp():null,updatedAt:serverTimestamp(),updatedBy:currentUser.uid});await addAudit('invoice_status_updated',{invoiceId,status});toast(`Facture ${invoiceStatusLabel(status).toLowerCase()}.`,'success');
+}
+function showInvoiceDetail(invoice){
+  if(!invoice)return;const status=invoiceEffectiveStatus(invoice);const rows=(invoice.lines||[]).map(line=>`<tr><td>${safe(line.description||'')}</td><td>${safe(line.quantity||0)} ${safe(line.unit||'')}</td><td>${money(line.unitPrice)}</td><td>${money(line.amount)}</td></tr>`).join('');
+  showModal(`Facture ${invoice.number||invoice.id}`,`<div class="invoice-detail"><div class="mission-detail-head"><div><h3>${safe(invoice.clientName||'Client')}</h3><p>${safe(invoice.siteNom||'Site')} · ${safe(invoice.billingEmail||'')}</p></div><span class="pill ${invoiceStatusColor(status)}">${invoiceStatusLabel(status)}</span></div><div class="mission-detail-grid"><div><strong>Période</strong><span>${dateOnlyText(invoice.periodStart)} → ${dateOnlyText(invoice.periodEnd)}</span></div><div><strong>Échéance</strong><span>${dateOnlyText(invoice.dueDate)}</span></div><div><strong>HT</strong><span>${money(invoice.subtotal)}</span></div><div><strong>TTC</strong><span>${money(invoice.total)}</span></div></div><div class="table-wrap"><table class="table invoice-lines-table"><thead><tr><th>Description</th><th>Quantité</th><th>Prix unitaire</th><th>Total HT</th></tr></thead><tbody>${rows}</tbody></table></div><div class="btn-row"><button class="btn primary" id="invoice-detail-print">Imprimer / PDF</button><button class="btn" id="invoice-detail-csv">Exporter lignes CSV</button>${status==='draft'?'<button class="btn" id="invoice-detail-sent">Marquer envoyée</button>':''}${!['paid','cancelled'].includes(status)?'<button class="btn success" id="invoice-detail-paid">Marquer payée</button><button class="btn ghost" id="invoice-detail-cancel">Annuler facture</button>':''}</div></div>`,'wide');
+  document.querySelector('#invoice-detail-print').onclick=()=>printInvoice(invoice);document.querySelector('#invoice-detail-csv').onclick=()=>exportCSV((invoice.lines||[]).map(l=>({...l,invoice:invoice.number,client:invoice.clientName,site:invoice.siteNom})),`facture-${invoice.number||invoice.id}.csv`);document.querySelector('#invoice-detail-sent')?.addEventListener('click',()=>{updateInvoiceStatus(invoice.id,'sent');closeModal()});document.querySelector('#invoice-detail-paid')?.addEventListener('click',()=>{updateInvoiceStatus(invoice.id,'paid');closeModal()});document.querySelector('#invoice-detail-cancel')?.addEventListener('click',()=>{updateInvoiceStatus(invoice.id,'cancelled');closeModal()});
+}
+async function printInvoice(invoice){
+  if(!invoice)return;const profile=billingProfileCache||await loadBillingProfile();const root=document.querySelector('#print-root');root?.remove();const el=document.createElement('div');el.id='print-root';el.className='print-root';el.innerHTML=invoiceHtml(invoice,profile);document.body.appendChild(el);toast('Facture prête. Choisis Imprimer puis Enregistrer en PDF.','success');window.addEventListener('afterprint',()=>setTimeout(()=>el.remove(),500),{once:true});setTimeout(()=>window.print(),250);setTimeout(()=>el.remove(),20000);
+}
+function invoiceHtml(invoice,profile={}){
+  const logo=new URL('./assets/logo.png',location.href).href;const lines=(invoice.lines||[]).map(line=>`<tr><td>${safe(line.description||'')}</td><td>${safe(line.quantity||0)} ${safe(line.unit||'')}</td><td>${money(line.unitPrice)}</td><td>${money(line.amount)}</td></tr>`).join('');
+  return `<article class="report-doc invoice-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>FACTURE ${safe(invoice.number||'')}</h1><p>Émise le ${dateOnlyText(invoice.issueDate)} · échéance ${dateOnlyText(invoice.dueDate)}</p></div></header><section class="invoice-parties"><div><h3>Émetteur</h3><strong>${safe(profile.companyName||'Entreprise')}</strong><p>${safe(profile.legalForm||'')}<br>${safe(profile.address||'')}<br>${safe(profile.postalCode||'')} ${safe(profile.city||'')}<br>${safe(profile.email||'')} ${safe(profile.phone||'')}<br>${profile.siret?`SIRET : ${safe(profile.siret)}`:''}${profile.vatNumber?`<br>TVA : ${safe(profile.vatNumber)}`:''}</p></div><div><h3>Client</h3><strong>${safe(invoice.clientName||invoice.siteNom||'Client')}</strong><p>${safe(invoice.billingAddress||'Adresse non renseignée')}<br>${safe(invoice.billingEmail||'')}<br>Site : ${safe(invoice.siteNom||'')}</p></div></section><section><p><strong>Période facturée :</strong> ${dateOnlyText(invoice.periodStart)} → ${dateOnlyText(invoice.periodEnd)}${invoice.clientReference?` · <strong>Référence :</strong> ${safe(invoice.clientReference)}`:''}</p><table class="invoice-print-table"><thead><tr><th>Désignation</th><th>Quantité</th><th>Prix unitaire HT</th><th>Total HT</th></tr></thead><tbody>${lines}</tbody></table></section><section class="invoice-totals"><div><span>Total HT</span><strong>${money(invoice.subtotal)}</strong></div><div><span>TVA ${safe(invoice.vatRate||0)} %</span><strong>${money(invoice.vatAmount)}</strong></div><div class="grand-total"><span>Total TTC</span><strong>${money(invoice.total)}</strong></div></section><section class="invoice-payment"><p><strong>Règlement :</strong> ${profile.iban?`IBAN ${safe(profile.iban)}`:'coordonnées bancaires à renseigner'} ${profile.bic?`· BIC ${safe(profile.bic)}`:''}</p>${profile.legalNotice?`<p>${safe(profile.legalNotice)}</p>`:''}</section><footer>Facture générée par Sentinelle Pro. Vérifie les mentions légales et fiscales applicables avant envoi définitif au client.</footer></article>`;
+}
+function requestDeleteInvoice(invoice){
+  if(!invoice)return;confirmDestructiveAction({title:'Supprimer la facture',message:`La facture ${invoice.number||invoice.id} sera supprimée définitivement. Le compteur de numérotation ne sera pas réutilisé.`,onConfirm:async()=>{await addAudit('invoice_deleted',{invoiceId:invoice.id,number:invoice.number||''});await deleteDoc(docRef('invoices',invoice.id));toast('Facture supprimée.','success')}});
 }
 
 function renderQGHistory(){

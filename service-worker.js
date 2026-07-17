@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-lite-v4-9-command-center';
+const CACHE_NAME = 'sentinelle-pro-lite-v5-0-billing';
 const APP_SHELL = [
   './',
   './index.html',

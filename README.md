@@ -1,58 +1,41 @@
-# Sentinelle Pro V4.9 — Command Center
+# Sentinelle Pro V5.0 — Facturation & Planning Couleurs
 
 Patch GitHub Pages + Firebase Spark, sans Firebase Storage.
 
-## Nouveautés
+## Nouveautés V5.0
 
-### Navigation
-- Suppression du menu fixe en bas.
-- Nouveau bouton hamburger en haut à gauche.
-- Volet latéral déroulant côté Agent et QG.
-- Plus d’espace pour le planning et le dashboard sur ordinateur.
+### Facturation réservée au compte admin
+- Nouvelle rubrique `Facturation` visible uniquement pour le rôle `admin`.
+- Coordonnées de l’entreprise : raison sociale, SIRET, TVA, adresse, email, téléphone, IBAN, BIC et mentions de paiement.
+- Génération automatique d’une facture à partir des missions `completed` d’un site et d’une période.
+- Calcul des heures depuis les horaires réalisés lorsqu’ils existent, sinon depuis les horaires planifiés.
+- Tarif horaire et TVA configurables par site.
+- Ajout possible d’un forfait ou complément manuel.
+- Numérotation automatique : `SP-ANNÉE-0001`.
+- Protection contre la double facturation d’une même mission.
+- Statuts : brouillon, envoyée, payée, en retard, annulée.
+- Tableau de bord : facturé HT, encaissé TTC, reste à encaisser et retards.
+- Impression / enregistrement PDF et export CSV des lignes de facture.
+- Collections Firestore : `invoices` et `billingSettings`.
 
-### Carte opérationnelle premium
-- Fond de carte sombre ou clair.
-- Marqueurs distincts pour les agents et les sites.
-- Affichage/masquage des calques Agents et Sites.
-- Bouton « Ma position ».
-- Bouton « Tout afficher ».
-- Lien « Ouvrir dans Google Maps » dans chaque fiche de position.
-- Les sites peuvent maintenant recevoir une latitude et une longitude depuis Gestion Sites.
+La facturation est un outil de gestion. Vérifie les mentions légales et fiscales applicables à ton entreprise avant d’envoyer une facture définitive.
 
-### Centre Documents QG
-- Nouvelle rubrique `Documents`.
-- Génération et archivage de :
-  - mains courantes MCI ;
-  - rapports de mission ;
-  - historiques de rondes ;
-  - rapports SOS/PTI.
-- Impression / enregistrement PDF.
-- Téléchargement CSV.
-- Archivage dans Firestore via la collection `generatedDocuments`.
-- Bouton « Archiver document » directement depuis une mission du journal MCI.
+### Code couleur par site dans le planning
+- Chaque site possède une couleur personnalisable dans `Gestion Sites`.
+- Les missions utilisent la couleur du site, y compris dans la vue par collaborateurs.
+- Les missions multi-jours conservent la même couleur sur toute leur durée.
+- Légende automatique des sites au-dessus du planning.
+- Bande colorée sur la ligne de chaque site.
+- Couleur de secours automatique pour les anciens sites qui n’ont pas encore de couleur enregistrée.
 
-### Suppressions réservées au rôle admin
-- Suppression d’un profil agent.
-- Suppression d’un site et de ses points de ronde.
-- Suppression d’un rapport MCI.
-- Suppression de toutes les MCI d’une mission.
-- Suppression de toutes les MCI correspondant aux filtres affichés.
-- Suppression d’un document généré.
-- Confirmation renforcée : il faut écrire `SUPPRIMER`.
+### Nouveaux champs d’un site
+- Couleur planning.
+- Tarif horaire HT.
+- TVA par défaut.
+- Email de facturation.
+- Adresse de facturation.
 
-Le rôle `superviseur` peut continuer à exploiter l’interface QG, mais il ne peut pas effectuer ces suppressions.
-
-## Limite importante sur la suppression d’un agent
-
-La version GitHub/Firebase Spark supprime le profil Firestore de l’agent, ses abonnements push et bloque donc son accès à Sentinelle Pro. Son compte reste visible dans Firebase Authentication.
-
-Pour effacer complètement le compte Authentication, il faut le supprimer manuellement dans :
-
-`Firebase > Authentication > Utilisateurs`
-
-Cette limite évite d’exposer des droits Firebase Admin dans le code public GitHub.
-
-## Mise à jour depuis la V4.8
+## Mise à jour depuis la V4.9
 
 Remplace sur GitHub :
 
@@ -62,7 +45,7 @@ Remplace sur GitHub :
 - `firestore.rules`
 - `README.md`
 
-Tu peux aussi remplacer `worker/security-intel-worker.js` par celui du ZIP si tu veux conserver la version la plus récente de la veille.
+Tu peux conserver tous les autres fichiers.
 
 Ne remplace pas `firebase-config.js` si tes clés Firebase, OneSignal et les URL Cloudflare y sont déjà renseignées.
 
@@ -73,26 +56,25 @@ Après la mise à jour :
 1. Firebase Console.
 2. Firestore Database.
 3. Règles.
-4. Coller le nouveau fichier `firestore.rules`.
-5. Cliquer sur Publier.
+4. Coller le contenu du nouveau fichier `firestore.rules`.
+5. Cliquer sur `Publier`.
 
-La V4.9 utilise une nouvelle collection :
+Les collections de facturation sont strictement réservées au rôle `admin`. Le superviseur et l’agent n’y ont pas accès.
 
-`generatedDocuments`
+## Première configuration de la facturation
 
-## Carte des sites
-
-Dans `Gestion Sites > Ajouter/Modifier`, renseigne :
-
-- latitude ;
-- longitude.
-
-Sans coordonnées, le site reste utilisable dans l’application mais ne sera pas affiché sur la carte.
+1. Connecte-toi avec le compte admin.
+2. Ouvre le menu puis `Facturation`.
+3. Clique sur `Coordonnées entreprise`.
+4. Renseigne les informations qui doivent apparaître sur les factures.
+5. Va dans `Sites` et renseigne le tarif horaire, la TVA et les informations de facturation de chaque client.
+6. Termine au moins une mission.
+7. Retourne dans `Facturation` puis clique sur `Créer une facture`.
 
 ## Actualiser la PWA
 
 Après l’envoi sur GitHub Pages, ouvre :
 
-`https://tonpseudo.github.io/ton-repo/?fresh=49`
+`https://tonpseudo.github.io/ton-repo/?fresh=50`
 
 Sur iPhone, supprime l’ancienne icône de l’écran d’accueil puis réinstalle la PWA si l’ancien cache reste visible.

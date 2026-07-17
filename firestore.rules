@@ -6,6 +6,7 @@ service cloud.firestore {
     function role() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? userDoc(request.auth.uid).role : null; }
     function isAdmin() { return role() in ['admin', 'superviseur']; }
     function isStrictAdmin() { return role() == 'admin'; }
+    function isSupervisor() { return role() == 'superviseur'; }
     function isAgent() { return role() == 'agent'; }
     function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
 
@@ -18,7 +19,8 @@ service cloud.firestore {
 
     match /sites/{siteId} {
       allow read: if signedIn();
-      allow create, update: if isAdmin();
+      allow create: if isStrictAdmin() || (isSupervisor() && !request.resource.data.keys().hasAny(['hourlyRate','vatRate','billingEmail','billingAddress']));
+      allow update: if isStrictAdmin() || (isSupervisor() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['hourlyRate','vatRate','billingEmail','billingAddress']));
       allow delete: if isStrictAdmin();
     }
 
@@ -31,6 +33,14 @@ service cloud.firestore {
     match /generatedDocuments/{documentId} {
       allow read, create, update: if isAdmin();
       allow delete: if isStrictAdmin();
+    }
+
+    match /invoices/{invoiceId} {
+      allow read, create, update, delete: if isStrictAdmin();
+    }
+
+    match /billingSettings/{documentId} {
+      allow read, create, update, delete: if isStrictAdmin();
     }
 
     match /missions/{missionId} {
