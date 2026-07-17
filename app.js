@@ -112,6 +112,103 @@ function getGPS(options={ enableHighAccuracy:true, timeout:8000, maximumAge:2000
   });
 }
 
+
+function timestampToDate(value){
+  if (!value) return null;
+  const d = value?.toDate ? value.toDate() : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+function elapsedShiftText(value){
+  const start = timestampToDate(value);
+  if (!start) return 'Calcul en cours';
+  const totalMinutes = Math.max(0, Math.floor((Date.now() - start.getTime()) / 60000));
+  if (totalMinutes < 1) return 'Moins d’une minute';
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days) return `${days} j ${hours} h ${minutes} min`;
+  if (hours) return `${hours} h ${minutes} min`;
+  return `${minutes} min`;
+}
+function blobToDataUrl(blob){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Lecture de la photo impossible.'));
+    reader.readAsDataURL(blob);
+  });
+}
+async function compressCheckInPhoto(file){
+  if (!file || !String(file.type || '').startsWith('image/')) throw new Error('Choisis une photo valide.');
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = objectUrl;
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('Cette photo ne peut pas être lue. Essaie une photo JPEG.'));
+    });
+    let width = image.naturalWidth || image.width;
+    let height = image.naturalHeight || image.height;
+    const maxDimension = 640;
+    const scale = Math.min(1, maxDimension / Math.max(width, height));
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { alpha:false });
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(image, 0, 0, width, height);
+    let quality = .72;
+    let blob = null;
+    while (quality >= .34) {
+      blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (blob && blob.size <= 180000) break;
+      quality -= .08;
+    }
+    if (!blob) throw new Error('Compression de la photo impossible.');
+    if (blob.size > 260000) throw new Error('La photo reste trop lourde. Reprends-la avec moins de détails.');
+    return {
+      dataUrl: await blobToDataUrl(blob),
+      bytes: blob.size,
+      width,
+      height,
+      mimeType: 'image/jpeg',
+      capturedAt: new Date().toISOString()
+    };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+async function geocodeAddress(address){
+  const queryText = String(address || '').trim();
+  if (queryText.length < 5) throw new Error('Renseigne une adresse plus précise.');
+  const url = new URL('https://data.geopf.fr/geocodage/search');
+  url.searchParams.set('q', queryText);
+  url.searchParams.set('index', 'address');
+  url.searchParams.set('limit', '1');
+  url.searchParams.set('autocomplete', '1');
+  const response = await fetch(url.toString(), { headers:{ Accept:'application/json' } });
+  if (!response.ok) throw new Error(`Service de géolocalisation indisponible (${response.status}).`);
+  const data = await response.json();
+  const feature = data?.features?.[0] || data?.results?.[0] || null;
+  const coordinates = feature?.geometry?.coordinates || feature?.coordinates || null;
+  const lng = Number(Array.isArray(coordinates) ? coordinates[0] : feature?.lon ?? feature?.longitude);
+  const lat = Number(Array.isArray(coordinates) ? coordinates[1] : feature?.lat ?? feature?.latitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('Adresse non reconnue. Vérifie le numéro, la rue et la ville.');
+  const properties = feature?.properties || feature || {};
+  return {
+    lat,
+    lng,
+    label: properties.label || properties.name || properties.fulltext || queryText,
+    score: Number(properties.score || 0),
+    source: 'IGN Géoplateforme / BAN'
+  };
+}
+
 function collectionRef(name){ return collection(db, name); }
 function docRef(name, docId){ return doc(db, name, docId); }
 
@@ -180,7 +277,19 @@ function sosButton(){
 }
 
 function boot(){
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // Nettoie l'ancien Worker OneSignal enregistré à la racine : il entre en conflit avec le Worker PWA.
+    navigator.serviceWorker.getRegistrations().then(registrations => {
+      registrations.forEach(registration => {
+        const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+        if (/\/(OneSignalSDKWorker|OneSignalSDKUpdaterWorker)\.js(?:\?|$)/.test(scriptUrl) && !scriptUrl.includes('/push/onesignal/')) {
+          registration.unregister().catch(() => {});
+        }
+      });
+    }).catch(() => {}).finally(() => {
+      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    });
+  }
   window.addEventListener('online', () => toast('Connexion rétablie', 'success'));
   window.addEventListener('offline', () => toast('Mode hors ligne — SOS non garanti', 'warning'));
 
@@ -390,7 +499,7 @@ async function renderAgentHome(){
     <section class="grid cols-2" style="margin-top:16px">
       <div class="card">
         <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
-        ${isWorking ? shiftSummary(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full" id="end-shift-btn">Terminer poste</button>` : takeShiftForm()}
+        ${isWorking ? shiftSummary(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer ma mission</button>` : takeShiftForm()}
       </div>
       <div class="card">
         <div class="card-title"><div><h2>Actions rapides</h2><p>Terrain, main courante et ronde</p></div></div>
@@ -417,20 +526,38 @@ async function renderAgentHome(){
 }
 
 function shiftSummary(shift){
-  const score = typeof shift.conformityScore === 'number' ? `<br>Conformité : ${shift.conformityScore}%` : '';
-  const mission = shift.missionId ? `<br>Mission liée : ${safe(shift.missionTitle || shift.missionId)}` : '<br>Prise de poste libre';
-  const planned = shift.scheduledStart ? `<br>Prévu : ${dateText(shift.scheduledStart)} → ${dateText(shift.scheduledEnd)}` : '';
-  return `<div class="list" style="margin-bottom:16px">
-    <div class="item"><div class="item-main"><div class="item-title">${safe(shift.siteNom)}</div><div class="item-meta">Prise de poste : ${dateText(shift.startTime)}${planned}${mission}<br>Status : ${safe(shift.status)}${score}</div></div></div>
+  const score = typeof shift.conformityScore === 'number' ? `<span class="pill ${shift.conformityScore < 70 ? 'red' : shift.conformityScore < 90 ? 'orange' : 'green'}">Conformité ${shift.conformityScore}%</span>` : '';
+  const planned = shift.scheduledStart ? `<div><span>Mission prévue</span><strong>${dateText(shift.scheduledStart)} → ${dateText(shift.scheduledEnd)}</strong></div>` : '';
+  return `<div class="shift-live-card">
+    <div class="shift-live-head"><div><span class="shift-eyebrow">POSTE ACTIF</span><h3>${safe(shift.siteNom)}</h3></div><div class="shift-live-badges"><span class="pill green">En poste</span>${score}</div></div>
+    <div class="shift-live-grid">
+      <div><span>Prise de poste</span><strong>${dateText(shift.startTime)}</strong></div>
+      <div><span>Durée en poste</span><strong id="shift-elapsed">${elapsedShiftText(shift.startTime)}</strong></div>
+      <div><span>Type</span><strong>${safe(shift.shiftType || 'Mission')}</strong></div>
+      <div><span>Preuve photo</span><strong>${shift.checkInPhotoAvailable ? 'Enregistrée' : 'Non disponible'}</strong></div>
+      ${planned}
+    </div>
   </div>`;
 }
 function takeShiftForm(){
-  return `<form id="take-shift-form">
-    <div class="field"><label>Mission planifiée</label><select class="select" name="missionId" id="mission-select"><option value="">Chargement des missions...</option></select></div>
-    <div class="field"><label>Site</label><select class="select" name="siteId" id="site-select" required><option value="">Chargement des sites...</option></select></div>
-    <div id="site-info" class="empty">Sélectionne une mission ou un site pour afficher les consignes.</div>
-    <div class="divider"></div>
-    <button class="btn primary full" type="submit">Prendre poste</button>
+  return `<form id="take-shift-form" class="take-shift-flow">
+    <section class="shift-step">
+      <div class="shift-step-head"><span class="shift-step-number">1</span><div><h3>Choisir la mission</h3><p>La mission planifiée sélectionne automatiquement le site.</p></div></div>
+      <div class="field"><label>Mission planifiée</label><select class="select" name="missionId" id="mission-select"><option value="">Chargement des missions...</option></select></div>
+      <div class="field"><label>Site</label><select class="select" name="siteId" id="site-select" required><option value="">Chargement des sites...</option></select></div>
+    </section>
+    <section class="shift-step">
+      <div class="shift-step-head"><span class="shift-step-number">2</span><div><h3>Lire les consignes</h3><p>Les informations critiques du site sont mises en avant.</p></div></div>
+      <div id="site-info" class="empty">Sélectionne une mission ou un site pour afficher les consignes.</div>
+    </section>
+    <section class="shift-step camera-checkin">
+      <div class="shift-step-head"><span class="shift-step-number">3</span><div><h3>Photo de prise de poste</h3><p>Prends une photo du poste, de l’accès principal ou de ta présence sur site.</p></div></div>
+      <label class="camera-trigger" for="checkin-photo-input"><span>📷 Ouvrir l’appareil photo</span><small>Obligatoire pour démarrer la mission</small></label>
+      <input id="checkin-photo-input" type="file" accept="image/*" capture="environment" hidden>
+      <div id="checkin-photo-preview" class="camera-preview"><span>Aucune photo enregistrée</span></div>
+      <div class="checkline camera-consent"><input type="checkbox" id="checkin-photo-confirm" disabled> <span>Je confirme que cette photo correspond à ma prise de poste actuelle.</span></div>
+    </section>
+    <button class="btn primary full shift-start-cta" id="take-shift-submit" type="submit" disabled>Démarrer ma mission</button>
   </form>`;
 }
 async function bindAgentHome(shift){
@@ -442,6 +569,19 @@ async function bindAgentHome(shift){
     const [sites, missions] = await Promise.all([getActiveSites(), getAgentPlannedMissions()]);
     const select = document.querySelector('#site-select');
     const missionSelect = document.querySelector('#mission-select');
+    const photoInput = document.querySelector('#checkin-photo-input');
+    const photoPreview = document.querySelector('#checkin-photo-preview');
+    const photoConfirm = document.querySelector('#checkin-photo-confirm');
+    const submitButton = document.querySelector('#take-shift-submit');
+    let checkInPhoto = null;
+    const selectedSite = () => {
+      const mission = missions.find(m => m.id === missionSelect?.value) || null;
+      return sites.find(s => s.id === (mission?.siteId || select?.value)) || null;
+    };
+    const syncSubmitState = () => {
+      if (!submitButton) return;
+      submitButton.disabled = !(selectedSite() && checkInPhoto && photoConfirm?.checked);
+    };
     if (select) select.innerHTML = `<option value="">Choisir un site</option>` + sites.map(s => `<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
     if (missionSelect) {
       missionSelect.innerHTML = `<option value="">Prise de poste libre</option>` + missions.map(m => `<option value="${safe(m.id)}">${safe(m.siteNom || 'Site')} · ${dateText(m.scheduledStart)}</option>`).join('');
@@ -449,9 +589,32 @@ async function bindAgentHome(shift){
         const m = missions.find(x => x.id === missionSelect.value);
         if (m && select) select.value = m.siteId;
         renderTakeShiftInfo(sites.find(s => s.id === (m?.siteId || select?.value)), m);
+        syncSubmitState();
       });
     }
-    if (select) select.addEventListener('change', () => renderTakeShiftInfo(sites.find(s => s.id === select.value), missions.find(m => m.id === missionSelect?.value)));
+    if (select) select.addEventListener('change', () => {
+      renderTakeShiftInfo(sites.find(s => s.id === select.value), missions.find(m => m.id === missionSelect?.value));
+      syncSubmitState();
+    });
+    photoInput?.addEventListener('change', async () => {
+      const file = photoInput.files?.[0];
+      if (!file) return;
+      if (photoPreview) photoPreview.innerHTML = '<span>Compression et sécurisation de la photo...</span>';
+      try {
+        checkInPhoto = await compressCheckInPhoto(file);
+        if (photoPreview) photoPreview.innerHTML = `<img src="${safe(checkInPhoto.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo prête</strong><span>${Math.round(checkInPhoto.bytes / 1024)} Ko · ${checkInPhoto.width}×${checkInPhoto.height}</span></div>`;
+        if (photoConfirm) { photoConfirm.disabled = false; photoConfirm.checked = true; }
+        toast('Photo de prise de poste enregistrée.', 'success');
+      } catch(error) {
+        console.error(error);
+        checkInPhoto = null;
+        if (photoConfirm) { photoConfirm.disabled = true; photoConfirm.checked = false; }
+        if (photoPreview) photoPreview.innerHTML = `<span>${safe(error.message || 'Photo impossible à traiter.')}</span>`;
+        toast(error.message || 'Photo impossible à traiter.', 'error');
+      }
+      syncSubmitState();
+    });
+    photoConfirm?.addEventListener('change', syncSubmitState);
     const form = document.querySelector('#take-shift-form');
     form?.addEventListener('submit', async e => {
       e.preventDefault();
@@ -460,9 +623,19 @@ async function bindAgentHome(shift){
       const mission = missions.find(m => m.id === fd.get('missionId')) || null;
       const site = sites.find(s => s.id === (mission?.siteId || fd.get('siteId')));
       if (!site) return toast('Sélectionne un site.', 'warning');
-      await takeShift(site, mission);
+      if (!checkInPhoto || !photoConfirm?.checked) return toast('La photo de prise de poste est obligatoire.', 'warning');
+      submitButton.disabled = true;
+      submitButton.textContent = 'Prise de poste en cours...';
+      await takeShift(site, mission, checkInPhoto);
     });
   } else {
+    const refreshElapsed = () => {
+      const elapsed = document.querySelector('#shift-elapsed');
+      if (elapsed) elapsed.textContent = elapsedShiftText(shift.startTime);
+    };
+    refreshElapsed();
+    const elapsedTimer = setInterval(refreshElapsed, 60000);
+    unsubscribeList.push(() => clearInterval(elapsedTimer));
     document.querySelector('#end-shift-btn')?.addEventListener('click', () => endShift(shift));
   }
 }
@@ -471,28 +644,63 @@ function renderTakeShiftInfo(site, mission){
   if (!box) return;
   if (!site) return box.innerHTML = 'Sélectionne une mission ou un site pour afficher les consignes.';
   const late = mission && missionIsLate(mission) ? `<span class="pill red">Retard détecté</span>` : '';
-  box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">${safe(site.name)} ${late}</div><div class="item-meta">Client : ${safe(site.clientName || '—')}<br>Adresse : ${safe(site.address || '—')}<br>Contact urgence : ${safe(site.emergencyContact || '—')}<br>${mission ? `Mission prévue : ${dateText(mission.scheduledStart)} → ${dateText(mission.scheduledEnd)}<br>Type : ${safe(mission.type || 'Mission')}` : 'Mission : prise de poste libre'}<br><br>${safe(mission?.instructions || site.instructions || 'Aucune consigne renseignée.')}</div></div></div>`;
+  const instructions = safe(mission?.instructions || site.instructions || 'Aucune consigne renseignée.').replace(/\n/g, '<br>');
+  box.innerHTML = `<article class="site-brief">
+    <header class="site-brief-head"><div><span class="site-brief-label">SITE DE MISSION</span><h3>${safe(site.name)}</h3><p>${safe(site.clientName || 'Client non renseigné')}</p></div>${late}</header>
+    <div class="site-facts">
+      <div><span>Adresse</span><strong>${safe(site.address || '—')}</strong></div>
+      <div><span>Contact d’urgence</span><strong>${safe(site.emergencyContact || '—')}</strong></div>
+      <div><span>Horaire</span><strong>${mission ? `${dateText(mission.scheduledStart)} → ${dateText(mission.scheduledEnd)}` : 'Prise de poste libre'}</strong></div>
+      <div><span>Type</span><strong>${safe(mission?.type || 'Mission libre')}</strong></div>
+    </div>
+    <section class="site-instructions"><span>CONSIGNES OPÉRATIONNELLES</span><p>${instructions}</p></section>
+  </article>`;
 }
-async function takeShift(site, mission=null){
+async function takeShift(site, mission=null, checkInPhoto=null){
+  let shiftDoc = null;
   try {
     const existing = await findActiveShift();
     if (existing) return toast('Un poste est déjà ouvert. Termine-le avant d’en ouvrir un autre.', 'warning');
-    const gps = await getGPS();
+    if (!checkInPhoto?.dataUrl) return toast('La photo de prise de poste est obligatoire.', 'warning');
+    const gps = await getGPS({ enableHighAccuracy:true, timeout:12000, maximumAge:0 });
     const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
-    const shiftDoc = await addDoc(collectionRef('shifts'), {
+    shiftDoc = await addDoc(collectionRef('shifts'), {
       agentId: currentUser.uid, agentNom, siteId: site.id, siteNom: site.name,
       missionId: mission?.id || null, missionTitle: mission ? `${mission.siteNom || site.name} · ${dateText(mission.scheduledStart)}` : null,
       scheduledStart: mission?.scheduledStart || null, scheduledEnd: mission?.scheduledEnd || null, shiftType: mission?.type || 'Mission libre', missionInstructions: mission?.instructions || null,
-      startTime: serverTimestamp(), positionGPS: gps, status:'active', handoverAcknowledged:false, createdAt: serverTimestamp(), createdBy: currentUser.uid
+      startTime: serverTimestamp(), positionGPS: gps, status:'active', handoverAcknowledged:false,
+      checkInPhotoAvailable:true, checkInPhotoCapturedAt:checkInPhoto.capturedAt, checkInPhotoBytes:checkInPhoto.bytes,
+      createdAt: serverTimestamp(), createdBy: currentUser.uid
     });
+    try {
+      await setDoc(docRef('shiftProofs', shiftDoc.id), {
+        shiftId:shiftDoc.id, agentId:currentUser.uid, agentNom, siteId:site.id, siteNom:site.name,
+        imageDataUrl:checkInPhoto.dataUrl, mimeType:checkInPhoto.mimeType, bytes:checkInPhoto.bytes,
+        width:checkInPhoto.width, height:checkInPhoto.height, capturedAt:checkInPhoto.capturedAt,
+        createdAt:serverTimestamp(), createdBy:currentUser.uid
+      });
+    } catch(proofError) {
+      await deleteDoc(docRef('shifts', shiftDoc.id)).catch(()=>{});
+      throw new Error('La preuve photo n’a pas pu être enregistrée. Publie les règles Firestore V5.4 puis réessaie.');
+    }
+    await addDoc(collectionRef('reports'), {
+      agentId:currentUser.uid, agentNom, siteId:site.id, siteNom:site.name, shiftId:shiftDoc.id, missionId:mission?.id || null,
+      category:'Prise de service', severity:'Normal', message:`Prise de poste confirmée sur ${site.name}. Photo de contrôle${gps ? ' et position GPS' : ''} enregistrée${gps ? 's' : ''}.`,
+      photoProofAvailable:true, gps, status:'new', isLocked:true, systemGenerated:true, eventType:'shift_start',
+      createdAt:serverTimestamp(), createdBy:currentUser.uid
+    }).catch(error => console.warn('Rapport automatique de prise de poste non créé', error));
     if (mission?.id) await updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
     await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() });
     currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
     syncOneSignalIdentity().catch(() => {});
-    await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null });
-    toast('Poste démarré', 'success');
+    await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
+    toast('Prise de poste confirmée', 'success');
     renderAgentHome();
-  } catch(error){ console.error(error); toast('Erreur prise de poste. Vérifie les droits Firebase.', 'error'); }
+  } catch(error){
+    console.error(error);
+    toast(error.message || 'Erreur prise de poste. Vérifie les droits Firebase.', 'error');
+    renderAgentHome();
+  }
 }
 async function loadAgentHandoverCard(shift){
   const box = document.querySelector('#agent-handover-card');
@@ -518,27 +726,45 @@ async function endShift(shift){
     const reports = reportsSnap.docs.map(d=>d.data());
     const incidentsCount = reports.filter(r => ['Incident','Intervention','Anomalie'].includes(r.category) || ['Important','Critique'].includes(r.severity)).length;
     const score = computeConformityScore({ shift, reportsCount:reportsSnap.size, roundsCount:roundsSnap.size, incidentsCount });
-    showModal('Clôture de mission', `<form id="end-shift-form">
+    const agentName = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
+    showModal('Terminer la mission', `<form id="end-shift-form" class="end-shift-flow">
+      <div class="end-shift-hero"><span>POSTE EN COURS DEPUIS</span><strong>${elapsedShiftText(shift.startTime)}</strong><p>${safe(shift.siteNom)} · prise de poste ${dateText(shift.startTime)}</p></div>
       <div class="mission-kpis"><div class="mini-kpi"><strong>${reportsSnap.size}</strong><span>Rapports</span></div><div class="mini-kpi green"><strong>${roundsSnap.size}</strong><span>Rondes</span></div><div class="mini-kpi ${incidentsCount?'orange':'green'}"><strong>${incidentsCount}</strong><span>Événements</span></div><div class="mini-kpi ${score < 70 ? 'red' : score < 90 ? 'orange' : 'green'}"><strong>${score}%</strong><span>Conformité</span></div></div>
       <div class="field"><label>Note de relève pour l’agent suivant</label><textarea class="textarea" name="handoverNote" placeholder="RAS, point à surveiller, incident en cours, consigne client..."></textarea></div>
-      <label class="checkline"><input type="checkbox" name="certify" required> Je certifie avoir terminé ma mission, transmis les informations nécessaires et signalé les anomalies constatées.</label>
-      <div class="field"><label>Signature agent</label><input class="input" name="signatureName" required placeholder="Nom et prénom"></div>
-      <button class="btn danger full" type="submit">Clôturer la mission</button>
+      <label class="checkline"><input type="checkbox" name="certify" required> Je confirme avoir terminé mon service et transmis les informations utiles.</label>
+      <div class="field"><label>Signature agent</label><input class="input" name="signatureName" required value="${safe(agentName)}" placeholder="Nom et prénom"></div>
+      <button class="btn danger full end-shift-cta" type="submit">Confirmer la fin de poste</button>
+      <p class="muted end-shift-note">La fin de service sera ajoutée automatiquement à la main courante. Aucun rapport manuel n’est nécessaire.</p>
     </form>`);
     document.querySelector('#end-shift-form')?.addEventListener('submit', async e => {
       e.preventDefault();
-      const fd = new FormData(e.currentTarget);
+      const form = e.currentTarget;
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      button.textContent = 'Clôture en cours...';
+      const fd = new FormData(form);
+      const endGps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+      let finalReportsCount = reportsSnap.size;
+      try {
+        await addDoc(collectionRef('reports'), {
+          agentId:currentUser.uid, agentNom:agentName, siteId:shift.siteId, siteNom:shift.siteNom, shiftId:shift.id, missionId:shift.missionId || null,
+          category:'Fin de service', severity:'Normal', message:`Fin de poste confirmée. Relève : ${fd.get('handoverNote') || 'RAS'}.`,
+          gps:endGps, status:'new', isLocked:true, systemGenerated:true, eventType:'shift_end',
+          createdAt:serverTimestamp(), createdBy:currentUser.uid
+        });
+        finalReportsCount += 1;
+      } catch(reportError) { console.warn('Rapport automatique de fin de poste non créé', reportError); }
       await updateDoc(docRef('shifts', shift.id), {
-        completedAt: serverTimestamp(), status:'completed', reportsCount: reportsSnap.size, roundsCount: roundsSnap.size, incidentsCount, conformityScore:score,
+        completedAt: serverTimestamp(), endPositionGPS:endGps, status:'completed', reportsCount: finalReportsCount, roundsCount: roundsSnap.size, incidentsCount, conformityScore:score,
         handoverNote: fd.get('handoverNote') || 'RAS', signatureName: fd.get('signatureName'), signatureStatement:true,
         updatedAt: serverTimestamp(), updatedBy: currentUser.uid
       });
-      if (shift.missionId) await updateDoc(docRef('missions', shift.missionId), { status:'completed', actualEnd:serverTimestamp(), reportsCount:reportsSnap.size, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, completedBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
+      if (shift.missionId) await updateDoc(docRef('missions', shift.missionId), { status:'completed', actualEnd:serverTimestamp(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, completedBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
       await updateDoc(docRef('users', currentUser.uid), { statut:'hors_poste', siteActuel:null, siteActuelNom:null, lastSeen: serverTimestamp() });
       currentProfile = { ...currentProfile, statut:'hors_poste', siteActuel:null, siteActuelNom:null };
       syncOneSignalIdentity().catch(() => {});
-      await addAudit('shift_end', { shiftId: shift.id, reportsCount: reportsSnap.size, roundsCount: roundsSnap.size, conformityScore:score });
-      closeModal(); toast('Poste terminé', 'success'); renderAgentHome();
+      await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps });
+      closeModal(); toast('Fin de poste confirmée', 'success'); renderAgentHome();
     });
   } catch(error){ console.error(error); toast('Erreur fin de poste.', 'error'); }
 }
@@ -572,7 +798,7 @@ async function renderAgentMCI(){
   listenSiteReports(shift?.siteId);
 }
 function mciForm(shift){
-  const cats = ['Ronde','Anomalie','Incident','Information','Intervention','Consigne reçue','Prise de service','Fin de service'];
+  const cats = ['Ronde','Anomalie','Incident','Information','Intervention','Consigne reçue'];
   const templates = [
     'Ronde effectuée sans anomalie. Zone contrôlée, accès vérifiés, RAS.',
     'Portail et accès principaux vérifiés. Aucun signe d’effraction constaté.',
@@ -784,7 +1010,7 @@ async function renderQGHome(){
       <div class="card-title map-card-title"><div><h2>Carte opérationnelle</h2><p>Vue lisible des sites géolocalisés et agents en poste</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div>
       <div class="map-legend map-legend-premium"><span><i class="legend-dot agent"></i>Agents en poste</span><span><i class="legend-dot site"></i>Sites client</span><span class="muted">Clique sur un point pour ouvrir Google Maps</span></div>
       <div id="qg-map" class="map premium-map premium-map-xl"></div>
-      <div id="map-empty-help" class="map-empty-help hidden">Ajoute latitude / longitude dans Gestion Sites pour afficher tes sites ici.</div>
+      <div id="map-empty-help" class="map-empty-help hidden">Renseigne une adresse complète dans Gestion Sites : la position sera calculée automatiquement.</div>
     </section>
     <section class="grid cols-2" style="margin-top:16px">
       <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, inactivité, SOS, critiques</p></div><button class="btn small" data-route="notifications">Voir tout</button></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
@@ -879,6 +1105,12 @@ async function initQGMap(){
     syncBounds(); setTimeout(fitAll, 80);
   }, ()=>{}));
 
+  const agentPopupHtml = (s, lat, lng, photoDataUrl='', loadingPhoto=false) => `<div class="map-popup agent-map-popup">
+    <div class="agent-popup-head"><div><strong>${safe(s.agentNom || 'Agent')}</strong><span>${safe(s.siteNom || 'Site')}</span></div><span class="pill green">En poste</span></div>
+    <div class="map-popup-kpis"><div><span>Prise de poste</span><strong>${dateText(s.startTime)}</strong></div><div><span>Depuis</span><strong>${elapsedShiftText(s.startTime)}</strong></div><div><span>Mission</span><strong>${safe(s.shiftType || 'Mission')}</strong></div></div>
+    ${loadingPhoto ? '<div class="map-photo-loading">Chargement de la preuve photo...</div>' : photoDataUrl ? `<img class="map-checkin-photo" src="${safe(photoDataUrl)}" alt="Photo de prise de poste">` : '<div class="map-photo-loading">Aucune photo disponible</div>'}
+    <a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a>
+  </div>`;
   const q = query(collectionRef('shifts'), where('status','==','active'));
   unsubscribeList.push(onSnapshot(q, snap => {
     mapAgentLayer.clearLayers();
@@ -888,13 +1120,32 @@ async function initQGMap(){
       const lat = Number(gps.lat); const lng = Number(gps.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
       const initials = String(s.agentNom || 'A').split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
-      const marker = L.marker([lat,lng], { icon:markerIcon('agent', initials) }).addTo(mapAgentLayer)
-        .bindPopup(`<div class="map-popup"><strong>${safe(s.agentNom || 'Agent')}</strong><span>${safe(s.siteNom || 'Site')}</span><span>Prise de poste : ${dateText(s.startTime)}</span><a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a></div>`);
+      const marker = L.marker([lat,lng], { icon:markerIcon('agent', initials) }).addTo(mapAgentLayer);
+      marker.__spShift = s;
+      marker.__spPhoto = '';
+      marker.bindPopup(agentPopupHtml(s, lat, lng, '', !!s.checkInPhotoAvailable), { maxWidth:320 });
+      marker.on('popupopen', async () => {
+        marker.setPopupContent(agentPopupHtml(s, lat, lng, marker.__spPhoto, !!s.checkInPhotoAvailable && !marker.__spPhoto));
+        if (s.checkInPhotoAvailable && !marker.__spPhoto) {
+          const proofSnap = await getDoc(docRef('shiftProofs', s.id)).catch(()=>null);
+          marker.__spPhoto = proofSnap?.exists?.() ? (proofSnap.data().imageDataUrl || '') : '';
+          if (marker.isPopupOpen()) marker.setPopupContent(agentPopupHtml(s, lat, lng, marker.__spPhoto, false));
+        }
+      });
       mapMarkers.push(marker); mapAgentPoints.push([lat,lng]);
     });
     document.querySelector('#map-empty-help')?.classList.toggle('hidden', mapSitePoints.length > 0 || mapAgentPoints.length > 0);
     syncBounds(); setTimeout(fitAll, 80);
   }));
+  const popupElapsedTimer = setInterval(() => {
+    mapAgentLayer?.eachLayer?.(layer => {
+      if (layer?.isPopupOpen?.() && layer.__spShift) {
+        const gps = layer.__spShift.positionGPS || {};
+        layer.setPopupContent(agentPopupHtml(layer.__spShift, Number(gps.lat), Number(gps.lng), layer.__spPhoto || '', false));
+      }
+    });
+  }, 60000);
+  unsubscribeList.push(() => clearInterval(popupElapsedTimer));
 
   document.querySelector('#map-reset')?.addEventListener('click', fitAll);
   document.querySelector('#map-locate')?.addEventListener('click', async()=>{
@@ -1923,48 +2174,97 @@ function renderSitesTable(rows){
   document.querySelectorAll('[data-delete-site]').forEach(btn => btn.addEventListener('click', () => requestDeleteSite(rows.find(s=>s.id===btn.dataset.deleteSite))));
 }
 function showSiteForm(s={}){
+  const existingLat = s.gps?.lat ?? s.latitude ?? '';
+  const existingLng = s.gps?.lng ?? s.longitude ?? '';
   showModal(s.id?'Modifier site':'Ajouter site', `<form id="site-form"><div class="form-grid">
     <div class="field"><label>Nom du site</label><input class="input" name="name" value="${safe(s.name || '')}" required></div>
     <div class="field"><label>Client</label><input class="input" name="clientName" value="${safe(s.clientName || '')}"></div>
-    <div class="field"><label>Adresse</label><input class="input" name="address" value="${safe(s.address || '')}"></div>
+    <div class="field field-wide"><label>Adresse complète</label><div class="address-geocode-row"><input class="input" id="site-address" name="address" value="${safe(s.address || '')}" placeholder="250 rue Jean Aicard, 83300 Draguignan" required><button class="btn" id="site-geocode-btn" type="button">Localiser</button></div><div id="site-geocode-status" class="geocode-status ${existingLat!==''&&existingLng!==''?'success':''}">${existingLat!==''&&existingLng!==''?'Position cartographique déjà enregistrée.':'La position sera calculée automatiquement depuis l’adresse.'}</div></div>
     <div class="field"><label>Contact client</label><input class="input" name="contactName" value="${safe(s.contactName || '')}"></div>
     <div class="field"><label>Téléphone client</label><input class="input" name="contactPhone" value="${safe(s.contactPhone || '')}"></div>
     <div class="field"><label>Urgence</label><input class="input" name="emergencyContact" value="${safe(s.emergencyContact || '')}"></div>
     <div class="field"><label>WhatsApp QG</label><input class="input" name="whatsappQG" value="${safe(s.whatsappQG || DEFAULT_QG_WHATSAPP)}"></div>
-    <div class="field"><label>Latitude carte</label><input class="input mono" name="latitude" type="number" step="any" value="${safe(s.gps?.lat ?? s.latitude ?? '')}" placeholder="43.433"></div>
-    <div class="field"><label>Longitude carte</label><input class="input mono" name="longitude" type="number" step="any" value="${safe(s.gps?.lng ?? s.longitude ?? '')}" placeholder="6.737"></div>
     <div class="field"><label>Couleur planning</label><div class="color-field"><input class="color-input" name="planningColor" type="color" value="${normalizeHexColor(s.planningColor) || planningColorForSite(s.id || 'nouveau-site')}"><span>Différencie ce site sur toutes les vues planning.</span></div></div>
     ${isStrictAdmin()?`<div class="field"><label>Tarif horaire HT (€)</label><input class="input" name="hourlyRate" type="number" min="0" step="0.01" value="${safe(s.hourlyRate ?? '')}" placeholder="25.00"></div>
     <div class="field"><label>TVA par défaut (%)</label><input class="input" name="vatRate" type="number" min="0" max="100" step="0.1" value="${safe(s.vatRate ?? '20')}"></div>
     <div class="field"><label>Email facturation client</label><input class="input" name="billingEmail" type="email" value="${safe(s.billingEmail || '')}"></div>
     <div class="field"><label>Adresse de facturation</label><input class="input" name="billingAddress" value="${safe(s.billingAddress || s.address || '')}"></div>`:''}
     <div class="field"><label>Actif</label><select class="select" name="isActive"><option value="true" ${s.isActive!==false?'selected':''}>Oui</option><option value="false" ${s.isActive===false?'selected':''}>Non</option></select></div>
-  </div><div class="field"><label>Consignes principales</label><textarea class="textarea" name="instructions">${safe(s.instructions || '')}</textarea></div><button class="btn primary full" type="submit">Enregistrer site</button></form>`, 'wide');
-  document.querySelector('#site-form').addEventListener('submit', async e => {
+  </div>
+  <details class="advanced-coordinates"><summary>Réglage manuel de la position (facultatif)</summary><div class="form-grid"><div class="field"><label>Latitude</label><input class="input mono" id="site-latitude" name="latitude" type="number" step="any" value="${safe(existingLat)}" placeholder="43.433"></div><div class="field"><label>Longitude</label><input class="input mono" id="site-longitude" name="longitude" type="number" step="any" value="${safe(existingLng)}" placeholder="6.737"></div></div></details>
+  <div class="field"><label>Consignes principales</label><textarea class="textarea site-instructions-input" name="instructions" placeholder="Consignes opérationnelles, accès, rondes, filtrage, contacts...">${safe(s.instructions || '')}</textarea></div><button class="btn primary full" type="submit">Enregistrer site</button></form>`, 'wide');
+  const form = document.querySelector('#site-form');
+  const addressInput = document.querySelector('#site-address');
+  const latInput = document.querySelector('#site-latitude');
+  const lngInput = document.querySelector('#site-longitude');
+  const statusBox = document.querySelector('#site-geocode-status');
+  const locateButton = document.querySelector('#site-geocode-btn');
+  let lastGeocodedAddress = existingLat !== '' && existingLng !== '' ? String(s.address || '').trim() : '';
+  let geocodeMeta = s.geocode || null;
+  const setGeoStatus = (message, type='') => {
+    if (!statusBox) return;
+    statusBox.className = `geocode-status ${type}`.trim();
+    statusBox.textContent = message;
+  };
+  const locateAddress = async () => {
+    const address = String(addressInput?.value || '').trim();
+    if (!address) throw new Error('Renseigne d’abord l’adresse du site.');
+    locateButton.disabled = true;
+    locateButton.textContent = 'Recherche...';
+    setGeoStatus('Recherche de l’adresse dans la Base Adresse Nationale...', 'loading');
+    try {
+      const result = await geocodeAddress(address);
+      latInput.value = result.lat;
+      lngInput.value = result.lng;
+      lastGeocodedAddress = address;
+      geocodeMeta = { label:result.label, score:result.score, source:result.source, geocodedAt:new Date().toISOString() };
+      setGeoStatus(`Adresse localisée : ${result.label}`, 'success');
+      return result;
+    } catch(error) {
+      setGeoStatus(error.message || 'Adresse introuvable.', 'error');
+      throw error;
+    } finally {
+      locateButton.disabled = false;
+      locateButton.textContent = 'Localiser';
+    }
+  };
+  locateButton?.addEventListener('click', () => locateAddress().catch(error => toast(error.message, 'warning')));
+  addressInput?.addEventListener('input', () => {
+    if (String(addressInput.value || '').trim() !== lastGeocodedAddress) setGeoStatus('Adresse modifiée : la position sera recalculée à l’enregistrement.', '');
+  });
+  form.addEventListener('submit', async e => {
     e.preventDefault();
-    const form = e.currentTarget;
     const fd = new FormData(form);
     const siteId = s.id || `site_${Date.now()}`;
     const submitBtn = form.querySelector('button[type="submit"]');
     submitBtn.disabled = true;
     try {
+      const address = String(fd.get('address') || '').trim();
+      let lat = Number(fd.get('latitude'));
+      let lng = Number(fd.get('longitude'));
+      const hasManualCoordinates = fd.get('latitude') !== '' && fd.get('longitude') !== '' && Number.isFinite(lat) && Number.isFinite(lng);
+      if (!hasManualCoordinates || address !== lastGeocodedAddress) {
+        const result = await locateAddress();
+        lat = result.lat;
+        lng = result.lng;
+      }
       const payload = {
         siteId,
-        name:fd.get('name'), clientName:fd.get('clientName'), address:fd.get('address'),
+        name:fd.get('name'), clientName:fd.get('clientName'), address,
         contactName:fd.get('contactName'), contactPhone:fd.get('contactPhone'), emergencyContact:fd.get('emergencyContact'),
         whatsappQG:fd.get('whatsappQG'), instructions:fd.get('instructions'), isActive:fd.get('isActive')==='true',
         planningColor: normalizeHexColor(fd.get('planningColor')) || planningColorForSite(siteId),
-        gps: (fd.get('latitude') !== '' && fd.get('longitude') !== '') ? { lat:Number(fd.get('latitude')), lng:Number(fd.get('longitude')) } : (s.gps || null),
+        gps:{ lat, lng }, geocode:geocodeMeta,
         updatedAt:serverTimestamp(), updatedBy:currentUser.uid,
         createdAt:s.createdAt || serverTimestamp(), createdBy:s.createdBy || currentUser.uid
       };
       if (isStrictAdmin()) Object.assign(payload, { hourlyRate:Number(fd.get('hourlyRate') || 0), vatRate:Number(fd.get('vatRate') || 0), billingEmail:fd.get('billingEmail') || '', billingAddress:fd.get('billingAddress') || '' });
       await setDoc(docRef('sites', siteId), payload, { merge:true });
-      await addAudit('site_saved', { siteId });
-      closeModal(); toast('Site enregistré', 'success');
+      await addAudit('site_saved', { siteId, geocoded:true, lat, lng });
+      closeModal(); toast('Site enregistré et positionné sur la carte', 'success');
     } catch(error) {
       console.error(error);
-      toast(userFriendlyError(error, 'Site impossible à enregistrer. Vérifie ton rôle admin et les règles Firestore.'), 'error');
+      toast(userFriendlyError(error, error.message || 'Site impossible à enregistrer. Vérifie l’adresse et les droits Firebase.'), 'error');
     } finally {
       submitBtn.disabled = false;
     }
@@ -2035,9 +2335,10 @@ async function renderQGFlash(){
   const pushStatus = pushIsConfigured() && pushWorkerIsConfigured()
     ? '<span class="pill green">Push configuré</span>'
     : '<span class="pill orange">Push à configurer</span>';
-  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div>${pushStatus}</div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target">${targetOptions}</select></div></div><button class="btn primary full" type="submit">Envoyer Flash</button></form><div class="divider"></div><button class="btn full" id="configure-push-secret">Configurer la clé d’envoi push sur ce PC</button><p class="muted" style="font-size:12px;margin-top:10px">Le Flash est toujours visible dans l’app. La notification écran verrouillé nécessite OneSignal + Cloudflare Worker.</p></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture et statut push</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
+  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div>${pushStatus}</div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target">${targetOptions}</select></div></div><button class="btn primary full" type="submit">Envoyer Flash</button></form><div class="divider"></div><button class="btn full" id="configure-push-secret">Configurer la clé d’envoi push sur ce PC</button><button class="btn full" id="diagnose-push" type="button">Diagnostic notifications</button><p class="muted" style="font-size:12px;margin-top:10px">Le Flash est toujours visible dans l’app. La notification écran verrouillé nécessite OneSignal + Cloudflare Worker.</p></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture et statut push</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
   render(page('Messages Flash QG', 'Communication descendante immédiate', body));
   document.querySelector('#configure-push-secret')?.addEventListener('click', configurePushSecret);
+  document.querySelector('#diagnose-push')?.addEventListener('click', diagnosePushSetup);
   document.querySelector('#flash-form').addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -2631,6 +2932,7 @@ function isStandalonePwa(){
   return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
 }
 function oneSignalScopePath(){
+  // Le Worker OneSignal utilise un sous-dossier dédié pour ne pas remplacer le Worker PWA principal.
   return new URL('./push/onesignal/', location.href).pathname;
 }
 function oneSignalWorkerPath(){
@@ -2689,8 +2991,13 @@ async function registerPushNotifications(){
     await OneSignal.Notifications.requestPermission();
     if (!OneSignal.Notifications.permission) return toast('Autorisation notifications refusée.', 'warning');
     await OneSignal.User.PushSubscription.optIn();
+    await new Promise(resolve => setTimeout(resolve, 900));
     const subscriptionId = OneSignal.User.PushSubscription.id || '';
     const token = OneSignal.User.PushSubscription.token || '';
+    if (!subscriptionId && !token) {
+      showModal('Abonnement push non détecté', `<div class="setup-box">L’autorisation semble accordée, mais OneSignal n’a pas encore renvoyé d’abonnement pour cet appareil.</div><ol class="setup-list"><li>Ferme complètement l’app.</li><li>Rouvre-la depuis l’icône de l’écran d’accueil.</li><li>Retourne sur Agent &gt; Activer notifications.</li><li>Vérifie dans OneSignal &gt; Audience &gt; Subscriptions qu’un appareil apparaît.</li></ol>`);
+      return;
+    }
     await setDoc(docRef('pushTokens', `${currentUser.uid}_${subscriptionId || 'onesignal'}`), {
       provider:'onesignal',
       subscriptionId,
@@ -2721,6 +3028,33 @@ function getPushSecret(){
   }
   return secret.trim();
 }
+
+async function diagnosePushSetup(){
+  const secret = localStorage.getItem('sentinelle_push_secret') || '';
+  let workerStatus = 'Non testé';
+  if (pushWorkerIsConfigured()) {
+    try {
+      const res = await fetch(pushConfig.pushWorkerUrl, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret': secret || 'diagnostic' },
+        body:JSON.stringify({ title:'Diagnostic Sentinelle Pro', message:'Test de configuration push', priority:'Information', target:'all', url:new URL('./index.html', location.href).href })
+      });
+      const txt = await res.text();
+      workerStatus = `${res.status} · ${txt.slice(0,180)}`;
+    } catch(error) { workerStatus = `Erreur réseau : ${error.message || error}`; }
+  }
+  const html = `<div class="setup-box">Diagnostic notifications écran verrouillé</div>
+  <ul class="setup-list">
+    <li>OneSignal App ID : <strong>${pushIsConfigured() ? 'OK' : 'manquant'}</strong></li>
+    <li>Worker Cloudflare : <strong>${pushWorkerIsConfigured() ? 'OK' : 'manquant'}</strong></li>
+    <li>Clé secrète sur ce PC : <strong>${secret ? 'OK' : 'manquante'}</strong></li>
+    <li>URL Worker : <code>${safe(pushConfig?.pushWorkerUrl || '—')}</code></li>
+    <li>Résultat Worker : <code>${safe(workerStatus)}</code></li>
+  </ul>
+  <p class="muted">Si le Worker répond 401, la clé secrète locale ne correspond pas à SENTINELLE_PUSH_SECRET dans Cloudflare. Si OneSignal répond avec recipients:0, aucun agent n’a encore activé les notifications sur son téléphone.</p>`;
+  showModal('Diagnostic push', html);
+}
+
 async function sendPushForFlash(flash){
   if (!pushIsConfigured() || !pushWorkerIsConfigured()) {
     return { ok:false, skipped:true, reason:'OneSignal ou Worker non configuré' };
@@ -2883,3 +3217,252 @@ function closeModal(){ document.querySelector('#modal-root')?.remove(); }
 window.addEventListener('beforeunload', () => {
   if (currentUser && db) updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen:serverTimestamp() }).catch(()=>{});
 });
+
+
+// -------------------- V5.2 — DOCUMENTS PREMIUM AZZERA PROTECT --------------------
+// Correctif esthétique : documents PDF/aperçus alignés sur la charte Azzera Protect.
+const AZZERA_DOC_LOGO_DATA_URI = 'data:image/png;base64,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';
+const AZZERA_DOC_BRAND = {
+  obsidian: [20, 28, 37],
+  white: [255, 255, 255],
+  azure: [100, 208, 255],
+  grey: [76, 76, 76],
+  soft: [244, 248, 251],
+  line: [218, 226, 235]
+};
+function pdfTextValue(value){
+  if(value === null || value === undefined || value === '') return '—';
+  return String(value).replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/\s+/g,' ').trim();
+}
+function pdfBrandDocType(type){
+  return ({mci:'MAIN COURANTE', mission:'RAPPORT DE MISSION', rounds:'RONDES', alerts:'SOS / PTI', invoice:'FACTURE'}[type] || 'DOCUMENT OPÉRATIONNEL');
+}
+function pdfDrawLogo(doc, x, y, w, h){
+  try { doc.addImage(AZZERA_DOC_LOGO_DATA_URI, 'PNG', x, y, w, h, undefined, 'FAST'); return; } catch(error) {}
+  const C = AZZERA_DOC_BRAND;
+  doc.setFont('helvetica','bold'); doc.setFontSize(Math.max(18, h)); doc.setTextColor(...C.azure); doc.text('A', x, y + h);
+}
+function pdfAddFooter(doc){
+  const C = AZZERA_DOC_BRAND;
+  const pages = doc.getNumberOfPages();
+  for(let i=1;i<=pages;i++){
+    doc.setPage(i);
+    doc.setDrawColor(...C.line); doc.setLineWidth(.2); doc.line(14, 282, 196, 282);
+    doc.setTextColor(...C.grey); doc.setFont('helvetica','normal'); doc.setFontSize(7.5);
+    doc.text('AZZERA PROTECT · SÉCURITÉ PRIVÉE', 14, 287);
+    doc.text(`Page ${i}/${pages}`, 196, 287, {align:'right'});
+  }
+}
+function pdfEnsureSpace(doc, y, needed=20){
+  if(y + needed <= 276) return y;
+  doc.addPage();
+  const C = AZZERA_DOC_BRAND;
+  doc.setFillColor(...C.obsidian); doc.rect(0,0,210,12,'F');
+  doc.setFillColor(...C.azure); doc.rect(14,11.6,182,.8,'F');
+  return 22;
+}
+function pdfWrapped(doc, text, x, y, width, lineHeight=4.7, opts={}){
+  const lines = doc.splitTextToSize(pdfTextValue(text), width);
+  for(const line of lines){
+    y = pdfEnsureSpace(doc, y, lineHeight + 2);
+    doc.text(line, x, y, opts); y += lineHeight;
+  }
+  return y;
+}
+function pdfSectionTitle(doc, title, y){
+  const C = AZZERA_DOC_BRAND;
+  y = pdfEnsureSpace(doc, y, 14);
+  doc.setFillColor(...C.azure); doc.rect(14, y-4, 3, 8, 'F');
+  doc.setTextColor(...C.obsidian); doc.setFont('helvetica','bold'); doc.setFontSize(12);
+  doc.text(String(title).toUpperCase(), 21, y+1);
+  return y + 9;
+}
+function pdfInfoPanel(doc, items, y){
+  const C = AZZERA_DOC_BRAND;
+  y = pdfEnsureSpace(doc, y, 28);
+  doc.setFillColor(248,250,252); doc.setDrawColor(...C.line); doc.roundedRect(14, y, 182, 24, 2.5, 2.5, 'FD');
+  let x = 18;
+  const colW = 58;
+  items.slice(0,3).forEach((it, idx) => {
+    doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...C.grey);
+    doc.text(String(it.label || '').toUpperCase(), x, y+7);
+    doc.setFont('helvetica','bold'); doc.setFontSize(9.2); doc.setTextColor(...C.obsidian);
+    const lines = doc.splitTextToSize(pdfTextValue(it.value), colW-4).slice(0,2);
+    doc.text(lines, x, y+13);
+    if(idx<2){ doc.setDrawColor(225,231,238); doc.line(x+colW-5, y+5, x+colW-5, y+19); }
+    x += colW;
+  });
+  return y + 34;
+}
+function pdfMetricCards(doc, cards, y){
+  const C = AZZERA_DOC_BRAND;
+  const w = 43.25, gap = 3;
+  y = pdfEnsureSpace(doc, y, 26);
+  cards.slice(0,4).forEach((card, i) => {
+    const x = 14 + i*(w+gap);
+    doc.setFillColor(...C.obsidian); doc.roundedRect(x, y, w, 22, 2.5, 2.5, 'F');
+    doc.setFillColor(...C.azure); doc.rect(x, y, w, 2, 'F');
+    doc.setTextColor(...C.white); doc.setFont('helvetica','bold'); doc.setFontSize(12);
+    doc.text(pdfTextValue(card.value), x+3, y+11);
+    doc.setTextColor(205,216,226); doc.setFont('helvetica','normal'); doc.setFontSize(6.6);
+    doc.text(String(card.label || '').toUpperCase(), x+3, y+17);
+  });
+  return y + 31;
+}
+function pdfDrawTable(doc, headers, rows, widths, y, rowMapper){
+  const C = AZZERA_DOC_BRAND;
+  const x0 = 14;
+  const drawHeader = () => {
+    y = pdfEnsureSpace(doc, y, 12);
+    doc.setFillColor(...C.obsidian); doc.roundedRect(x0, y, widths.reduce((a,b)=>a+b,0), 9, 1.5, 1.5, 'F');
+    let x=x0;
+    headers.forEach((h,i)=>{ doc.setTextColor(...C.white); doc.setFont('helvetica','bold'); doc.setFontSize(6.8); doc.text(String(h).toUpperCase(), x+2, y+6); x+=widths[i]; });
+    y += 10;
+  };
+  drawHeader();
+  if(!rows.length){
+    doc.setFont('helvetica','normal'); doc.setTextColor(...C.grey); doc.setFontSize(9);
+    return pdfWrapped(doc, 'Aucune donnée disponible pour ce document.', x0, y+5, 180, 5) + 3;
+  }
+  rows.forEach((row, idx) => {
+    const cells = rowMapper(row, idx).map(pdfTextValue);
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.2);
+    const split = cells.map((c,i)=>doc.splitTextToSize(c, widths[i]-4));
+    const rowH = Math.max(8, ...split.map(lines=>lines.length*3.8 + 4));
+    if(y + rowH > 276){ doc.addPage(); y = 22; drawHeader(); }
+    doc.setFillColor(idx%2 ? 255 : 248, idx%2 ? 255 : 250, idx%2 ? 255 : 252);
+    doc.rect(x0, y, widths.reduce((a,b)=>a+b,0), rowH, 'F');
+    let x=x0;
+    split.forEach((lines,i)=>{
+      doc.setDrawColor(232,237,243); doc.rect(x, y, widths[i], rowH);
+      doc.setTextColor(i === 0 ? 20 : 47, i === 0 ? 28 : 55, i === 0 ? 37 : 69);
+      if(i === 3 || i === 4) doc.setFont('helvetica','bold'); else doc.setFont('helvetica','normal');
+      doc.text(lines, x+2, y+4.8);
+      x += widths[i];
+    });
+    y += rowH;
+  });
+  return y + 4;
+}
+function pdfDocumentTitle(d){ return pdfTextValue(d.title || documentTypeLabel(d.type)); }
+function pdfMissionPayload(d){ const p=d?.payload||{}; return { mission:p.mission||{}, shift:p.shift||{}, rows:p.rows||[] }; }
+function createGeneratedDocumentPdf(d){
+  const jsPDF = getJsPDF();
+  if(!jsPDF) throw new Error('Bibliothèque PDF indisponible. Vérifie ta connexion ou réessaie.');
+  const C = AZZERA_DOC_BRAND;
+  const doc = new jsPDF({ unit:'mm', format:'a4', orientation:'portrait' });
+  doc.setProperties({ title: pdfDocumentTitle(d), subject: pdfBrandDocType(d.type), author:'AZZERA PROTECT · Sentinelle Pro' });
+
+  doc.setFillColor(...C.obsidian); doc.rect(0,0,210,46,'F');
+  doc.setFillColor(...C.azure); doc.rect(14,43,182,1.2,'F');
+  pdfDrawLogo(doc, 14, 8, 18, 18);
+  doc.setTextColor(...C.white); doc.setFont('helvetica','bold'); doc.setFontSize(13.5);
+  doc.text('AZZERA PROTECT', 37, 16);
+  doc.setFontSize(7.6); doc.setFont('helvetica','bold'); doc.setCharSpace(.7);
+  doc.text('SÉCURITÉ PRIVÉE', 37, 22);
+  doc.setCharSpace(0);
+  doc.setFont('helvetica','normal'); doc.setFontSize(7.2); doc.setTextColor(205,216,226);
+  doc.text('On s’occupe du risque. Vous du reste.', 37, 29);
+  doc.setFont('helvetica','bold'); doc.setFontSize(7.4); doc.setTextColor(...C.azure);
+  doc.text(pdfBrandDocType(d.type), 196, 17, { align:'right' });
+  doc.setTextColor(205,216,226); doc.setFont('helvetica','normal'); doc.setFontSize(7.2);
+  doc.text(`Généré le ${new Date().toLocaleString('fr-FR')}`, 196, 24, { align:'right' });
+
+  let y = 58;
+  doc.setTextColor(...C.obsidian); doc.setFont('helvetica','bold'); doc.setFontSize(18);
+  y = pdfWrapped(doc, pdfDocumentTitle(d), 14, y, 178, 7.5) + 2;
+  doc.setDrawColor(...C.azure); doc.setLineWidth(.6); doc.line(14, y, 72, y); y += 8;
+
+  const rows = generatedDocumentRows(d);
+  const metaLines = generatedDocumentMeta(d);
+  const metaItems = [
+    {label:'Type', value:documentTypeLabel(d.type)},
+    {label:'Site', value:d.siteNom || 'Tous sites'},
+    {label:'Volume', value:`${d.rowCount || rows.length || 0} ligne(s)`}
+  ];
+  y = pdfInfoPanel(doc, metaItems, y);
+
+  if(d.type === 'mission'){
+    const {mission, shift, rows:missionRows} = pdfMissionPayload(d);
+    y = pdfMetricCards(doc, [
+      {label:'Rapports', value:missionRows.length},
+      {label:'Rondes', value:shift.roundsCount || mission.roundsCount || 0},
+      {label:'Événements', value:shift.incidentsCount || mission.incidentsCount || 0},
+      {label:'Conformité', value:(shift.conformityScore ?? mission.conformityScore ?? '—') + '%'}
+    ], y);
+    y = pdfSectionTitle(doc, 'Informations mission', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
+    metaLines.forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
+    y += 3;
+    y = pdfSectionTitle(doc, 'Main courante de mission', y);
+    y = pdfDrawTable(doc, ['Heure','Agent','Catégorie','Gravité','Message'], missionRows, [31,34,27,24,66], y, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, r.message]);
+    y = pdfSectionTitle(doc, 'Relève et signature', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
+    y = pdfWrapped(doc, `Signature agent : ${shift.signatureName || '—'}`, 18, y, 174, 5);
+    y = pdfWrapped(doc, `Note de relève : ${shift.handoverNote || 'RAS'}`, 18, y, 174, 5);
+  } else if(d.type === 'invoice'){
+    const inv = d.payload?.invoice || d.payload || {};
+    y = pdfMetricCards(doc, [
+      {label:'Total HT', value:money(inv.subtotal || 0)},
+      {label:'TVA', value:money(inv.vatAmount || 0)},
+      {label:'Total TTC', value:money(inv.total || 0)},
+      {label:'Statut', value:invoiceStatusLabel(inv.status || 'draft')}
+    ], y);
+    y = pdfSectionTitle(doc, 'Détails de facturation', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
+    generatedDocumentMeta(d).forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
+    y += 3;
+    y = pdfSectionTitle(doc, 'Lignes facturées', y);
+    y = pdfDrawTable(doc, ['Désignation','Qté','PU HT','Total HT'], inv.lines || rows, [100,20,30,32], y, l=>[l.description, `${l.quantity || 0} ${l.unit || ''}`, money(l.unitPrice || 0), money(l.amount || 0)]);
+    y += 2; y = pdfEnsureSpace(doc, y, 24);
+    doc.setFillColor(...C.obsidian); doc.roundedRect(120, y, 76, 24, 3, 3, 'F');
+    doc.setTextColor(...C.white); doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.text('TOTAL TTC', 126, y+8);
+    doc.setTextColor(...C.azure); doc.setFontSize(15); doc.text(money(inv.total || 0), 190, y+17, {align:'right'});
+  } else {
+    y = pdfMetricCards(doc, [
+      {label:'Lignes', value:d.rowCount || rows.length || 0},
+      {label:'Site', value:d.siteNom ? '1' : 'Tous'},
+      {label:'Source', value:'QG'},
+      {label:'Format', value:'PDF'}
+    ], y);
+    y = pdfSectionTitle(doc, 'Synthèse', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
+    generatedDocumentMeta(d).forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
+    y += 3;
+    y = pdfSectionTitle(doc, documentTypeLabel(d.type), y);
+    if(d.type === 'mci') y = pdfDrawTable(doc, ['Date','Agent','Site','Gravité','Message'], rows, [30,32,32,24,64], y, r=>[dateText(r.createdAt), r.agentNom, r.siteNom, r.severity || r.category, r.message]);
+    else if(d.type === 'rounds') y = pdfDrawTable(doc, ['Date','Agent','Site','Point','État'], rows, [30,32,32,58,30], y, r=>[dateText(r.scannedAt), r.agentNom, r.siteNom, r.checkpointName, r.isValid === false ? 'Refusé' : 'Validé']);
+    else y = pdfDrawTable(doc, ['Date','Agent','Site','Statut','Message'], rows, [30,32,32,24,64], y, r=>[dateText(r.createdAt), r.agentNom, r.siteNom, r.statut || r.niveau, r.message]);
+  }
+  pdfAddFooter(doc);
+  return doc;
+}
+function azzeraDocHtmlTable(headers, rows, mapper){
+  const body = rows.map((r,i)=>`<tr>${mapper(r,i).map(c=>`<td>${safe(c)}</td>`).join('')}</tr>`).join('');
+  return `<table><thead><tr>${headers.map(h=>`<th>${safe(h)}</th>`).join('')}</tr></thead><tbody>${body || `<tr><td colspan="${headers.length}">Aucune donnée.</td></tr>`}</tbody></table>`;
+}
+function missionReportHtml({ mission, shift={}, reports=[] }){
+  const logo = new URL('./assets/logo.png', location.href).href;
+  const metrics = [
+    ['Rapports', reports.length],
+    ['Rondes', shift.roundsCount || mission.roundsCount || 0],
+    ['Événements', shift.incidentsCount || mission.incidentsCount || 0],
+    ['Conformité', (shift.conformityScore ?? mission.conformityScore ?? '—') + '%']
+  ];
+  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Mission</span><strong>${safe(mission.id || '—')}</strong></div></section><section class="azza-text"><p><strong>Prévu :</strong> ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br><strong>Réalisé :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Catégorie','Gravité','Message'], reports, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, r.message])}</section><section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+}
+function generatedDocumentHtml(d){
+  const p=d?.payload||{};
+  if(d.type==='mission') return missionReportHtml({mission:p.mission||{},shift:p.shift||{},reports:p.rows||[]});
+  const logo=new URL('./assets/logo.png',location.href).href;
+  const rows=generatedDocumentRows(d);
+  let headers=[], mapper;
+  if(d.type==='invoice'){
+    const inv=p.invoice||p||{};
+    headers=['Désignation','Quantité','PU HT','Total HT']; mapper=l=>[l.description, `${l.quantity || 0} ${l.unit || ''}`, money(l.unitPrice), money(l.amount)];
+    rows.splice(0, rows.length, ...(inv.lines || rows));
+  } else if(d.type==='mci'){ headers=['Date','Agent','Site','Catégorie','Gravité','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.category,r.severity,r.message]; }
+  else if(d.type==='rounds'){ headers=['Date','Agent','Site','Point','Méthode','Validité']; mapper=r=>[dateText(r.scannedAt),r.agentNom,r.siteNom,r.checkpointName,r.scanMethod,r.isValid?'Valide':'Refusé']; }
+  else { headers=['Date','Agent','Site','Alerte','Statut','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.typeAlerte,r.statut,r.message]; }
+  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">${safe(pdfBrandDocType(d.type))}<br><small>${dateText(d.createdAt)}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Type</span><strong>${safe(documentTypeLabel(d.type))}</strong></div><div><span>Site</span><strong>${safe(d.siteNom||'Tous sites')}</strong></div><div><span>Volume</span><strong>${d.rowCount||rows.length} ligne(s)</strong></div></section>${p.truncated?'<section class="azza-warning">Aperçu limité aux 350 premières lignes. Le volume total reste enregistré.</section>':''}<section><h3>Contenu du document</h3>${azzeraDocHtmlTable(headers, rows, mapper)}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+}

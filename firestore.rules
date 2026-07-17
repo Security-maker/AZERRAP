@@ -57,6 +57,13 @@ service cloud.firestore {
       allow delete: if isStrictAdmin();
     }
 
+    match /shiftProofs/{shiftId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid);
+      allow create: if isAgent() && request.resource.data.agentId == request.auth.uid && request.resource.data.shiftId == shiftId;
+      allow update: if false;
+      allow delete: if isStrictAdmin();
+    }
+
     match /reports/{reportId} {
       allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid);
       allow create: if isAgent() && request.resource.data.agentId == request.auth.uid && request.resource.data.isLocked == true;
