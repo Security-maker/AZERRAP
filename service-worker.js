@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-6-operational-notifications';
+const CACHE_NAME = 'sentinelle-pro-v5-6-1-onesignal-subscribe-fix';
 const APP_SHELL = [
   './',
   './index.html',
