@@ -1,5 +1,4 @@
 import { firebaseConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './firebase-config.js';
-window.__SENTINELLE_MODULE_LOADED__ = true;
 import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
 import {
   getAuth,
@@ -277,80 +276,41 @@ function sosButton(){
   return `<div class="sos-help hidden" id="sos-help">Maintenir 3 secondes pour déclencher. Relâcher annule l’armement.</div><div class="sos-fixed"><button class="sos-btn" id="sos-btn">SOS<br><small>PTI</small></button></div>`;
 }
 
-function registerMainServiceWorkerLater(){
-  if (!('serviceWorker' in navigator)) return;
-  setTimeout(() => {
-    navigator.serviceWorker.register('./service-worker.js?v=542', { scope:'./' })
-      .then(registration => registration.update().catch(() => {}))
-      .catch(error => console.warn('Service Worker non bloquant :', error));
-  }, 1500);
-}
-
 function boot(){
+  if ('serviceWorker' in navigator) {
+    // Nettoie l'ancien Worker OneSignal enregistré à la racine : il entre en conflit avec le Worker PWA.
+    navigator.serviceWorker.getRegistrations().then(registrations => {
+      registrations.forEach(registration => {
+        const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+        if (/\/(OneSignalSDKWorker|OneSignalSDKUpdaterWorker)\.js(?:\?|$)/.test(scriptUrl) && !scriptUrl.includes('/push/onesignal/')) {
+          registration.unregister().catch(() => {});
+        }
+      });
+    }).catch(() => {}).finally(() => {
+      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    });
+  }
   window.addEventListener('online', () => toast('Connexion rétablie', 'success'));
   window.addEventListener('offline', () => toast('Mode hors ligne — SOS non garanti', 'warning'));
 
-  if (!isConfigured()) {
-    renderSetupMissing();
-    window.__SENTINELLE_RENDERED__ = true;
-    return;
-  }
-
+  if (!isConfigured()) return renderSetupMissing();
   try {
     fbApp = initializeApp(firebaseConfig);
     auth = getAuth(fbApp);
     db = getFirestore(fbApp);
-    storage = null;
+    storage = null; // Storage volontairement désactivé pour rester compatible Spark
   } catch (error) {
     console.error(error);
-    renderFatal('Configuration Firebase invalide', error?.message || String(error));
-    window.__SENTINELLE_RENDERED__ = true;
-    return;
+    return renderFatal('Configuration Firebase invalide', error.message);
   }
 
-  let authResolved = false;
-  const authFallback = setTimeout(() => {
-    if (authResolved) return;
-    console.warn('Firebase Auth tarde à répondre : affichage de la connexion en mode dégradé.');
-    renderLogin();
-    window.__SENTINELLE_RENDERED__ = true;
-  }, 8000);
-
-  try {
-    onAuthStateChanged(auth, async user => {
-      authResolved = true;
-      clearTimeout(authFallback);
-      try {
-        clearSubs();
-        currentUser = user;
-        activeShiftCache = null;
-        if (!user) {
-          renderLogin();
-          window.__SENTINELLE_RENDERED__ = true;
-          registerMainServiceWorkerLater();
-          return;
-        }
-        await loadProfile(user);
-        window.__SENTINELLE_RENDERED__ = true;
-        registerMainServiceWorkerLater();
-      } catch (error) {
-        console.error(error);
-        renderFatal('Erreur de session', error?.message || 'Impossible de restaurer la session.');
-        window.__SENTINELLE_RENDERED__ = true;
-      }
-    }, error => {
-      authResolved = true;
-      clearTimeout(authFallback);
-      console.error(error);
-      renderFatal('Firebase Authentication indisponible', error?.message || String(error));
-      window.__SENTINELLE_RENDERED__ = true;
-    });
-  } catch (error) {
-    clearTimeout(authFallback);
-    console.error(error);
-    renderFatal('Initialisation de session impossible', error?.message || String(error));
-    window.__SENTINELLE_RENDERED__ = true;
-  }
+  onAuthStateChanged(auth, async user => {
+    clearSubs();
+    currentUser = user;
+    activeShiftCache = null;
+    if (!user) return renderLogin();
+    await loadProfile(user);
+  });
 }
 
 async function loadProfile(user){
@@ -370,7 +330,6 @@ async function loadProfile(user){
 }
 
 function render(html){
-  window.__SENTINELLE_RENDERED__ = true;
   $app.className = '';
   $app.innerHTML = html;
   bindGlobalEvents();
@@ -2464,47 +2423,7 @@ function generatedDocumentMeta(d){
   }
   return [`Type : ${documentTypeLabel(d.type)}`, `Site : ${d.siteNom || 'Tous sites'}`, `Lignes : ${d.rowCount || generatedDocumentRows(d).length}`];
 }
-function createGeneratedDocumentPdf(d){
-  const jsPDF = getJsPDF();
-  if (!jsPDF) throw new Error('Bibliothèque PDF indisponible. Vérifie ta connexion ou réessaie.');
-  const doc = new jsPDF({ unit:'mm', format:'a4', orientation:'portrait' });
-  let y = 16;
-  doc.setFillColor(5,10,19); doc.rect(0,0,210,24,'F');
-  doc.setTextColor(244,248,251); doc.setFont('helvetica','bold'); doc.setFontSize(15);
-  doc.text('Sentinelle Pro', 14, 15);
-  doc.setFontSize(9); doc.setFont('helvetica','normal');
-  doc.text('Document opérationnel sécurisé', 150, 15, { align:'right' });
-  y = 34;
-  doc.setTextColor(5,10,19); doc.setFont('helvetica','bold'); doc.setFontSize(16);
-  y = addPdfWrappedText(doc, d.title || documentTypeLabel(d.type), 14, y, 180, 7) + 2;
-  doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(70,80,95);
-  generatedDocumentMeta(d).forEach(line => { y = addPdfWrappedText(doc, line, 14, y, 180, 5); });
-  y += 4; doc.setDrawColor(0,156,255); doc.line(14,y,196,y); y += 8;
-  const rows = generatedDocumentRows(d);
-  doc.setTextColor(5,10,19); doc.setFont('helvetica','bold'); doc.setFontSize(12);
-  doc.text(d.type === 'invoice' ? 'Lignes de facture' : 'Contenu du document', 14, y); y += 7;
-  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(30,38,52);
-  if (!rows.length) {
-    y = addPdfWrappedText(doc, 'Aucune donnée disponible.', 14, y, 180, 5);
-  } else if (d.type === 'mission' || d.type === 'mci') {
-    rows.forEach((r, index) => {
-      const line = `${index+1}. ${dateText(r.createdAt)} · ${r.agentNom || 'Agent'} · ${r.siteNom || d.siteNom || 'Site'} · ${r.category || 'MCI'} · ${r.severity || ''}`;
-      doc.setFont('helvetica','bold'); y = addPdfWrappedText(doc, line, 14, y, 180, 5);
-      doc.setFont('helvetica','normal'); y = addPdfWrappedText(doc, r.message || r.supervisorNote || '—', 18, y, 172, 5) + 2;
-    });
-  } else if (d.type === 'rounds') {
-    rows.forEach((r, index) => { y = addPdfWrappedText(doc, `${index+1}. ${dateText(r.scannedAt)} · ${r.agentNom || 'Agent'} · ${r.siteNom || 'Site'} · ${r.checkpointName || 'Point'} · ${r.scanMethod || 'Scan'} · ${r.isValid === false ? 'Refusé' : 'Valide'}`, 14, y, 180, 5); });
-  } else if (d.type === 'alerts') {
-    rows.forEach((r, index) => { y = addPdfWrappedText(doc, `${index+1}. ${dateText(r.createdAt)} · ${r.agentNom || 'Agent'} · ${r.siteNom || 'Site'} · ${r.typeAlerte || 'SOS/PTI'} · ${r.statut || ''}\n${r.message || ''}`, 14, y, 180, 5) + 1; });
-  } else if (d.type === 'invoice') {
-    const inv = d.payload?.invoice || d.payload || {};
-    (inv.lines || rows).forEach((line, index) => { y = addPdfWrappedText(doc, `${index+1}. ${line.description || ''} · ${line.quantity || 0} ${line.unit || ''} · ${money(line.unitPrice)} HT · ${money(line.amount)} HT`, 14, y, 180, 5); });
-    y += 4; doc.setFont('helvetica','bold');
-    y = addPdfWrappedText(doc, `Total HT : ${money(inv.subtotal)} · TVA : ${money(inv.vatAmount)} · Total TTC : ${money(inv.total)}`, 14, y, 180, 6);
-  }
-  addPdfFooter(doc, doc.getNumberOfPages());
-  return doc;
-}
+/* V5.4.3 : ancienne génération PDF remplacée par le moteur premium Azzera Protect plus bas. */
 function downloadGeneratedPdf(d, { silent=false }={}){
   try {
     const doc = createGeneratedDocumentPdf(d);
@@ -2979,30 +2898,8 @@ function oneSignalScopePath(){
 function oneSignalWorkerPath(){
   return new URL('./push/onesignal/OneSignalSDKWorker.js', location.href).pathname;
 }
-function loadOneSignalSdk(){
-  if (window.OneSignal) return Promise.resolve();
-  if (window.__sentinelleOneSignalSdkPromise) return window.__sentinelleOneSignalSdkPromise;
-  window.OneSignalDeferred = window.OneSignalDeferred || [];
-  window.__sentinelleOneSignalSdkPromise = new Promise((resolve, reject) => {
-    const existing = document.querySelector('script[data-sentinelle-onesignal]');
-    if (existing) {
-      existing.addEventListener('load', resolve, { once:true });
-      existing.addEventListener('error', () => reject(new Error('SDK OneSignal indisponible.')), { once:true });
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = 'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
-    script.async = true;
-    script.dataset.sentinelleOnesignal = '1';
-    script.onload = resolve;
-    script.onerror = () => reject(new Error('SDK OneSignal indisponible.'));
-    document.head.appendChild(script);
-  });
-  return window.__sentinelleOneSignalSdkPromise;
-}
 async function initOneSignal(){
   if (!pushIsConfigured()) return null;
-  await loadOneSignalSdk();
   if (oneSignalInitPromise) return oneSignalInitPromise;
   oneSignalInitPromise = new Promise((resolve, reject) => {
     window.OneSignalDeferred = window.OneSignalDeferred || [];
