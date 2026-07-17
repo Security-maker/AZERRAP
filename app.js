@@ -180,7 +180,19 @@ function sosButton(){
 }
 
 function boot(){
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // Nettoie l'ancien Worker OneSignal enregistré à la racine : il entre en conflit avec le Worker PWA.
+    navigator.serviceWorker.getRegistrations().then(registrations => {
+      registrations.forEach(registration => {
+        const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+        if (/\/(OneSignalSDKWorker|OneSignalSDKUpdaterWorker)\.js(?:\?|$)/.test(scriptUrl) && !scriptUrl.includes('/push/onesignal/')) {
+          registration.unregister().catch(() => {});
+        }
+      });
+    }).catch(() => {}).finally(() => {
+      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    });
+  }
   window.addEventListener('online', () => toast('Connexion rétablie', 'success'));
   window.addEventListener('offline', () => toast('Mode hors ligne — SOS non garanti', 'warning'));
 
@@ -2035,9 +2047,10 @@ async function renderQGFlash(){
   const pushStatus = pushIsConfigured() && pushWorkerIsConfigured()
     ? '<span class="pill green">Push configuré</span>'
     : '<span class="pill orange">Push à configurer</span>';
-  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div>${pushStatus}</div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target">${targetOptions}</select></div></div><button class="btn primary full" type="submit">Envoyer Flash</button></form><div class="divider"></div><button class="btn full" id="configure-push-secret">Configurer la clé d’envoi push sur ce PC</button><p class="muted" style="font-size:12px;margin-top:10px">Le Flash est toujours visible dans l’app. La notification écran verrouillé nécessite OneSignal + Cloudflare Worker.</p></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture et statut push</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
+  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div>${pushStatus}</div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target">${targetOptions}</select></div></div><button class="btn primary full" type="submit">Envoyer Flash</button></form><div class="divider"></div><button class="btn full" id="configure-push-secret">Configurer la clé d’envoi push sur ce PC</button><button class="btn full" id="diagnose-push" type="button">Diagnostic notifications</button><p class="muted" style="font-size:12px;margin-top:10px">Le Flash est toujours visible dans l’app. La notification écran verrouillé nécessite OneSignal + Cloudflare Worker.</p></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture et statut push</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
   render(page('Messages Flash QG', 'Communication descendante immédiate', body));
   document.querySelector('#configure-push-secret')?.addEventListener('click', configurePushSecret);
+  document.querySelector('#diagnose-push')?.addEventListener('click', diagnosePushSetup);
   document.querySelector('#flash-form').addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -2631,6 +2644,7 @@ function isStandalonePwa(){
   return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
 }
 function oneSignalScopePath(){
+  // Le Worker OneSignal utilise un sous-dossier dédié pour ne pas remplacer le Worker PWA principal.
   return new URL('./push/onesignal/', location.href).pathname;
 }
 function oneSignalWorkerPath(){
@@ -2689,8 +2703,13 @@ async function registerPushNotifications(){
     await OneSignal.Notifications.requestPermission();
     if (!OneSignal.Notifications.permission) return toast('Autorisation notifications refusée.', 'warning');
     await OneSignal.User.PushSubscription.optIn();
+    await new Promise(resolve => setTimeout(resolve, 900));
     const subscriptionId = OneSignal.User.PushSubscription.id || '';
     const token = OneSignal.User.PushSubscription.token || '';
+    if (!subscriptionId && !token) {
+      showModal('Abonnement push non détecté', `<div class="setup-box">L’autorisation semble accordée, mais OneSignal n’a pas encore renvoyé d’abonnement pour cet appareil.</div><ol class="setup-list"><li>Ferme complètement l’app.</li><li>Rouvre-la depuis l’icône de l’écran d’accueil.</li><li>Retourne sur Agent &gt; Activer notifications.</li><li>Vérifie dans OneSignal &gt; Audience &gt; Subscriptions qu’un appareil apparaît.</li></ol>`);
+      return;
+    }
     await setDoc(docRef('pushTokens', `${currentUser.uid}_${subscriptionId || 'onesignal'}`), {
       provider:'onesignal',
       subscriptionId,
@@ -2721,6 +2740,33 @@ function getPushSecret(){
   }
   return secret.trim();
 }
+
+async function diagnosePushSetup(){
+  const secret = localStorage.getItem('sentinelle_push_secret') || '';
+  let workerStatus = 'Non testé';
+  if (pushWorkerIsConfigured()) {
+    try {
+      const res = await fetch(pushConfig.pushWorkerUrl, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret': secret || 'diagnostic' },
+        body:JSON.stringify({ title:'Diagnostic Sentinelle Pro', message:'Test de configuration push', priority:'Information', target:'all', url:new URL('./index.html', location.href).href })
+      });
+      const txt = await res.text();
+      workerStatus = `${res.status} · ${txt.slice(0,180)}`;
+    } catch(error) { workerStatus = `Erreur réseau : ${error.message || error}`; }
+  }
+  const html = `<div class="setup-box">Diagnostic notifications écran verrouillé</div>
+  <ul class="setup-list">
+    <li>OneSignal App ID : <strong>${pushIsConfigured() ? 'OK' : 'manquant'}</strong></li>
+    <li>Worker Cloudflare : <strong>${pushWorkerIsConfigured() ? 'OK' : 'manquant'}</strong></li>
+    <li>Clé secrète sur ce PC : <strong>${secret ? 'OK' : 'manquante'}</strong></li>
+    <li>URL Worker : <code>${safe(pushConfig?.pushWorkerUrl || '—')}</code></li>
+    <li>Résultat Worker : <code>${safe(workerStatus)}</code></li>
+  </ul>
+  <p class="muted">Si le Worker répond 401, la clé secrète locale ne correspond pas à SENTINELLE_PUSH_SECRET dans Cloudflare. Si OneSignal répond avec recipients:0, aucun agent n’a encore activé les notifications sur son téléphone.</p>`;
+  showModal('Diagnostic push', html);
+}
+
 async function sendPushForFlash(flash){
   if (!pushIsConfigured() || !pushWorkerIsConfigured()) {
     return { ok:false, skipped:true, reason:'OneSignal ou Worker non configuré' };
