@@ -1,4 +1,5 @@
 import { firebaseConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './firebase-config.js';
+window.__SENTINELLE_MODULE_LOADED__ = true;
 import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
 import {
   getAuth,
@@ -276,51 +277,80 @@ function sosButton(){
   return `<div class="sos-help hidden" id="sos-help">Maintenir 3 secondes pour déclencher. Relâcher annule l’armement.</div><div class="sos-fixed"><button class="sos-btn" id="sos-btn">SOS<br><small>PTI</small></button></div>`;
 }
 
+function registerMainServiceWorkerLater(){
+  if (!('serviceWorker' in navigator)) return;
+  setTimeout(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=542', { scope:'./' })
+      .then(registration => registration.update().catch(() => {}))
+      .catch(error => console.warn('Service Worker non bloquant :', error));
+  }, 1500);
+}
+
 function boot(){
-  if ('serviceWorker' in navigator) {
-    // Nettoie l'ancien Worker OneSignal enregistré à la racine : il entre en conflit avec le Worker PWA.
-    navigator.serviceWorker.getRegistrations().then(registrations => {
-      registrations.forEach(registration => {
-        const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
-        if (/\/(OneSignalSDKWorker|OneSignalSDKUpdaterWorker)\.js(?:\?|$)/.test(scriptUrl) && !scriptUrl.includes('/push/onesignal/')) {
-          registration.unregister().catch(() => {});
-        }
-      });
-    }).catch(() => {}).finally(() => {
-      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
-    });
-  }
   window.addEventListener('online', () => toast('Connexion rétablie', 'success'));
   window.addEventListener('offline', () => toast('Mode hors ligne — SOS non garanti', 'warning'));
 
-  if (!isConfigured()) return renderSetupMissing();
+  if (!isConfigured()) {
+    renderSetupMissing();
+    window.__SENTINELLE_RENDERED__ = true;
+    return;
+  }
+
   try {
     fbApp = initializeApp(firebaseConfig);
     auth = getAuth(fbApp);
     db = getFirestore(fbApp);
-    storage = null; // Storage volontairement désactivé pour rester compatible Spark
+    storage = null;
   } catch (error) {
     console.error(error);
-    return renderFatal('Configuration Firebase invalide', error.message);
+    renderFatal('Configuration Firebase invalide', error?.message || String(error));
+    window.__SENTINELLE_RENDERED__ = true;
+    return;
   }
 
   let authResolved = false;
   const authFallback = setTimeout(() => {
-    if (!authResolved && $app.classList.contains('app-loading')) {
-      console.warn('Firebase Auth met trop de temps à répondre : affichage de secours de la connexion.');
-      renderLogin();
-      toast('Connexion Firebase lente : écran de connexion affiché en secours.', 'warning');
-    }
+    if (authResolved) return;
+    console.warn('Firebase Auth tarde à répondre : affichage de la connexion en mode dégradé.');
+    renderLogin();
+    window.__SENTINELLE_RENDERED__ = true;
   }, 8000);
-  onAuthStateChanged(auth, async user => {
-    authResolved = true;
+
+  try {
+    onAuthStateChanged(auth, async user => {
+      authResolved = true;
+      clearTimeout(authFallback);
+      try {
+        clearSubs();
+        currentUser = user;
+        activeShiftCache = null;
+        if (!user) {
+          renderLogin();
+          window.__SENTINELLE_RENDERED__ = true;
+          registerMainServiceWorkerLater();
+          return;
+        }
+        await loadProfile(user);
+        window.__SENTINELLE_RENDERED__ = true;
+        registerMainServiceWorkerLater();
+      } catch (error) {
+        console.error(error);
+        renderFatal('Erreur de session', error?.message || 'Impossible de restaurer la session.');
+        window.__SENTINELLE_RENDERED__ = true;
+      }
+    }, error => {
+      authResolved = true;
+      clearTimeout(authFallback);
+      console.error(error);
+      renderFatal('Firebase Authentication indisponible', error?.message || String(error));
+      window.__SENTINELLE_RENDERED__ = true;
+    });
+  } catch (error) {
     clearTimeout(authFallback);
-    clearSubs();
-    currentUser = user;
-    activeShiftCache = null;
-    if (!user) return renderLogin();
-    await loadProfile(user);
-  });
+    console.error(error);
+    renderFatal('Initialisation de session impossible', error?.message || String(error));
+    window.__SENTINELLE_RENDERED__ = true;
+  }
 }
 
 async function loadProfile(user){
@@ -340,7 +370,7 @@ async function loadProfile(user){
 }
 
 function render(html){
-  window.__SENTINELLE_RENDERED = true;
+  window.__SENTINELLE_RENDERED__ = true;
   $app.className = '';
   $app.innerHTML = html;
   bindGlobalEvents();
@@ -2949,59 +2979,53 @@ function oneSignalScopePath(){
 function oneSignalWorkerPath(){
   return new URL('./push/onesignal/OneSignalSDKWorker.js', location.href).pathname;
 }
-async function loadOneSignalSdk(){
-  if (window.OneSignal && window.OneSignalDeferred) return;
+function loadOneSignalSdk(){
+  if (window.OneSignal) return Promise.resolve();
+  if (window.__sentinelleOneSignalSdkPromise) return window.__sentinelleOneSignalSdkPromise;
   window.OneSignalDeferred = window.OneSignalDeferred || [];
-  const existing = document.querySelector('script[data-onesignal-sdk="true"]');
-  if (existing) return;
-  await new Promise((resolve, reject) => {
+  window.__sentinelleOneSignalSdkPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-sentinelle-onesignal]');
+    if (existing) {
+      existing.addEventListener('load', resolve, { once:true });
+      existing.addEventListener('error', () => reject(new Error('SDK OneSignal indisponible.')), { once:true });
+      return;
+    }
     const script = document.createElement('script');
     script.src = 'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
     script.async = true;
-    script.defer = true;
-    script.dataset.onesignalSdk = 'true';
-    const timer = setTimeout(() => reject(new Error('Chargement OneSignal trop long.')), 12000);
-    script.onload = () => { clearTimeout(timer); resolve(); };
-    script.onerror = () => { clearTimeout(timer); reject(new Error('SDK OneSignal inaccessible.')); };
+    script.dataset.sentinelleOnesignal = '1';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('SDK OneSignal indisponible.'));
     document.head.appendChild(script);
   });
+  return window.__sentinelleOneSignalSdkPromise;
 }
-
 async function initOneSignal(){
   if (!pushIsConfigured()) return null;
+  await loadOneSignalSdk();
   if (oneSignalInitPromise) return oneSignalInitPromise;
-  oneSignalInitPromise = (async () => {
+  oneSignalInitPromise = new Promise((resolve, reject) => {
     window.OneSignalDeferred = window.OneSignalDeferred || [];
-    const oneSignalReady = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Initialisation OneSignal trop longue.')), 15000);
-      window.OneSignalDeferred.push(async function(OneSignal) {
-        try {
-          if (!oneSignalInitialized) {
-            await OneSignal.init({
-              appId: pushConfig.oneSignalAppId,
-              serviceWorkerPath: oneSignalWorkerPath(),
-              serviceWorkerParam: { scope: oneSignalScopePath() },
-              notifyButton: { enable: false },
-              allowLocalhostAsSecureOrigin: true
-            });
-            oneSignalInitialized = true;
-          }
-          clearTimeout(timer);
-          resolve(OneSignal);
-        } catch(error) { clearTimeout(timer); reject(error); }
-      });
+    window.OneSignalDeferred.push(async function(OneSignal) {
+      try {
+        if (!oneSignalInitialized) {
+          await OneSignal.init({
+            appId: pushConfig.oneSignalAppId,
+            serviceWorkerPath: oneSignalWorkerPath(),
+            serviceWorkerParam: { scope: oneSignalScopePath() },
+            notifyButton: { enable: false },
+            allowLocalhostAsSecureOrigin: true
+          });
+          oneSignalInitialized = true;
+        }
+        resolve(OneSignal);
+      } catch(error) { reject(error); }
     });
-    await loadOneSignalSdk();
-    return oneSignalReady;
-  })().catch(error => {
-    oneSignalInitPromise = null;
-    throw error;
   });
   return oneSignalInitPromise;
 }
-async function syncOneSignalIdentity(force=false){
+async function syncOneSignalIdentity(){
   if (!currentUser || !currentProfile || !pushIsConfigured()) return null;
-  if (!force && !oneSignalInitialized) return null;
   const OneSignal = await initOneSignal();
   if (!OneSignal) return null;
   await OneSignal.login(currentUser.uid);
@@ -3023,7 +3047,7 @@ async function registerPushNotifications(){
     if (isIosLike() && !isStandalonePwa()) {
       return showModal('Installation requise sur iPhone', `<div class="setup-box">Sur iPhone, les notifications web fonctionnent uniquement après installation de la PWA sur l’écran d’accueil.</div><ol class="setup-list"><li>Ouvre le lien dans Safari.</li><li>Appuie sur Partager.</li><li>Choisis “Sur l’écran d’accueil”.</li><li>Ouvre Sentinelle Pro depuis l’icône créée.</li><li>Reviens ici puis active les notifications.</li></ol>`);
     }
-    const OneSignal = await syncOneSignalIdentity(true);
+    const OneSignal = await syncOneSignalIdentity();
     if (!OneSignal) throw new Error('OneSignal non initialisé.');
     const supported = await OneSignal.Notifications.isPushSupported();
     if (!supported) return toast('Notifications push non supportées sur cet appareil/navigateur.', 'warning');

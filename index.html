@@ -31,31 +31,52 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script>
-    window.__SENTINELLE_RENDERED = false;
-    window.addEventListener('error', function(event) {
-      console.error('[Sentinelle boot error]', event.error || event.message);
-    });
-    setTimeout(function(){
-      var app = document.getElementById('app');
-      if (!window.__SENTINELLE_RENDERED && app && app.classList.contains('app-loading')) {
+    (() => {
+      const app = document.getElementById('app');
+      const showStartupError = (title, detail) => {
+        if (!app) return;
         app.className = '';
-        app.innerHTML = '<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro"><h1>Démarrage bloqué</h1><p class="subtitle">Cache ou script externe bloqué</p><div class="setup-box">L\'application n\'a pas terminé son démarrage. Clique sur le bouton ci-dessous pour vider le cache local puis recharge la page.</div><button class="btn primary full" id="sentinelle-reset-cache">Nettoyer et relancer</button><p class="muted" style="margin-top:12px;font-size:12px">Si le problème continue, ouvre le lien avec ?fresh=541.</p></section></div>';
-        document.getElementById('sentinelle-reset-cache')?.addEventListener('click', async function(){
+        app.innerHTML = `
+          <div class="login-page">
+            <section class="login-card">
+              <img src="./assets/logo.png" class="login-logo" alt="Sentinelle Pro">
+              <h1>${title}</h1>
+              <p class="subtitle">Le portail n’a pas pu démarrer.</p>
+              <div class="setup-box danger-copy" style="word-break:break-word">${String(detail || 'Erreur inconnue')}</div>
+              <button class="btn primary full" id="hard-reload-btn" type="button">Nettoyer le cache et relancer</button>
+            </section>
+          </div>`;
+        document.getElementById('hard-reload-btn')?.addEventListener('click', async () => {
           try {
             if ('serviceWorker' in navigator) {
-              var regs = await navigator.serviceWorker.getRegistrations();
-              await Promise.all(regs.map(function(r){ return r.unregister(); }));
+              const regs = await navigator.serviceWorker.getRegistrations();
+              await Promise.all(regs.map(reg => reg.unregister().catch(() => false)));
             }
-            if (window.caches) {
-              var keys = await caches.keys();
-              await Promise.all(keys.map(function(k){ return caches.delete(k); }));
-            }
-          } catch(e) {}
-          location.href = location.pathname + '?fresh=541';
+            const keys = await caches.keys();
+            await Promise.all(keys.map(key => caches.delete(key)));
+          } catch (_) {}
+          location.replace(`${location.pathname}?fresh=542-${Date.now()}`);
         });
-      }
-    }, 9000);
+      };
+      window.__sentinelleShowStartupError = showStartupError;
+      window.addEventListener('error', event => {
+        if (!window.__SENTINELLE_RENDERED__) showStartupError('Erreur JavaScript', event.message || event.error?.message);
+      });
+      window.addEventListener('unhandledrejection', event => {
+        if (!window.__SENTINELLE_RENDERED__) showStartupError('Erreur de démarrage', event.reason?.message || event.reason);
+      });
+      setTimeout(() => {
+        if (!window.__SENTINELLE_RENDERED__) {
+          showStartupError('Démarrage trop long', 'Firebase ou un module externe ne répond pas. Le bouton ci-dessous nettoie réellement les anciens Service Workers et caches.');
+        }
+      }, 12000);
+    })();
   </script>
-  <script type="module" src="./app.js"></script>
+  <script type="module">
+    import('./app.js?v=542').catch(error => {
+      console.error(error);
+      window.__sentinelleShowStartupError?.('Module principal indisponible', error?.message || error);
+    });
+  </script>
 </body>
 </html>
