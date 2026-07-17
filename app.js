@@ -1630,12 +1630,6 @@ async function printMissionReport({ mission, shift={}, reports=[] }){
     printGeneratedDocument({ ...data, createdAt:new Date() });
   }
 }
-){
-  const logo = new URL('./assets/logo.png', location.href).href;
-  const rows = reports.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td></tr>`).join('') || '<tr><td colspan="4">Aucun rapport MCI sur cette mission.</td></tr>';
-  return `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>Rapport opérationnel de sécurité</h1><p>Sentinelle Pro · Export généré le ${new Date().toLocaleString('fr-FR')}</p></div></header><section><h2>${safe(mission.siteNom || shift.siteNom || 'Site')}</h2><p class="report-meta">Agent : ${safe(mission.agentNom || shift.agentNom || '—')} · Mission : ${safe(mission.id || '')}<br>Prévu : ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br>Réalisé : ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid"><div><strong>${reports.length}</strong><span>Rapports</span></div><div><strong>${shift.roundsCount || mission.roundsCount || 0}</strong><span>Rondes</span></div><div><strong>${shift.incidentsCount || mission.incidentsCount || 0}</strong><span>Événements</span></div><div><strong>${shift.conformityScore ?? mission.conformityScore ?? '—'}%</strong><span>Conformité</span></div></section><section><h3>Main courante de mission</h3><table><thead><tr><th>Heure</th><th>Catégorie</th><th>Gravité</th><th>Message</th></tr></thead><tbody>${rows}</tbody></table></section><section class="report-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement. Les horodatages proviennent de Firebase/serveur lorsque disponibles.</footer></article>`;
-}
-
 function renderQGReports(){
   currentRoute = 'reports';
   const body = `<section class="card fixed-mobile-card"><div class="card-title"><div><h2>Journal MCI</h2><p>Classement par mission, filtres et traitement des rapports</p></div><div class="btn-row"><button class="btn small" data-route="documents">Documents</button><button class="btn small" id="export-reports">Télécharger MCI</button>${isStrictAdmin()?'<button class="btn small danger" id="purge-reports">Supprimer les MCI filtrées</button>':''}</div></div>
