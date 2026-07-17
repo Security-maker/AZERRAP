@@ -778,19 +778,21 @@ async function renderQGHome(){
       <div class="card stat green"><div class="stat-label">Agents en poste</div><div class="stat-value" id="stat-working">—</div></div>
       <div class="card stat red"><div class="stat-label">Alertes actives</div><div class="stat-value" id="stat-alerts">—</div></div>
       <div class="card stat orange"><div class="stat-label">Incidents 24h</div><div class="stat-value" id="stat-incidents">—</div></div>
-      <div class="card stat blue"><div class="stat-label">Missions jour</div><div class="stat-value" id="stat-missions">—</div></div>
+      <div class="card stat blue"><div class="stat-label">Missions du jour</div><div class="stat-value" id="stat-missions">—</div></div>
+    </section>
+    <section class="card map-card map-card-xl" style="margin-top:16px">
+      <div class="card-title map-card-title"><div><h2>Carte opérationnelle</h2><p>Vue lisible des sites géolocalisés et agents en poste</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div>
+      <div class="map-legend map-legend-premium"><span><i class="legend-dot agent"></i>Agents en poste</span><span><i class="legend-dot site"></i>Sites client</span><span class="muted">Clique sur un point pour ouvrir Google Maps</span></div>
+      <div id="qg-map" class="map premium-map premium-map-xl"></div>
+      <div id="map-empty-help" class="map-empty-help hidden">Ajoute latitude / longitude dans Gestion Sites pour afficher tes sites ici.</div>
     </section>
     <section class="grid cols-2" style="margin-top:16px">
-      <div class="card map-card"><div class="card-title"><div><h2>Carte opérationnelle</h2><p>Agents actifs, sites et accès Google Maps</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div><div class="map-legend"><span><i class="legend-dot agent"></i>Agent</span><span><i class="legend-dot site"></i>Site</span></div><div id="qg-map" class="map premium-map"></div></div>
       <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, inactivité, SOS, critiques</p></div><button class="btn small" data-route="notifications">Voir tout</button></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
-    </section>
-    <section class="grid cols-2" style="margin-top:16px">
       <div class="card"><div class="card-title"><div><h2>Alertes prioritaires</h2><p>SOS/PTI actifs</p></div></div><div id="qg-alerts-feed" class="list"><div class="empty">Chargement...</div></div></div>
-      <div class="card"><div class="card-title"><div><h2>Missions à venir</h2><p>Planning opérationnel</p></div><button class="btn small" data-route="missions">Gérer</button></div><div id="qg-missions-preview" class="list"><div class="empty">Chargement...</div></div></div>
     </section>
-    <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Temps réel</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
+    <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Temps réel, sans pollution planning</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
   render(page('Dashboard QG', 'Centre de commandement temps réel', body));
-  listenQGStats(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5); listenQGMissionsPreview();
+  listenQGStats(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5);
 }
 function listenQGStats(){
   const usersQ = query(collectionRef('users'));
@@ -840,16 +842,16 @@ async function initQGMap(){
   mapMarkers = []; mapBoundsCache = []; mapSitePoints = []; mapAgentPoints = [];
   mapInstance = L.map('qg-map', { zoomControl:false, attributionControl:true }).setView([46.6, 2.4], 5);
   L.control.zoom({ position:'bottomright' }).addTo(mapInstance);
-  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' }).addTo(mapInstance);
-  const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' });
+  const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' }).addTo(mapInstance);
+  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' });
   mapSiteLayer = L.layerGroup().addTo(mapInstance);
   mapAgentLayer = L.layerGroup().addTo(mapInstance);
-  L.control.layers({ 'Nuit':dark, 'Clair':light }, { 'Agents en poste':mapAgentLayer, 'Sites':mapSiteLayer }, { collapsed:true, position:'topright' }).addTo(mapInstance);
+  L.control.layers({ 'Carte claire':light, 'Mode nuit':dark }, { 'Agents en poste':mapAgentLayer, 'Sites':mapSiteLayer }, { collapsed:false, position:'topright' }).addTo(mapInstance);
 
-  const markerIcon = (type, label='') => L.divIcon({
+  const markerIcon = (type, label='', color='') => L.divIcon({
     className:'sp-map-icon-shell',
-    html:`<div class="sp-map-marker ${type}"><span>${safe(label || (type==='agent'?'A':'S'))}</span></div>`,
-    iconSize:[40,40], iconAnchor:[20,20], popupAnchor:[0,-22]
+    html:`<div class="sp-map-marker ${type}" ${color?`style="--marker-color:${safe(color)}"`:''}><span>${safe(label || (type==='agent'?'A':'S'))}</span></div>`,
+    iconSize:[46,46], iconAnchor:[23,23], popupAnchor:[0,-26]
   });
   const syncBounds = () => { mapBoundsCache = [...mapSitePoints, ...mapAgentPoints]; };
   const googleLink = (lat,lng) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
@@ -867,10 +869,13 @@ async function initQGMap(){
       const lat = Number(gps.lat ?? s.latitude ?? s.lat);
       const lng = Number(gps.lng ?? s.longitude ?? s.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-      const marker = L.marker([lat,lng], { icon:markerIcon('site', 'S') }).addTo(mapSiteLayer)
+      const color = normalizeHexColor(s.planningColor) || planningColorForSite(s.id);
+      const label = String(s.name || 'S').trim().slice(0,2).toUpperCase();
+      const marker = L.marker([lat,lng], { icon:markerIcon('site', label, color) }).addTo(mapSiteLayer)
         .bindPopup(`<div class="map-popup"><strong>${safe(s.name || 'Site')}</strong><span>${safe(s.clientName || '')}</span><span>${safe(s.address || '')}</span><a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a></div>`);
       mapMarkers.push(marker); mapSitePoints.push([lat,lng]);
     });
+    document.querySelector('#map-empty-help')?.classList.toggle('hidden', mapSitePoints.length > 0 || mapAgentPoints.length > 0);
     syncBounds(); setTimeout(fitAll, 80);
   }, ()=>{}));
 
@@ -887,6 +892,7 @@ async function initQGMap(){
         .bindPopup(`<div class="map-popup"><strong>${safe(s.agentNom || 'Agent')}</strong><span>${safe(s.siteNom || 'Site')}</span><span>Prise de poste : ${dateText(s.startTime)}</span><a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a></div>`);
       mapMarkers.push(marker); mapAgentPoints.push([lat,lng]);
     });
+    document.querySelector('#map-empty-help')?.classList.toggle('hidden', mapSitePoints.length > 0 || mapAgentPoints.length > 0);
     syncBounds(); setTimeout(fitAll, 80);
   }));
 
@@ -923,7 +929,7 @@ async function renderQGMissions(){
         <button class="btn primary full" type="submit">Planifier la mission</button>
       </form>
     </div>
-    <div class="card"><div class="card-title"><div><h2>Suivi missions</h2><p>Retards, pointage, conformité</p></div></div><div id="missions-live" class="list"><div class="empty">Chargement...</div></div></div>
+    <div class="card"><div class="card-title"><div><h2>Suivi prioritaire</h2><p>Retards, missions en cours et missions du jour uniquement</p></div></div><div id="missions-live" class="list"><div class="empty">Chargement...</div></div></div>
   </section>
   <section class="card planning-card planning-card-v46" style="margin-top:16px">
     <div class="card-title planning-title"><div><h2>Planning exploitation</h2><p>Vue PC avancée : missions multi-jours, planification rapide et lecture par site ou collaborateur</p></div><div class="btn-row planning-title-actions"><button class="btn small" id="planning-today">Aujourd’hui</button><button class="btn small" id="planning-prev">‹</button><input class="input planning-date" id="planning-date" type="date" value="${defaultDate}"><button class="btn small" id="planning-next">›</button></div></div>
@@ -1240,7 +1246,13 @@ function listenMissionsList(selector){
   unsubscribeList.push(onSnapshot(q, snap => {
     const rows = snap.docs.map(d=>({id:d.id,...d.data()}));
     qgMissionsCache = rows;
-    box.innerHTML = rows.length ? rows.map(missionItem).join('') : `<div class="empty">Aucune mission planifiée.</div>`;
+    const today = startOfDay(new Date()).getTime();
+    const tomorrow = endOfDay(new Date()).getTime();
+    const priorityRows = rows.filter(m => {
+      const start = missionStartMs(m) || 0;
+      return m.status === 'active' || missionIsLate(m) || (start >= today && start <= tomorrow && !['completed','cancelled'].includes(m.status));
+    }).slice(0, 8);
+    box.innerHTML = priorityRows.length ? priorityRows.map(missionItem).join('') : `<div class="empty">Aucune mission prioritaire. Le planning complet reste visible en dessous.</div>`;
     document.querySelectorAll('[data-mission-cancel]').forEach(btn => btn.addEventListener('click', async () => {
       if (!confirm('Annuler cette mission ?')) return;
       await updateDoc(docRef('missions', btn.dataset.missionCancel), { status:'cancelled', updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
@@ -1338,19 +1350,26 @@ async function printMissionById(missionId){
   const shift = shiftsSnap.docs.map(d=>({id:d.id,...d.data()}))[0] || {};
   printMissionReport({ mission:{id:missionId,...mission}, shift, reports });
 }
-function printMissionReport({ mission, shift={}, reports=[] }){
-  const html = missionReportHtml({ mission, shift, reports });
-  document.querySelector('#print-root')?.remove();
-  const root = document.createElement('div');
-  root.id = 'print-root';
-  root.className = 'print-root';
-  root.innerHTML = html;
-  document.body.appendChild(root);
-  toast('Rapport préparé. Choisis “Imprimer” puis “Enregistrer en PDF”.', 'success');
-  const cleanup = () => setTimeout(() => root.remove(), 500);
-  window.addEventListener('afterprint', cleanup, { once:true });
-  setTimeout(() => window.print(), 250);
-  setTimeout(() => root.remove(), 15000);
+async function printMissionReport({ mission, shift={}, reports=[] }){
+  const compactRows = reports.map(r => r.createdAt || r.message ? compactReport(r) : r);
+  const data = {
+    type:'mission',
+    title:`Rapport mission — ${mission.siteNom || shift.siteNom || 'Site'} — ${mission.agentNom || shift.agentNom || 'Agent'}`,
+    siteId:mission.siteId || shift.siteId || null,
+    siteNom:mission.siteNom || shift.siteNom || null,
+    missionId:mission.id || null,
+    rowCount:compactRows.length,
+    payload:{ mission:compactMission(mission), shift:compactShift(shift), rows:compactRows }
+  };
+  try {
+    const archived = await archivePdfDocument(data, { silent:true });
+    downloadGeneratedPdf(archived, { silent:true });
+    toast('Rapport PDF téléchargé et archivé dans Documents.', 'success');
+  } catch(error) {
+    console.error(error);
+    toast(userFriendlyError(error, 'Impossible d’archiver le PDF. Ouverture de l’aperçu.'), 'warning');
+    printGeneratedDocument({ ...data, createdAt:new Date() });
+  }
 }
 function missionReportHtml({ mission, shift={}, reports=[] }){
   const logo = new URL('./assets/logo.png', location.href).href;
@@ -2041,7 +2060,7 @@ function isoDateValue(value){
   const d = value.toDate ? value.toDate() : new Date(value);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
-function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI'}[type] || type || 'Document'); }
+function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI', invoice:'Facture'}[type] || type || 'Document'); }
 function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'' }; }
 function compactRound(r){ return { id:r.id||'', scannedAt:isoDateValue(r.scannedAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', checkpointName:r.checkpointName||'', scanMethod:r.scanMethod||'', isValid:r.isValid !== false }; }
 function compactAlert(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt || r.heure), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteActuel||r.siteId||'', siteNom:r.siteActuelNom||r.siteNom||'', typeAlerte:r.typeAlerte||'SOS/PTI', statut:r.statut||'', niveau:r.niveau||'', message:r.message||'', closeReason:r.closeReason||r.closureReason||'' }; }
@@ -2051,6 +2070,107 @@ function inPeriod(value, from, to){
   const d = value?.toDate ? value.toDate() : new Date(value || 0);
   if (Number.isNaN(d.getTime())) return false;
   return (!from || d >= from) && (!to || d <= to);
+}
+
+function documentSlug(value, ext='pdf'){
+  const base = String(value || 'document').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'').toLowerCase() || 'document';
+  return `${base}.${ext}`;
+}
+function getJsPDF(){ return window.jspdf?.jsPDF || window.jsPDF || null; }
+function addPdfFooter(doc, page=1){
+  doc.setFontSize(8); doc.setTextColor(120,130,145);
+  doc.text(`Sentinelle Pro · Document généré le ${new Date().toLocaleString('fr-FR')} · Page ${page}`, 14, 287);
+}
+function addPdfWrappedText(doc, text, x, y, maxWidth=180, lineHeight=5){
+  const lines = doc.splitTextToSize(String(text || '—'), maxWidth);
+  lines.forEach(line => {
+    if (y > 278) { doc.addPage(); y = 16; addPdfFooter(doc, doc.getNumberOfPages()); }
+    doc.text(line, x, y); y += lineHeight;
+  });
+  return y;
+}
+function generatedDocumentRows(d){
+  const p = d?.payload || {};
+  if (d.type === 'mission') return p.rows || [];
+  if (d.type === 'invoice') return p.invoice?.lines || p.lines || [];
+  return p.rows || [];
+}
+function generatedDocumentMeta(d){
+  const p = d?.payload || {};
+  if (d.type === 'mission') {
+    const m = p.mission || {}, sh = p.shift || {};
+    return [
+      `Site : ${m.siteNom || sh.siteNom || d.siteNom || '—'}`,
+      `Agent : ${m.agentNom || sh.agentNom || '—'}`,
+      `Mission : ${m.id || d.missionId || '—'}`,
+      `Prévu : ${dateText(m.scheduledStart || sh.scheduledStart)} → ${dateText(m.scheduledEnd || sh.scheduledEnd)}`,
+      `Réalisé : ${dateText(sh.startTime)} → ${dateText(sh.completedAt)}`,
+      `Conformité : ${sh.conformityScore ?? m.conformityScore ?? '—'}%`
+    ];
+  }
+  if (d.type === 'invoice') {
+    const inv = p.invoice || p || {};
+    return [`Facture : ${inv.number || d.title || '—'}`, `Client : ${inv.clientName || inv.siteNom || '—'}`, `Période : ${dateOnlyText(inv.periodStart)} → ${dateOnlyText(inv.periodEnd)}`, `Total TTC : ${money(inv.total)}`];
+  }
+  return [`Type : ${documentTypeLabel(d.type)}`, `Site : ${d.siteNom || 'Tous sites'}`, `Lignes : ${d.rowCount || generatedDocumentRows(d).length}`];
+}
+function createGeneratedDocumentPdf(d){
+  const jsPDF = getJsPDF();
+  if (!jsPDF) throw new Error('Bibliothèque PDF indisponible. Vérifie ta connexion ou réessaie.');
+  const doc = new jsPDF({ unit:'mm', format:'a4', orientation:'portrait' });
+  let y = 16;
+  doc.setFillColor(5,10,19); doc.rect(0,0,210,24,'F');
+  doc.setTextColor(244,248,251); doc.setFont('helvetica','bold'); doc.setFontSize(15);
+  doc.text('Sentinelle Pro', 14, 15);
+  doc.setFontSize(9); doc.setFont('helvetica','normal');
+  doc.text('Document opérationnel sécurisé', 150, 15, { align:'right' });
+  y = 34;
+  doc.setTextColor(5,10,19); doc.setFont('helvetica','bold'); doc.setFontSize(16);
+  y = addPdfWrappedText(doc, d.title || documentTypeLabel(d.type), 14, y, 180, 7) + 2;
+  doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(70,80,95);
+  generatedDocumentMeta(d).forEach(line => { y = addPdfWrappedText(doc, line, 14, y, 180, 5); });
+  y += 4; doc.setDrawColor(0,156,255); doc.line(14,y,196,y); y += 8;
+  const rows = generatedDocumentRows(d);
+  doc.setTextColor(5,10,19); doc.setFont('helvetica','bold'); doc.setFontSize(12);
+  doc.text(d.type === 'invoice' ? 'Lignes de facture' : 'Contenu du document', 14, y); y += 7;
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(30,38,52);
+  if (!rows.length) {
+    y = addPdfWrappedText(doc, 'Aucune donnée disponible.', 14, y, 180, 5);
+  } else if (d.type === 'mission' || d.type === 'mci') {
+    rows.forEach((r, index) => {
+      const line = `${index+1}. ${dateText(r.createdAt)} · ${r.agentNom || 'Agent'} · ${r.siteNom || d.siteNom || 'Site'} · ${r.category || 'MCI'} · ${r.severity || ''}`;
+      doc.setFont('helvetica','bold'); y = addPdfWrappedText(doc, line, 14, y, 180, 5);
+      doc.setFont('helvetica','normal'); y = addPdfWrappedText(doc, r.message || r.supervisorNote || '—', 18, y, 172, 5) + 2;
+    });
+  } else if (d.type === 'rounds') {
+    rows.forEach((r, index) => { y = addPdfWrappedText(doc, `${index+1}. ${dateText(r.scannedAt)} · ${r.agentNom || 'Agent'} · ${r.siteNom || 'Site'} · ${r.checkpointName || 'Point'} · ${r.scanMethod || 'Scan'} · ${r.isValid === false ? 'Refusé' : 'Valide'}`, 14, y, 180, 5); });
+  } else if (d.type === 'alerts') {
+    rows.forEach((r, index) => { y = addPdfWrappedText(doc, `${index+1}. ${dateText(r.createdAt)} · ${r.agentNom || 'Agent'} · ${r.siteNom || 'Site'} · ${r.typeAlerte || 'SOS/PTI'} · ${r.statut || ''}\n${r.message || ''}`, 14, y, 180, 5) + 1; });
+  } else if (d.type === 'invoice') {
+    const inv = d.payload?.invoice || d.payload || {};
+    (inv.lines || rows).forEach((line, index) => { y = addPdfWrappedText(doc, `${index+1}. ${line.description || ''} · ${line.quantity || 0} ${line.unit || ''} · ${money(line.unitPrice)} HT · ${money(line.amount)} HT`, 14, y, 180, 5); });
+    y += 4; doc.setFont('helvetica','bold');
+    y = addPdfWrappedText(doc, `Total HT : ${money(inv.subtotal)} · TVA : ${money(inv.vatAmount)} · Total TTC : ${money(inv.total)}`, 14, y, 180, 6);
+  }
+  addPdfFooter(doc, doc.getNumberOfPages());
+  return doc;
+}
+function downloadGeneratedPdf(d, { silent=false }={}){
+  try {
+    const doc = createGeneratedDocumentPdf(d);
+    doc.save(documentSlug(d.title || documentTypeLabel(d.type), 'pdf'));
+    if (!silent) toast('PDF généré et téléchargé.', 'success');
+  } catch(error) {
+    console.error(error);
+    toast(userFriendlyError(error, 'PDF indisponible. Utilise Imprimer / PDF.'), 'error');
+  }
+}
+async function archivePdfDocument(data, { silent=false }={}){
+  const payload = { ...data, fileType:'pdf', status:'active', createdAt:serverTimestamp(), createdBy:currentUser.uid, createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() };
+  const ref = await addDoc(collectionRef('generatedDocuments'), payload);
+  await addAudit('generated_pdf_archived', { type:data.type, title:data.title || '', documentId:ref.id, missionId:data.missionId || null, rowCount:data.rowCount || 0 });
+  if (!silent) toast('PDF archivé dans Documents.', 'success');
+  return { id:ref.id, ...payload, createdAt:new Date() };
 }
 async function renderQGDocuments(){
   currentRoute = 'documents';
@@ -2067,7 +2187,7 @@ async function renderQGDocuments(){
       </form>
       <div class="setup-box" style="margin-top:14px">Sans Firebase Storage, Sentinelle Pro archive un instantané structuré dans Firestore puis régénère le PDF ou le CSV à la demande.</div>
     </div>
-    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes et SOS</p></div><div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option></select></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
+    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
   </section>`;
   render(page('Documents', 'Génération, archivage et téléchargement opérationnel', body));
   const [sitesSnap, missionsSnap] = await Promise.all([
@@ -2087,7 +2207,7 @@ async function renderQGDocuments(){
   document.querySelector('#document-generator-form')?.addEventListener('submit', async e=>{
     e.preventDefault();
     const btn=e.currentTarget.querySelector('button[type="submit"]'); btn.disabled=true;
-    try { await generateAndArchiveDocument(new FormData(e.currentTarget), {sites, missions}); toast('Document archivé.', 'success'); }
+    try { const archived = await generateAndArchiveDocument(new FormData(e.currentTarget), {sites, missions}); if (archived) downloadGeneratedPdf(archived, { silent:true }); toast('PDF archivé dans Documents.', 'success'); }
     catch(error){ console.error(error); toast(userFriendlyError(error,'Génération impossible.'),'error'); }
     finally { btn.disabled=false; }
   });
@@ -2125,8 +2245,7 @@ async function generateAndArchiveDocument(fd, caches={}){
     payload={rows:compactRows,truncated:rowCount>compactRows.length};
     title=titleInput || `${documentTypeLabel(type)} — ${site?.name || 'Tous sites'} — ${fd.get('dateFrom')||''} au ${fd.get('dateTo')||''}`;
   }
-  await addDoc(collectionRef('generatedDocuments'), { type,title,siteId:siteId||null,siteNom:site?.name||null,missionId,rowCount,payload,status:'active',createdAt:serverTimestamp(),createdBy:currentUser.uid,createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() });
-  await addAudit('generated_document_created',{type,title,rowCount,siteId:siteId||null,missionId});
+  return archivePdfDocument({ type,title,siteId:siteId||null,siteNom:site?.name||null,missionId,rowCount,payload }, { silent:true });
 }
 function listenGeneratedDocuments(){
   const box=document.querySelector('#generated-documents-list'); if(!box)return;
@@ -2134,13 +2253,13 @@ function listenGeneratedDocuments(){
   const redraw=()=>{
     const type=document.querySelector('#documents-filter')?.value||'';
     const filtered=rows.filter(d=>!type||d.type===type);
-    box.innerHTML=filtered.length?filtered.map(d=>`<div class="item document-item"><div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Ouvrir</button><button class="btn small" data-download-generated-doc="${safe(d.id)}">Télécharger</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}">Supprimer</button>`:''}</div></div>`).join(''):`<div class="empty">Aucun document archivé.</div>`;
+    box.innerHTML=filtered.length?filtered.map(d=>`<div class="item document-item pdf-document"><div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span></div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}">Supprimer</button>`:''}</div></div>`).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
     document.querySelectorAll('[data-open-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>openGeneratedDocument(rows.find(d=>d.id===btn.dataset.openGeneratedDoc))));
     document.querySelectorAll('[data-download-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>downloadGeneratedDocument(rows.find(d=>d.id===btn.dataset.downloadGeneratedDoc))));
     document.querySelectorAll('[data-delete-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteGeneratedDocument(rows.find(d=>d.id===btn.dataset.deleteGeneratedDoc))));
   };
   document.querySelector('#documents-filter')?.addEventListener('change',redraw);
-  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Publie les règles Firestore V4.9.</div>'));
+  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Publie les règles Firestore V5.1.</div>'));
 }
 function generatedDocumentHtml(d){
   const p=d?.payload||{};
@@ -2148,7 +2267,11 @@ function generatedDocumentHtml(d){
   const logo=new URL('./assets/logo.png',location.href).href;
   const rows=p.rows||[];
   let headers=[],body='';
-  if(d.type==='mci'){
+  if(d.type==='invoice'){
+    const inv=p.invoice||{};
+    headers=['Désignation','Quantité','PU HT','Total HT'];
+    body=(inv.lines||[]).map(l=>`<tr><td>${safe(l.description)}</td><td>${safe(l.quantity)} ${safe(l.unit||'')}</td><td>${money(l.unitPrice)}</td><td>${money(l.amount)}</td></tr>`).join('') + `<tr><td colspan="3"><strong>Total TTC</strong></td><td><strong>${money(inv.total)}</strong></td></tr>`;
+  } else if(d.type==='mci'){
     headers=['Date','Agent','Site','Catégorie','Gravité','Message'];
     body=rows.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td></tr>`).join('');
   } else if(d.type==='rounds'){
@@ -2162,20 +2285,20 @@ function generatedDocumentHtml(d){
 }
 function openGeneratedDocument(d){
   if(!d)return;
-  showModal('Document archivé',`<div class="document-preview">${generatedDocumentHtml(d)}</div><div class="btn-row"><button class="btn primary" id="print-generated-document">Imprimer / PDF</button><button class="btn" id="download-generated-document">Télécharger CSV</button></div>`,'wide');
+  showModal('Document archivé',`<div class="document-preview">${generatedDocumentHtml(d)}</div><div class="btn-row"><button class="btn primary" id="download-generated-pdf">Télécharger PDF</button><button class="btn" id="print-generated-document">Imprimer depuis aperçu</button><button class="btn ghost" id="download-generated-csv">Exporter CSV</button></div>`,'wide');
+  document.querySelector('#download-generated-pdf')?.addEventListener('click',()=>downloadGeneratedPdf(d));
   document.querySelector('#print-generated-document')?.addEventListener('click',()=>printGeneratedDocument(d));
-  document.querySelector('#download-generated-document')?.addEventListener('click',()=>downloadGeneratedDocument(d));
+  document.querySelector('#download-generated-csv')?.addEventListener('click',()=>exportCSV(generatedDocumentRows(d),`${documentSlug(d.title||d.type,'csv')}`));
 }
 function printGeneratedDocument(d){
   document.querySelector('#print-root')?.remove();
   const root=document.createElement('div');root.id='print-root';root.className='print-root';root.innerHTML=generatedDocumentHtml(d);document.body.appendChild(root);
-  toast('Document préparé. Choisis Imprimer puis Enregistrer en PDF.','success');
+  toast('Aperçu préparé. Choisis Imprimer puis Enregistrer en PDF si besoin.','success');
   window.addEventListener('afterprint',()=>setTimeout(()=>root.remove(),400),{once:true});setTimeout(()=>window.print(),220);setTimeout(()=>root.remove(),15000);
 }
 function downloadGeneratedDocument(d){
   if(!d)return;
-  if(d.type==='mission') return printGeneratedDocument(d);
-  exportCSV(d.payload?.rows||[],`${String(d.title||d.type||'document').replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'').toLowerCase()}.csv`);
+  downloadGeneratedPdf(d);
 }
 function requestDeleteGeneratedDocument(d){
   if(!d)return;
@@ -2188,9 +2311,9 @@ async function archiveMissionGroup(group){
   if(first.shiftId){const ss=await getDoc(docRef('shifts',first.shiftId)).catch(()=>null);if(ss?.exists?.())shift={id:ss.id,...ss.data()};}
   if(!mission.id) mission={id:first.missionId||group.key,agentId:first.agentId,agentNom:first.agentNom,siteId:first.siteId,siteNom:first.siteNom,scheduledStart:shift.scheduledStart,scheduledEnd:shift.scheduledEnd};
   const reports=(group.reports||[]).map(compactReport);
-  await addDoc(collectionRef('generatedDocuments'),{type:'mission',title:`Rapport mission — ${mission.siteNom||'Site'} — ${mission.agentNom||'Agent'}`,siteId:mission.siteId||null,siteNom:mission.siteNom||null,missionId:mission.id||null,rowCount:reports.length,payload:{mission:compactMission(mission),shift:compactShift(shift),rows:reports},status:'active',createdAt:serverTimestamp(),createdBy:currentUser.uid,createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim()});
-  await addAudit('mission_document_archived',{missionId:mission.id||null,rowCount:reports.length});
-  toast('Rapport archivé dans Documents.','success');
+  const archived = await archivePdfDocument({type:'mission',title:`Rapport mission — ${mission.siteNom||'Site'} — ${mission.agentNom||'Agent'}`,siteId:mission.siteId||null,siteNom:mission.siteNom||null,missionId:mission.id||null,rowCount:reports.length,payload:{mission:compactMission(mission),shift:compactShift(shift),rows:reports}}, { silent:true });
+  downloadGeneratedPdf(archived, { silent:true });
+  toast('Rapport PDF archivé dans Documents et téléchargé.','success');
 }
 
 
@@ -2353,7 +2476,25 @@ function showInvoiceDetail(invoice){
   document.querySelector('#invoice-detail-print').onclick=()=>printInvoice(invoice);document.querySelector('#invoice-detail-csv').onclick=()=>exportCSV((invoice.lines||[]).map(l=>({...l,invoice:invoice.number,client:invoice.clientName,site:invoice.siteNom})),`facture-${invoice.number||invoice.id}.csv`);document.querySelector('#invoice-detail-sent')?.addEventListener('click',()=>{updateInvoiceStatus(invoice.id,'sent');closeModal()});document.querySelector('#invoice-detail-paid')?.addEventListener('click',()=>{updateInvoiceStatus(invoice.id,'paid');closeModal()});document.querySelector('#invoice-detail-cancel')?.addEventListener('click',()=>{updateInvoiceStatus(invoice.id,'cancelled');closeModal()});
 }
 async function printInvoice(invoice){
-  if(!invoice)return;const profile=billingProfileCache||await loadBillingProfile();const root=document.querySelector('#print-root');root?.remove();const el=document.createElement('div');el.id='print-root';el.className='print-root';el.innerHTML=invoiceHtml(invoice,profile);document.body.appendChild(el);toast('Facture prête. Choisis Imprimer puis Enregistrer en PDF.','success');window.addEventListener('afterprint',()=>setTimeout(()=>el.remove(),500),{once:true});setTimeout(()=>window.print(),250);setTimeout(()=>el.remove(),20000);
+  if(!invoice)return;
+  await loadBillingProfile();
+  const data = {
+    type:'invoice',
+    title:`Facture ${invoice.number || invoice.id} — ${invoice.clientName || invoice.siteNom || 'Client'}`,
+    siteId:invoice.siteId || null,
+    siteNom:invoice.siteNom || null,
+    missionId:null,
+    rowCount:invoice.lines?.length || 0,
+    payload:{ invoice }
+  };
+  try {
+    const archived = await archivePdfDocument(data, { silent:true });
+    downloadGeneratedPdf(archived, { silent:true });
+    toast('Facture PDF téléchargée et archivée dans Documents.', 'success');
+  } catch(error) {
+    console.error(error);
+    const root=document.querySelector('#print-root');root?.remove();const el=document.createElement('div');el.id='print-root';el.className='print-root';el.innerHTML=invoiceHtml(invoice,billingProfileCache||{});document.body.appendChild(el);toast('Archivage impossible. Aperçu impression ouvert.','warning');window.addEventListener('afterprint',()=>setTimeout(()=>el.remove(),500),{once:true});setTimeout(()=>window.print(),250);setTimeout(()=>el.remove(),20000);
+  }
 }
 function invoiceHtml(invoice,profile={}){
   const logo=new URL('./assets/logo.png',location.href).href;const lines=(invoice.lines||[]).map(line=>`<tr><td>${safe(line.description||'')}</td><td>${safe(line.quantity||0)} ${safe(line.unit||'')}</td><td>${money(line.unitPrice)}</td><td>${money(line.amount)}</td></tr>`).join('');

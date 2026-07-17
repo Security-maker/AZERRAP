@@ -1,80 +1,77 @@
-# Sentinelle Pro V5.0 — Facturation & Planning Couleurs
+# Sentinelle Pro V5.1 — Documents PDF & Dashboard propre
 
-Patch GitHub Pages + Firebase Spark, sans Firebase Storage.
+Cette version corrige les points remontés après la V5.0.
 
-## Nouveautés V5.0
+## Nouveautés V5.1
 
-### Facturation réservée au compte admin
-- Nouvelle rubrique `Facturation` visible uniquement pour le rôle `admin`.
-- Coordonnées de l’entreprise : raison sociale, SIRET, TVA, adresse, email, téléphone, IBAN, BIC et mentions de paiement.
-- Génération automatique d’une facture à partir des missions `completed` d’un site et d’une période.
-- Calcul des heures depuis les horaires réalisés lorsqu’ils existent, sinon depuis les horaires planifiés.
-- Tarif horaire et TVA configurables par site.
-- Ajout possible d’un forfait ou complément manuel.
-- Numérotation automatique : `SP-ANNÉE-0001`.
-- Protection contre la double facturation d’une même mission.
-- Statuts : brouillon, envoyée, payée, en retard, annulée.
-- Tableau de bord : facturé HT, encaissé TTC, reste à encaisser et retards.
-- Impression / enregistrement PDF et export CSV des lignes de facture.
-- Collections Firestore : `invoices` et `billingSettings`.
+### Dashboard QG allégé
+- La carte opérationnelle passe en pleine largeur.
+- Le bloc “Missions à venir” est retiré du Dashboard pour ne plus polluer l’accueil.
+- Le Dashboard garde uniquement : statistiques, carte, notifications QG, SOS/PTI et derniers rapports MCI.
 
-La facturation est un outil de gestion. Vérifie les mentions légales et fiscales applicables à ton entreprise avant d’envoyer une facture définitive.
+### Suivi missions moins polluant
+Dans la page Missions, le bloc “Suivi missions” devient “Suivi prioritaire”. Il affiche uniquement :
+- missions en cours ;
+- missions en retard ;
+- missions du jour non terminées.
 
-### Code couleur par site dans le planning
-- Chaque site possède une couleur personnalisable dans `Gestion Sites`.
-- Les missions utilisent la couleur du site, y compris dans la vue par collaborateurs.
-- Les missions multi-jours conservent la même couleur sur toute leur durée.
-- Légende automatique des sites au-dessus du planning.
-- Bande colorée sur la ligne de chaque site.
-- Couleur de secours automatique pour les anciens sites qui n’ont pas encore de couleur enregistrée.
+Le planning complet reste disponible dans la grille PC.
 
-### Nouveaux champs d’un site
-- Couleur planning.
-- Tarif horaire HT.
-- TVA par défaut.
-- Email de facturation.
-- Adresse de facturation.
+### Carte plus lisible
+- Carte claire par défaut.
+- Carte plus grande.
+- Marqueurs plus visibles.
+- Couleur du site utilisée sur les marqueurs.
+- Message d’aide si aucun site n’a encore latitude/longitude.
+- Accès Google Maps depuis les marqueurs.
 
-## Mise à jour depuis la V4.9
+### Documents PDF
+Le générateur de Documents archive maintenant les documents comme des documents PDF dans la rubrique Documents.
 
-Remplace sur GitHub :
+Types gérés :
+- MCI ;
+- rapports de mission ;
+- rondes ;
+- SOS/PTI ;
+- factures.
 
-- `app.js`
-- `style.css`
-- `service-worker.js`
-- `firestore.rules`
-- `README.md`
+Chaque document peut être :
+- aperçu ;
+- téléchargé en PDF ;
+- imprimé depuis l’aperçu ;
+- exporté en CSV si besoin ;
+- supprimé par l’admin.
 
-Tu peux conserver tous les autres fichiers.
+Important : cette version n’utilise toujours pas Firebase Storage. Les documents sont archivés comme données structurées dans Firestore puis régénérés en PDF à la demande via le navigateur. C’est le meilleur compromis sans plan Blaze.
 
-Ne remplace pas `firebase-config.js` si tes clés Firebase, OneSignal et les URL Cloudflare y sont déjà renseignées.
+### Factures PDF
+Le bouton PDF des factures télécharge un PDF et archive une copie dans Documents > Factures.
 
-## Règles Firestore obligatoires
+## Mise à jour GitHub depuis V5.0
 
-Après la mise à jour :
+Remplace :
 
-1. Firebase Console.
-2. Firestore Database.
-3. Règles.
-4. Coller le contenu du nouveau fichier `firestore.rules`.
-5. Cliquer sur `Publier`.
+```text
+app.js
+style.css
+index.html
+service-worker.js
+README.md
+```
 
-Les collections de facturation sont strictement réservées au rôle `admin`. Le superviseur et l’agent n’y ont pas accès.
+Ne remplace pas :
 
-## Première configuration de la facturation
+```text
+firebase-config.js
+```
 
-1. Connecte-toi avec le compte admin.
-2. Ouvre le menu puis `Facturation`.
-3. Clique sur `Coordonnées entreprise`.
-4. Renseigne les informations qui doivent apparaître sur les factures.
-5. Va dans `Sites` et renseigne le tarif horaire, la TVA et les informations de facturation de chaque client.
-6. Termine au moins une mission.
-7. Retourne dans `Facturation` puis clique sur `Créer une facture`.
+Si tu utilises encore l’ancien cache PWA, ouvre ensuite :
 
-## Actualiser la PWA
+```text
+https://security-maker.github.io/AZERRAP/?fresh=51
+```
 
-Après l’envoi sur GitHub Pages, ouvre :
+Puis supprime/réinstalle l’icône de l’écran d’accueil si besoin.
 
-`https://tonpseudo.github.io/ton-repo/?fresh=50`
-
-Sur iPhone, supprime l’ancienne icône de l’écran d’accueil puis réinstalle la PWA si l’ancien cache reste visible.
+## Firebase
+Les règles V5.0 restent compatibles avec la V5.1. Tu peux republier `firestore.rules` si besoin, mais aucune nouvelle collection n’est nécessaire.
