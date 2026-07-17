@@ -1,24 +1,57 @@
-# Sentinelle Pro V5.6.1 — Correctif abonnement OneSignal
+# Sentinelle Pro V5.6.2 — Correctif abonnement OneSignal GitHub Pages
 
-Correctif ciblé pour les appareils affichés « Never Subscribed » dans OneSignal.
+Correctif construit directement depuis le ZIP déployé fourni par Nacer.
 
-## Changements
-- OneSignal prépare le SDK avant le clic d'autorisation.
-- La demande système passe uniquement par OneSignal.
-- Le profil utilisateur n'est relié avec `login(uid)` qu'après création d'un vrai abonnement actif.
-- Attente du Subscription ID, du token et de `optedIn=true` avant d'enregistrer `pushTokens`.
-- Les anciens profils OneSignal « Never Subscribed » ne sont plus réutilisés comme destinataires valides.
+## Cause corrigée
 
-## GitHub
-Remplacer uniquement :
-- `app.js`
-- `service-worker.js`
+Le chemin `serviceWorkerPath` envoyé au SDK OneSignal commençait par `/`.
+Pour un Worker placé dans un sous-dossier, OneSignal demande un chemin relatif à la racine du domaine, sans slash initial.
 
-## Nettoyage avant le test
-1. Dans Firestore, supprimer les anciens documents de `pushTokens` pour le téléphone concerné.
-2. Dans OneSignal > Audience > Subscriptions, supprimer les lignes de test « Never Subscribed » si souhaité.
-3. Supprimer puis réinstaller la PWA sur l'iPhone.
-4. Ouvrir Menu > Push et attendre que le bouton affiche « Demander l’autorisation sur cet appareil ».
-5. Appuyer une seule fois et accepter.
+Pour cette application, le SDK reçoit désormais :
 
-Version fraîche : `?fresh=561`
+```text
+AZERRAP/push/onesignal/OneSignalSDKWorker.js
+```
+
+avec le scope :
+
+```text
+/AZERRAP/push/onesignal/
+```
+
+## Autres sécurisations
+
+- vérification réseau et MIME du Worker avant l'initialisation OneSignal ;
+- le Worker OneSignal n'est plus stocké dans le cache PWA ;
+- attente de 30 secondes du token et du Subscription ID ;
+- diagnostic visible : Worker attendu, Worker enregistré, scope et abonnement natif.
+
+## Fichiers à remplacer sur GitHub
+
+```text
+app.js
+service-worker.js
+```
+
+Ne pas remplacer `firebase-config.js`.
+
+## Réglages OneSignal obligatoires
+
+Dans OneSignal > Settings > Push & In-App > Web :
+
+```text
+Integration : Custom Code
+Site URL : https://security-maker.github.io
+Path to service worker files : /AZERRAP/push/onesignal/
+Service worker filename : OneSignalSDKWorker.js
+Service worker registration scope : /AZERRAP/push/onesignal/
+```
+
+## Test propre iPhone
+
+1. Publier les deux fichiers et attendre la fin de GitHub Pages.
+2. Supprimer l'ancienne icône Sentinelle Pro.
+3. Supprimer les données de `security-maker.github.io` dans les réglages Safari.
+4. Ouvrir `https://security-maker.github.io/AZERRAP/?fresh=562`.
+5. Ajouter l'application à l'écran d'accueil.
+6. L'ouvrir depuis l'icône, se connecter en agent et utiliser l'onglet Push.

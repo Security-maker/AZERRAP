@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-6-1-onesignal-subscribe-fix';
+const CACHE_NAME = 'sentinelle-pro-v5-6-2-onesignal-pathfix';
 const APP_SHELL = [
   './',
   './index.html',
@@ -8,8 +8,7 @@ const APP_SHELL = [
   './manifest.json',
   './offline.html',
   './assets/logo.png',
-  './assets/favicon.png',
-  './push/onesignal/OneSignalSDKWorker.js'
+  './assets/favicon.png'
 ];
 
 self.addEventListener('install', event => {
@@ -30,6 +29,10 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return;
 
+  // Le Worker OneSignal doit toujours être servi directement par GitHub Pages.
+  // On évite de le mettre derrière le cache PWA afin de préserver son MIME et ses mises à jour.
+  if (url.pathname.endsWith('/push/onesignal/OneSignalSDKWorker.js')) return;
+
   event.respondWith(
     fetch(request).then(response => {
       const copy = response.clone();
@@ -37,33 +40,4 @@ self.addEventListener('fetch', event => {
       return response;
     }).catch(() => caches.match(request).then(cached => cached || caches.match('./offline.html')))
   );
-});
-
-self.addEventListener('push', event => {
-  let payload = {};
-  try { payload = event.data ? event.data.json() : {}; } catch(error) { payload = {}; }
-  const notification = payload.notification || payload.webpush?.notification || payload.data || {};
-  const title = notification.title || payload.data?.title || 'Sentinelle Pro';
-  const body = notification.body || payload.data?.message || 'Nouvelle information opérationnelle';
-  const options = {
-    body,
-    icon: './assets/icons/icon-192.png',
-    badge: './assets/icons/icon-192.png',
-    data: { url: './index.html', ...(payload.data || {}) },
-    requireInteraction: notification.requireInteraction ?? true,
-    tag: notification.tag || `sentinelle-${payload.data?.type || 'operationnel'}`,
-    vibrate: [200, 100, 200]
-  };
-  event.waitUntil(self.registration.showNotification(title, options));
-});
-
-self.addEventListener('notificationclick', event => {
-  event.notification.close();
-  const url = event.notification?.data?.url || './index.html';
-  event.waitUntil(clients.matchAll({ type:'window', includeUncontrolled:true }).then(list => {
-    for (const client of list) {
-      if ('focus' in client) return client.focus();
-    }
-    if (clients.openWindow) return clients.openWindow(url);
-  }));
 });
