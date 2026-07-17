@@ -903,7 +903,15 @@ async function initQGMap(){
     mapInstance.setView([gps.lat,gps.lng], 15);
     L.circleMarker([gps.lat,gps.lng], { radius:10, color:'#00B8FF', fillColor:'#00B8FF', fillOpacity:.28, weight:3 }).addTo(mapInstance).bindPopup('Votre position').openPopup();
   });
-  setTimeout(()=>mapInstance.invalidateSize(), 120);
+  const stabilizeMap = () => {
+    if (!mapInstance) return;
+    try {
+      mapInstance.invalidateSize(true);
+      fitAll();
+    } catch(e) {}
+  };
+  [80, 250, 700, 1400].forEach(ms => setTimeout(stabilizeMap, ms));
+  window.addEventListener('resize', () => setTimeout(stabilizeMap, 120), { passive:true });
 }
 function listenQGMissionsPreview(){
   const box = document.querySelector('#qg-missions-preview'); if (!box) return;

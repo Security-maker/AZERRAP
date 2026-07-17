@@ -592,3 +592,92 @@ body.menu-open{overflow:hidden}
 .map-card-xl{grid-column:1/-1;position:relative;background:linear-gradient(180deg,rgba(8,27,51,.98),rgba(5,10,19,.98))}.map-card-title{align-items:center}.premium-map-xl{height:620px;border:1px solid rgba(0,156,255,.35);box-shadow:inset 0 0 0 1px rgba(244,248,251,.04),0 18px 40px rgba(0,0,0,.24)}.map-legend-premium{background:rgba(244,248,251,.055);border:1px solid rgba(244,248,251,.09);border-radius:15px;padding:10px 12px}.map-empty-help{position:absolute;left:28px;right:28px;bottom:28px;z-index:410;background:rgba(5,10,19,.92);border:1px solid rgba(255,159,28,.35);border-radius:16px;padding:12px 14px;color:var(--cold);font-weight:800}.map-empty-help.hidden{display:none}.premium-map .leaflet-control-layers,.premium-map .leaflet-bar a{background:#fff;color:#081b33;border-color:rgba(8,27,51,.18);box-shadow:0 8px 22px rgba(0,0,0,.16)}.premium-map .leaflet-control-layers label{color:#081b33}.premium-map .leaflet-popup-content-wrapper{border-radius:18px;box-shadow:0 14px 34px rgba(0,0,0,.26)}.sp-map-marker{width:46px;height:46px;border-radius:18px;font-size:13px}.sp-map-marker.site{background:var(--marker-color,var(--electric));}.sp-map-marker.agent{box-shadow:0 0 0 6px rgba(0,208,132,.18),0 10px 24px rgba(0,0,0,.42)}.pdf-document{border-left:4px solid var(--electric)}.pdf-document .pill{display:inline-flex;width:auto;margin-left:8px}.document-preview{border:1px solid rgba(8,27,51,.12)}
 @media(max-width:1000px){.premium-map-xl{height:500px}.map-card-title{align-items:flex-start}.map-legend-premium{font-size:10px}.map-empty-help{left:20px;right:20px;bottom:20px}}
 @media(max-width:560px){.premium-map-xl{height:390px}.map-legend-premium .muted{display:none}.sp-map-marker{width:42px;height:42px}.map-empty-help{font-size:12px}}
+
+/* V5.1.1 — Correctif carte Leaflet lisible
+   Le CSS global de l'application peut perturber les tuiles Leaflet si le CDN CSS se charge mal.
+   Ces règles verrouillent la structure Leaflet pour éviter les tuiles géantes/décalées. */
+.leaflet-container,
+.leaflet-container * {
+  box-sizing: content-box;
+}
+.leaflet-container {
+  width: 100% !important;
+  min-height: 560px;
+  position: relative !important;
+  overflow: hidden !important;
+  font-family: Montserrat, Arial, sans-serif;
+  isolation: isolate;
+}
+.leaflet-pane,
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow,
+.leaflet-tile-container,
+.leaflet-pane > svg,
+.leaflet-pane > canvas,
+.leaflet-zoom-box,
+.leaflet-image-layer,
+.leaflet-layer {
+  position: absolute !important;
+  left: 0;
+  top: 0;
+}
+.leaflet-tile,
+.leaflet-container img.leaflet-tile {
+  width: 256px !important;
+  height: 256px !important;
+  max-width: none !important;
+  max-height: none !important;
+  min-width: 256px !important;
+  min-height: 256px !important;
+  display: block !important;
+  object-fit: initial !important;
+  border: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+.leaflet-container .leaflet-marker-icon,
+.leaflet-container .leaflet-marker-shadow {
+  max-width: none !important;
+  display: block !important;
+}
+.leaflet-map-pane,
+.leaflet-tile-pane,
+.leaflet-overlay-pane,
+.leaflet-shadow-pane,
+.leaflet-marker-pane,
+.leaflet-tooltip-pane,
+.leaflet-popup-pane {
+  position: absolute !important;
+  left: 0;
+  top: 0;
+}
+.leaflet-control-container .leaflet-top,
+.leaflet-control-container .leaflet-bottom {
+  position: absolute;
+  z-index: 1000;
+  pointer-events: none;
+}
+.leaflet-control-container .leaflet-top { top: 0; }
+.leaflet-control-container .leaflet-right { right: 0; }
+.leaflet-control-container .leaflet-bottom { bottom: 0; }
+.leaflet-control-container .leaflet-left { left: 0; }
+.leaflet-control { pointer-events: auto; }
+.leaflet-control-attribution { font-size: 10px; }
+.premium-map-xl,
+.premium-map {
+  width: 100% !important;
+  min-height: 560px;
+  background: #d7e7ed !important;
+}
+.map-card-xl {
+  overflow: hidden !important;
+}
+.map-empty-help {
+  pointer-events: none;
+}
+@media (max-width: 768px) {
+  .leaflet-container,
+  .premium-map-xl,
+  .premium-map { min-height: 420px; }
+}
