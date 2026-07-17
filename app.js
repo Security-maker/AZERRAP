@@ -1006,14 +1006,14 @@ async function renderQGHome(){
   currentRoute = 'home';
   const body = `
     <section class="grid cols-4" id="qg-stats">
-      <div class="card stat green"><div class="stat-label">Agents en poste</div><div class="stat-value" id="stat-working">—</div></div>
-      <div class="card stat red"><div class="stat-label">Alertes actives</div><div class="stat-value" id="stat-alerts">—</div></div>
-      <div class="card stat orange"><div class="stat-label">Incidents 24h</div><div class="stat-value" id="stat-incidents">—</div></div>
-      <div class="card stat blue"><div class="stat-label">Missions du jour</div><div class="stat-value" id="stat-missions">—</div></div>
+      <div class="card stat green dashboard-stat" role="button" tabindex="0" data-dashboard-detail="working" aria-label="Afficher les agents en poste"><div class="stat-label">Agents en poste</div><div class="stat-value" id="stat-working">—</div><div class="stat-hint">Voir les agents et leur durée en poste</div></div>
+      <div class="card stat red dashboard-stat" role="button" tabindex="0" data-dashboard-detail="alerts" aria-label="Afficher les alertes actives"><div class="stat-label">Alertes actives</div><div class="stat-value" id="stat-alerts">—</div><div class="stat-hint">Voir les alertes à traiter</div></div>
+      <div class="card stat orange dashboard-stat" role="button" tabindex="0" data-dashboard-detail="incidents" aria-label="Afficher les incidents des dernières 24 heures"><div class="stat-label">Incidents 24h</div><div class="stat-value" id="stat-incidents">—</div><div class="stat-hint">Voir les incidents et interventions</div></div>
+      <div class="card stat blue dashboard-stat" role="button" tabindex="0" data-dashboard-detail="missions" aria-label="Afficher les missions du jour"><div class="stat-label">Missions du jour</div><div class="stat-value" id="stat-missions">—</div><div class="stat-hint">Voir le programme opérationnel</div></div>
     </section>
     <section class="card map-card map-card-xl" style="margin-top:16px">
       <div class="card-title map-card-title"><div><h2>Carte opérationnelle</h2><p>Vue lisible des sites géolocalisés et agents en poste</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div>
-      <div class="map-legend map-legend-premium"><span><i class="legend-dot agent"></i>Agents en poste</span><span><i class="legend-dot site"></i>Sites client</span><span class="muted">Clique sur un point pour ouvrir Google Maps</span></div>
+      <div class="map-legend map-legend-premium"><span><i class="legend-dot agent"></i>Agents en poste</span><span><i class="legend-dot site"></i>Sites client</span><span class="muted">Touchez un agent pour afficher son poste · Touchez un site pour ouvrir sa fiche</span></div>
       <div id="qg-map" class="map premium-map premium-map-xl"></div>
       <div id="map-empty-help" class="map-empty-help hidden">Renseigne une adresse complète dans Gestion Sites : la position sera calculée automatiquement.</div>
     </section>
@@ -1023,8 +1023,172 @@ async function renderQGHome(){
     </section>
     <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Temps réel, sans pollution planning</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
   render(page('Dashboard QG', 'Centre de commandement temps réel', body));
-  listenQGStats(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5);
+  listenQGStats(); bindQGDashboardDetails(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5);
 }
+
+function bindQGDashboardDetails(){
+  document.querySelectorAll('[data-dashboard-detail]').forEach(card => {
+    const open = () => showQGDashboardDetail(card.dataset.dashboardDetail);
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+}
+function dashboardEmpty(message){
+  return `<div class="dashboard-detail-empty">${safe(message)}</div>`;
+}
+function dashboardDetailItem({title='', meta='', badge='', badgeClass='blue', actions=''}){
+  return `<article class="dashboard-detail-item"><div class="dashboard-detail-main"><div class="dashboard-detail-title">${safe(title)}</div><div class="dashboard-detail-meta">${meta}</div></div><div class="dashboard-detail-side">${badge ? `<span class="pill ${safe(badgeClass)}">${safe(badge)}</span>` : ''}${actions}</div></article>`;
+}
+function missionStatusLabel(status){
+  return ({planned:'Planifiée', active:'En cours', completed:'Terminée', cancelled:'Annulée', late:'En retard'}[status] || status || 'Planifiée');
+}
+function missionStatusClass(status){
+  return ({active:'green', completed:'blue', cancelled:'red', late:'red', planned:'orange'}[status] || 'blue');
+}
+async function showQGDashboardDetail(type){
+  const config = {
+    working:{ title:'Agents en poste', subtitle:'Présence terrain en temps réel' },
+    alerts:{ title:'Alertes actives', subtitle:'Alertes nécessitant une prise en charge' },
+    incidents:{ title:'Incidents des dernières 24h', subtitle:'Incidents et interventions déclarés' },
+    missions:{ title:'Missions du jour', subtitle:'Planning opérationnel de la journée' }
+  }[type];
+  if (!config) return;
+  showModal(config.title, `<div class="dashboard-detail-head"><p>${safe(config.subtitle)}</p><span class="dashboard-detail-live">Mise à jour à ${safe(new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}))}</span></div><div id="dashboard-detail-content" class="dashboard-detail-list"><div class="empty">Chargement...</div></div>`, 'wide');
+  const box = document.querySelector('#dashboard-detail-content');
+  if (!box) return;
+  try {
+    if (type === 'working') {
+      const [shiftSnap, usersSnap] = await Promise.all([
+        getDocs(query(collectionRef('shifts'), where('status','==','active'))),
+        getDocs(collectionRef('users'))
+      ]);
+      const users = new Map(usersSnap.docs.map(d => [d.id, {id:d.id, ...d.data()}]));
+      const rows = shiftSnap.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => (timestampToDate(a.startTime)?.getTime() || 0) - (timestampToDate(b.startTime)?.getTime() || 0));
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucun agent n’est actuellement en poste.');
+      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>agent${rows.length>1?'s':''} actuellement en poste</span></div>` + rows.map(row => {
+        const user = users.get(row.agentId) || {};
+        const phone = user.telephone || user.phone || '';
+        const actions = `<button class="btn small" data-dashboard-map-shift="${safe(row.id)}">Voir sur la carte</button>${phone ? `<a class="btn small" href="tel:${safe(String(phone).replace(/\s/g,''))}">Appeler</a>` : ''}`;
+        return dashboardDetailItem({
+          title:row.agentNom || `${user.prenom||''} ${user.nom||''}`.trim() || 'Agent',
+          meta:`<strong>${safe(row.siteNom || 'Site non renseigné')}</strong><br>Prise de poste : ${safe(dateText(row.startTime))}<br>Depuis : <strong>${safe(elapsedShiftText(row.startTime))}</strong>${row.scheduledEnd ? `<br>Fin prévue : ${safe(dateText(row.scheduledEnd))}` : ''}`,
+          badge:'En poste', badgeClass:'green', actions
+        });
+      }).join('');
+      document.querySelectorAll('[data-dashboard-map-shift]').forEach(btn => btn.addEventListener('click', () => {
+        const shiftId = btn.dataset.dashboardMapShift;
+        closeModal();
+        setTimeout(() => focusAgentOnMap(shiftId), 120);
+      }));
+      return;
+    }
+    if (type === 'alerts') {
+      const snap = await getDocs(query(collectionRef('alerts'), where('statut','==','active')));
+      const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => (timestampToDate(b.heure || b.createdAt)?.getTime() || 0) - (timestampToDate(a.heure || a.createdAt)?.getTime() || 0));
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune alerte active.');
+      box.innerHTML = `<div class="dashboard-detail-summary danger"><strong>${rows.length}</strong><span>alerte${rows.length>1?'s':''} active${rows.length>1?'s':''}</span></div>` + rows.map(row => dashboardDetailItem({
+        title:`${row.typeAlerte || 'SOS/PTI'} · ${row.agentNom || 'Agent'}`,
+        meta:`Site : <strong>${safe(row.siteActuelNom || row.siteActuel || '—')}</strong><br>Déclenchée : ${safe(dateText(row.heure || row.createdAt))}<br>${safe(row.message || 'Alerte critique en attente de traitement')}`,
+        badge:row.niveau || 'Critique', badgeClass:'red',
+        actions:`<button class="btn small danger" data-dashboard-alert="${safe(row.id)}">Ouvrir l’alerte</button>`
+      })).join('');
+      document.querySelectorAll('[data-dashboard-alert]').forEach(btn => btn.addEventListener('click', () => { closeModal(); navigate('alerts'); }));
+      return;
+    }
+    if (type === 'incidents') {
+      const snap = await getDocs(query(collectionRef('reports'), orderBy('createdAt','desc'), limit(300)));
+      const since = Date.now() - 24*60*60*1000;
+      const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => ['Incident','Intervention'].includes(row.category) && (timestampToDate(row.createdAt)?.getTime() || 0) > since);
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucun incident ni intervention déclaré sur les dernières 24 heures.');
+      box.innerHTML = `<div class="dashboard-detail-summary warning"><strong>${rows.length}</strong><span>événement${rows.length>1?'s':''} sur les dernières 24h</span></div>` + rows.map(row => dashboardDetailItem({
+        title:`${row.category || 'Incident'} · ${row.siteNom || 'Site'}`,
+        meta:`Agent : <strong>${safe(row.agentNom || '—')}</strong><br>${safe(dateText(row.createdAt))}<br>${safe(row.message || '')}`,
+        badge:row.severity || 'Normal', badgeClass:['Critique','Important'].includes(row.severity)?'red':'orange',
+        actions:`<button class="btn small" data-dashboard-report="${safe(row.id)}">Voir le journal MCI</button>`
+      })).join('');
+      document.querySelectorAll('[data-dashboard-report]').forEach(btn => btn.addEventListener('click', () => { closeModal(); navigate('reports'); }));
+      return;
+    }
+    if (type === 'missions') {
+      const snap = await getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(400)));
+      const today = new Date(); today.setHours(0,0,0,0);
+      const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
+      const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => {
+        const start = timestampToDate(row.scheduledStart)?.getTime() || 0;
+        const end = timestampToDate(row.scheduledEnd)?.getTime() || start;
+        return start < tomorrow.getTime() && end >= today.getTime();
+      }).sort((a,b) => (timestampToDate(a.scheduledStart)?.getTime() || 0) - (timestampToDate(b.scheduledStart)?.getTime() || 0));
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission planifiée aujourd’hui.');
+      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} couvrant la journée</span></div>` + rows.map(row => dashboardDetailItem({
+        title:row.siteNom || row.title || 'Mission',
+        meta:`Agent : <strong>${safe(row.agentNom || 'Non affecté')}</strong><br>${safe(dateText(row.scheduledStart))} → ${safe(dateText(row.scheduledEnd))}<br>${safe(row.type || row.missionType || 'Mission de sécurité')}`,
+        badge:missionStatusLabel(row.status), badgeClass:missionStatusClass(row.status),
+        actions:`<button class="btn small" data-dashboard-mission="${safe(row.id)}">Ouvrir les missions</button>`
+      })).join('');
+      document.querySelectorAll('[data-dashboard-mission]').forEach(btn => btn.addEventListener('click', () => { closeModal(); navigate('missions'); }));
+    }
+  } catch(error) {
+    console.error(error);
+    box.innerHTML = dashboardEmpty(userFriendlyError(error, 'Impossible de charger le détail pour le moment.'));
+  }
+}
+function focusAgentOnMap(shiftId){
+  if (!mapInstance || !mapAgentLayer) return toast('La carte n’est pas encore prête.', 'warning');
+  let target = null;
+  mapAgentLayer.eachLayer(layer => { if (layer?.__spShift?.id === shiftId) target = layer; });
+  if (!target) return toast('Cet agent n’est plus localisé sur la carte.', 'warning');
+  const coords = target.getLatLng?.();
+  if (coords) mapInstance.setView(coords, 16, {animate:true});
+  const mapElement = document.querySelector('#qg-map');
+  mapElement?.scrollIntoView({behavior:'smooth', block:'center'});
+  setTimeout(() => target.fire('click'), 450);
+}
+async function showAgentOperationalDetails(shift, lat, lng){
+  const modalId = `agent-live-${id()}`;
+  showModal(shift.agentNom || 'Agent en poste', `<section class="agent-live-sheet"><div class="agent-live-status"><span class="live-dot"></span><strong>En poste</strong><span id="${modalId}-elapsed">${safe(elapsedShiftText(shift.startTime))}</span></div><div id="${modalId}-content" class="agent-live-content"><div class="empty">Chargement des informations...</div></div></section>`, 'wide');
+  const content = document.getElementById(`${modalId}-content`);
+  if (!content) return;
+  try {
+    const [userSnap, proofSnap] = await Promise.all([
+      shift.agentId ? getDoc(docRef('users', shift.agentId)).catch(()=>null) : Promise.resolve(null),
+      shift.checkInPhotoAvailable ? getDoc(docRef('shiftProofs', shift.id)).catch(()=>null) : Promise.resolve(null)
+    ]);
+    const user = userSnap?.exists?.() ? userSnap.data() : {};
+    const proof = proofSnap?.exists?.() ? proofSnap.data() : {};
+    const phone = user.telephone || user.phone || '';
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
+    content.innerHTML = `<div class="agent-live-identity"><div class="agent-live-avatar">${safe(String(shift.agentNom || 'A').split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase())}</div><div><h3>${safe(shift.agentNom || 'Agent')}</h3><p>${safe(shift.siteNom || 'Site non renseigné')}</p></div></div>
+      <div class="agent-live-grid">
+        <div><span>Prise de poste</span><strong>${safe(dateText(shift.startTime))}</strong></div>
+        <div><span>Durée en poste</span><strong id="${modalId}-duration">${safe(elapsedShiftText(shift.startTime))}</strong></div>
+        <div><span>Mission</span><strong>${safe(shift.shiftType || 'Mission libre')}</strong></div>
+        <div><span>Fin prévue</span><strong>${safe(dateText(shift.scheduledEnd))}</strong></div>
+        <div><span>Dernière activité</span><strong>${safe(dateText(user.lastSeen))}</strong></div>
+        <div><span>Précision GPS</span><strong>${Number.isFinite(Number(shift.positionGPS?.accuracy)) ? `${Math.round(Number(shift.positionGPS.accuracy))} m` : 'Non disponible'}</strong></div>
+      </div>
+      ${shift.missionInstructions ? `<div class="agent-live-instructions"><span>CONSIGNES DE MISSION</span><p>${safe(shift.missionInstructions).replace(/\n/g,'<br>')}</p></div>` : ''}
+      ${proof.imageDataUrl ? `<figure class="agent-live-photo"><img src="${safe(proof.imageDataUrl)}" alt="Photo de prise de poste"><figcaption>Preuve photo de prise de poste · ${safe(dateText(proof.capturedAt || shift.checkInPhotoCapturedAt))}</figcaption></figure>` : `<div class="agent-live-no-photo">Aucune photo de prise de poste disponible.</div>`}
+      <div class="agent-live-actions"><a class="btn primary" href="${safe(mapsUrl)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a>${phone ? `<a class="btn" href="tel:${safe(String(phone).replace(/\s/g,''))}">Appeler l’agent</a>` : ''}<button class="btn" id="${modalId}-agents">Gestion agents</button></div>`;
+    document.getElementById(`${modalId}-agents`)?.addEventListener('click', () => { closeModal(); navigate('agents'); });
+    const timer = setInterval(() => {
+      const elapsed = document.getElementById(`${modalId}-elapsed`);
+      const duration = document.getElementById(`${modalId}-duration`);
+      if (!elapsed && !duration) return clearInterval(timer);
+      const value = elapsedShiftText(shift.startTime);
+      if (elapsed) elapsed.textContent = value;
+      if (duration) duration.textContent = value;
+    }, 60000);
+  } catch(error) {
+    console.error(error);
+    content.innerHTML = dashboardEmpty('Les informations complémentaires de cet agent sont indisponibles.');
+  }
+}
+
 function listenQGStats(){
   const usersQ = query(collectionRef('users'));
   const alertsQ = query(collectionRef('alerts'), where('statut','==','active'));
@@ -1045,7 +1209,7 @@ function listenQGStats(){
     const today = new Date(); today.setHours(0,0,0,0);
     const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
     const rows = snap.docs.map(d=>d.data());
-    setText('#stat-missions', rows.filter(m => { const t=m.scheduledStart?.toDate?.()?.getTime() || 0; return t>=today.getTime() && t<tomorrow.getTime(); }).length);
+    setText('#stat-missions', rows.filter(m => { const start=timestampToDate(m.scheduledStart)?.getTime() || 0; const end=timestampToDate(m.scheduledEnd)?.getTime() || start; return start<tomorrow.getTime() && end>=today.getTime(); }).length);
   }, () => setText('#stat-missions', '0')));
 }
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
@@ -1125,33 +1289,18 @@ async function initQGMap(){
       const lat = Number(gps.lat); const lng = Number(gps.lng);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
       const initials = String(s.agentNom || 'A').split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
-      const marker = L.marker([lat,lng], { icon:markerIcon('agent', initials) }).addTo(mapAgentLayer);
+      const marker = L.marker([lat,lng], { icon:markerIcon('agent', initials), title:`${s.agentNom || 'Agent'} · ${s.siteNom || 'Site'}` }).addTo(mapAgentLayer);
       marker.__spShift = s;
-      marker.__spPhoto = '';
-      marker.bindPopup(agentPopupHtml(s, lat, lng, '', !!s.checkInPhotoAvailable), { maxWidth:320 });
-      marker.on('popupopen', async () => {
-        marker.setPopupContent(agentPopupHtml(s, lat, lng, marker.__spPhoto, !!s.checkInPhotoAvailable && !marker.__spPhoto));
-        if (s.checkInPhotoAvailable && !marker.__spPhoto) {
-          const proofSnap = await getDoc(docRef('shiftProofs', s.id)).catch(()=>null);
-          marker.__spPhoto = proofSnap?.exists?.() ? (proofSnap.data().imageDataUrl || '') : '';
-          if (marker.isPopupOpen()) marker.setPopupContent(agentPopupHtml(s, lat, lng, marker.__spPhoto, false));
-        }
+      marker.bindTooltip(`${safe(s.agentNom || 'Agent')} · ${safe(s.siteNom || 'Site')}`, { direction:'top', offset:[0,-24], opacity:.94 });
+      marker.on('click', event => {
+        if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+        showAgentOperationalDetails(s, lat, lng);
       });
       mapMarkers.push(marker); mapAgentPoints.push([lat,lng]);
     });
     document.querySelector('#map-empty-help')?.classList.toggle('hidden', mapSitePoints.length > 0 || mapAgentPoints.length > 0);
     syncBounds(); setTimeout(fitAll, 80);
   }));
-  const popupElapsedTimer = setInterval(() => {
-    mapAgentLayer?.eachLayer?.(layer => {
-      if (layer?.isPopupOpen?.() && layer.__spShift) {
-        const gps = layer.__spShift.positionGPS || {};
-        layer.setPopupContent(agentPopupHtml(layer.__spShift, Number(gps.lat), Number(gps.lng), layer.__spPhoto || '', false));
-      }
-    });
-  }, 60000);
-  unsubscribeList.push(() => clearInterval(popupElapsedTimer));
-
   document.querySelector('#map-reset')?.addEventListener('click', fitAll);
   document.querySelector('#map-locate')?.addEventListener('click', async()=>{
     const gps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-4-5-emergencyfix';
+const CACHE_NAME = 'sentinelle-pro-v5-4-7-dashboard-interactions';
 const APP_SHELL = [
   './',
   './index.html',
@@ -27,6 +27,9 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
+  const url = new URL(request.url);
+  if (url.origin !== location.origin) return;
+
   event.respondWith(
     fetch(request).then(response => {
       const copy = response.clone();

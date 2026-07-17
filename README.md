@@ -1,37 +1,18 @@
-# Sentinelle Pro V5.4.5 — Correctif urgence démarrage
+# Sentinelle Pro V5.4.7 — Dashboard interactif
 
-Ce patch corrige l'erreur JavaScript `Unexpected token ')'` qui bloquait l'application sur l'écran "Module principal indisponible".
+Correctifs ciblés :
+- clic/tap fiable sur un agent de la carte avec fiche opérationnelle complète ;
+- cartes statistiques QG cliquables ;
+- détails agents en poste, alertes actives, incidents 24h et missions du jour ;
+- missions de plusieurs jours comptées lorsqu'elles couvrent la journée ;
+- navigation rapide depuis les fiches détaillées.
 
-## Fichiers à remplacer sur GitHub
-
-Remplace uniquement :
-
+## GitHub
+Remplacer uniquement :
 - `app.js`
+- `style.css`
 - `service-worker.js`
 
-Ne touche pas à :
+Ne pas remplacer `firebase-config.js`.
 
-- `firebase-config.js`
-- `style.css`
-- `firestore.rules`
-- `index.html`
-
-## Vérification
-
-Après le commit GitHub, ouvre :
-
-`https://security-maker.github.io/AZERRAP/service-worker.js?fresh=545`
-
-Tu dois voir :
-
-`sentinelle-pro-v5-4-5-emergencyfix`
-
-Ensuite ouvre l'application :
-
-`https://security-maker.github.io/AZERRAP/?fresh=545`
-
-Si le navigateur garde l'ancienne version, clique sur "Nettoyer le cache et relancer" ou supprime les données Safari du domaine `security-maker.github.io`.
-
-## Contrôle technique effectué
-
-Le fichier `app.js` a été vérifié avec `node --check` et avec le parseur TypeScript : aucune erreur de syntaxe détectée.
+Ouvrir ensuite : `?fresh=547`
