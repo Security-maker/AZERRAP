@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-4-3-syntaxfix';
+const CACHE_NAME = 'sentinelle-pro-v5-4-4-duplicatefix';
 const APP_SHELL = [
   './',
   './index.html',

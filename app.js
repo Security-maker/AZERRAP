@@ -1630,7 +1630,7 @@ async function printMissionReport({ mission, shift={}, reports=[] }){
     printGeneratedDocument({ ...data, createdAt:new Date() });
   }
 }
-function missionReportHtml({ mission, shift={}, reports=[] }){
+){
   const logo = new URL('./assets/logo.png', location.href).href;
   const rows = reports.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td></tr>`).join('') || '<tr><td colspan="4">Aucun rapport MCI sur cette mission.</td></tr>';
   return `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>Rapport opérationnel de sécurité</h1><p>Sentinelle Pro · Export généré le ${new Date().toLocaleString('fr-FR')}</p></div></header><section><h2>${safe(mission.siteNom || shift.siteNom || 'Site')}</h2><p class="report-meta">Agent : ${safe(mission.agentNom || shift.agentNom || '—')} · Mission : ${safe(mission.id || '')}<br>Prévu : ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br>Réalisé : ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid"><div><strong>${reports.length}</strong><span>Rapports</span></div><div><strong>${shift.roundsCount || mission.roundsCount || 0}</strong><span>Rondes</span></div><div><strong>${shift.incidentsCount || mission.incidentsCount || 0}</strong><span>Événements</span></div><div><strong>${shift.conformityScore ?? mission.conformityScore ?? '—'}%</strong><span>Conformité</span></div></section><section><h3>Main courante de mission</h3><table><thead><tr><th>Heure</th><th>Catégorie</th><th>Gravité</th><th>Message</th></tr></thead><tbody>${rows}</tbody></table></section><section class="report-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement. Les horodatages proviennent de Firebase/serveur lorsque disponibles.</footer></article>`;
@@ -2423,7 +2423,6 @@ function generatedDocumentMeta(d){
   }
   return [`Type : ${documentTypeLabel(d.type)}`, `Site : ${d.siteNom || 'Tous sites'}`, `Lignes : ${d.rowCount || generatedDocumentRows(d).length}`];
 }
-/* V5.4.3 : ancienne génération PDF remplacée par le moteur premium Azzera Protect plus bas. */
 function downloadGeneratedPdf(d, { silent=false }={}){
   try {
     const doc = createGeneratedDocumentPdf(d);
@@ -2529,28 +2528,6 @@ function listenGeneratedDocuments(){
   };
   document.querySelector('#documents-filter')?.addEventListener('change',redraw);
   unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Publie les règles Firestore V5.1.</div>'));
-}
-function generatedDocumentHtml(d){
-  const p=d?.payload||{};
-  if(d.type==='mission') return missionReportHtml({mission:p.mission||{},shift:p.shift||{},reports:p.rows||[]});
-  const logo=new URL('./assets/logo.png',location.href).href;
-  const rows=p.rows||[];
-  let headers=[],body='';
-  if(d.type==='invoice'){
-    const inv=p.invoice||{};
-    headers=['Désignation','Quantité','PU HT','Total HT'];
-    body=(inv.lines||[]).map(l=>`<tr><td>${safe(l.description)}</td><td>${safe(l.quantity)} ${safe(l.unit||'')}</td><td>${money(l.unitPrice)}</td><td>${money(l.amount)}</td></tr>`).join('') + `<tr><td colspan="3"><strong>Total TTC</strong></td><td><strong>${money(inv.total)}</strong></td></tr>`;
-  } else if(d.type==='mci'){
-    headers=['Date','Agent','Site','Catégorie','Gravité','Message'];
-    body=rows.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td></tr>`).join('');
-  } else if(d.type==='rounds'){
-    headers=['Date','Agent','Site','Point','Méthode','Validité'];
-    body=rows.map(r=>`<tr><td>${dateText(r.scannedAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.checkpointName)}</td><td>${safe(r.scanMethod)}</td><td>${r.isValid?'Valide':'Refusé'}</td></tr>`).join('');
-  } else {
-    headers=['Date','Agent','Site','Alerte','Statut','Message'];
-    body=rows.map(r=>`<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.typeAlerte)}</td><td>${safe(r.statut)}</td><td>${safe(r.message)}</td></tr>`).join('');
-  }
-  return `<article class="report-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><p>Sentinelle Pro · Document archivé le ${dateText(d.createdAt)}</p></div></header><section><p class="report-meta">Type : ${safe(documentTypeLabel(d.type))} · Site : ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||rows.length} ligne(s)</p>${p.truncated?'<p><strong>Attention :</strong> aperçu limité aux 350 premières lignes.</p>':''}</section><section><table><thead><tr>${headers.map(h=>`<th>${safe(h)}</th>`).join('')}</tr></thead><tbody>${body||`<tr><td colspan="${headers.length}">Aucune donnée.</td></tr>`}</tbody></table></section><footer>Document généré automatiquement par Sentinelle Pro.</footer></article>`;
 }
 function openGeneratedDocument(d){
   if(!d)return;
