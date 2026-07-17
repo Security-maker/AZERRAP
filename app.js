@@ -3268,40 +3268,45 @@ function isStandalonePwa(){
   return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
 }
 function oneSignalScopePath(){
-  // Scope absolu du Worker OneSignal, adapté automatiquement au sous-dossier GitHub Pages.
+  // Le Worker OneSignal utilise un sous-dossier dédié pour ne pas remplacer le Worker PWA principal.
   return new URL('./push/onesignal/', location.href).pathname;
 }
 function oneSignalWorkerPath(){
-  // OneSignal exige un chemin relatif à la racine du domaine, SANS slash initial.
-  // Exemple GitHub Pages : AZERRAP/push/onesignal/OneSignalSDKWorker.js
+  // OneSignal attend un chemin relatif à la racine du domaine, sans slash initial.
+  // Sur GitHub Pages, cela donne : AZERRAP/push/onesignal/OneSignalSDKWorker.js
   return new URL('./push/onesignal/OneSignalSDKWorker.js', location.href).pathname.replace(/^\/+/, '');
 }
-async function verifyOneSignalWorkerFile(){
-  const workerUrl = new URL('./push/onesignal/OneSignalSDKWorker.js', location.href);
-  const response = await fetch(workerUrl.href, { cache:'no-store', credentials:'same-origin' });
-  if (!response.ok) throw new Error(`Worker OneSignal inaccessible (${response.status}) : ${workerUrl.pathname}`);
-  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-  if (!contentType.includes('javascript') && !contentType.includes('text/plain')) {
-    throw new Error(`Type MIME inattendu pour le Worker OneSignal : ${contentType || 'inconnu'}`);
-  }
-  const source = await response.text();
-  if (!source.includes('OneSignalSDK.sw.js')) {
-    throw new Error('Le fichier OneSignalSDKWorker.js ne contient pas le SDK OneSignal attendu.');
-  }
-  return { workerUrl:workerUrl.href, contentType };
+function oneSignalWorkerAbsoluteUrl(){
+  return new URL(`/${oneSignalWorkerPath()}`, location.origin).href;
 }
-async function oneSignalRegistrationDiagnostics(){
-  const scope = oneSignalScopePath();
-  const registration = await navigator.serviceWorker.getRegistration(scope).catch(() => null);
-  const nativeSubscription = registration?.pushManager ? await registration.pushManager.getSubscription().catch(() => null) : null;
-  return {
-    scope,
-    expectedWorker:new URL('./push/onesignal/OneSignalSDKWorker.js', location.href).href,
-    registeredWorker:registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '',
-    registrationState:registration?.active?.state || registration?.waiting?.state || registration?.installing?.state || 'absente',
-    nativeSubscription:Boolean(nativeSubscription),
-    endpoint:nativeSubscription?.endpoint || ''
-  };
+async function ensureOneSignalWorkerRegistration(){
+  if (!('serviceWorker' in navigator)) throw new Error('Service Workers non pris en charge sur cet appareil.');
+  const scopePath = oneSignalScopePath();
+  const scopeUrl = new URL(scopePath, location.origin).href;
+  const expectedScriptUrl = oneSignalWorkerAbsoluteUrl();
+
+  const response = await fetch(expectedScriptUrl, { cache:'no-store' });
+  if (!response.ok) throw new Error(`Worker OneSignal inaccessible (${response.status}).`);
+  const source = await response.text();
+  if (!source.includes('OneSignalSDK.sw.js')) throw new Error('Le fichier OneSignalSDKWorker.js ne contient pas le SDK OneSignal attendu.');
+
+  const registrations = await navigator.serviceWorker.getRegistrations();
+  const exact = registrations.find(registration => {
+    const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+    return registration.scope === scopeUrl && scriptUrl === expectedScriptUrl;
+  });
+  if (exact) return exact;
+
+  // Supprime uniquement une éventuelle inscription incorrecte sur le scope OneSignal.
+  for (const registration of registrations) {
+    if (registration.scope !== scopeUrl) continue;
+    const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+    if (scriptUrl !== expectedScriptUrl) await registration.unregister().catch(() => false);
+  }
+
+  const registration = await navigator.serviceWorker.register(`/${oneSignalWorkerPath()}`, { scope: scopePath, updateViaCache:'none' });
+  await registration.update().catch(() => {});
+  return registration;
 }
 function loadOneSignalSdk(){
   if (window.OneSignal?.init) return Promise.resolve();
@@ -3361,13 +3366,15 @@ async function initOneSignal(){
       if (settled) return;
       try {
         if (!oneSignalInitialized) {
-          await verifyOneSignalWorkerFile();
+          // Enregistre d'abord explicitement le Worker dédié. Cela évite que Safari
+          // ne conserve uniquement le Worker PWA principal sur le scope /AZERRAP/.
+          await ensureOneSignalWorkerRegistration();
           await OneSignal.init({
             appId: pushConfig.oneSignalAppId,
             serviceWorkerPath: oneSignalWorkerPath(),
             serviceWorkerParam: { scope: oneSignalScopePath() },
             notifyButton: { enable: false },
-            allowLocalhostAsSecureOrigin: location.hostname === 'localhost'
+            allowLocalhostAsSecureOrigin: true
           });
           oneSignalInitialized = true;
         }
@@ -3557,7 +3564,7 @@ async function registerPushNotifications(){
 
     if (button) button.textContent = 'Création de l’abonnement…';
     await OneSignal.User.PushSubscription.optIn();
-    const activeSubscription = await waitForActiveOneSignalSubscription(OneSignal, 30000);
+    const activeSubscription = await waitForActiveOneSignalSubscription(OneSignal, 20000);
 
     if (button) button.textContent = 'Association au compte agent…';
     await persistActiveOneSignalSubscription(OneSignal, activeSubscription);
@@ -3566,9 +3573,7 @@ async function registerPushNotifications(){
     setTimeout(() => renderPushSetup(), 500);
   } catch(error) {
     console.error(error);
-    const diagnostics = await oneSignalRegistrationDiagnostics().catch(() => null);
-    const diagnosticHtml = diagnostics ? `<div class="setup-box" style="margin-top:12px"><strong>Diagnostic Worker</strong><br>Scope : ${safe(diagnostics.scope)}<br>Worker attendu : ${safe(diagnostics.expectedWorker)}<br>Worker enregistré : ${safe(diagnostics.registeredWorker || 'aucun')}<br>État : ${safe(diagnostics.registrationState)}<br>Abonnement Push natif : ${diagnostics.nativeSubscription ? 'oui' : 'non'}</div>` : '';
-    showModal('Activation impossible', `<div class="setup-box">${safe(userFriendlyError(error, 'Activation notifications impossible.'))}</div>${diagnosticHtml}<p class="muted">Le chemin OneSignal doit être configuré sur <strong>/AZERRAP/push/onesignal/</strong> et le fichier doit être <strong>OneSignalSDKWorker.js</strong>.</p>`);
+    showModal('Activation impossible', `<div class="setup-box">${safe(userFriendlyError(error, 'Activation notifications impossible.'))}</div><p class="muted">Vérifie que le fichier <strong>push/onesignal/OneSignalSDKWorker.js</strong> est accessible et que l’App ID OneSignal correspond au domaine GitHub Pages.</p>`);
   } finally {
     if (button) {
       button.disabled = false;
