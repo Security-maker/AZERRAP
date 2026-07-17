@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-4-7-dashboard-interactions';
+const CACHE_NAME = 'sentinelle-pro-v5-4-8-stablefix';
 const APP_SHELL = [
   './',
   './index.html',

@@ -1044,7 +1044,7 @@ function dashboardEmpty(message){
 function dashboardDetailItem({title='', meta='', badge='', badgeClass='blue', actions=''}){
   return `<article class="dashboard-detail-item"><div class="dashboard-detail-main"><div class="dashboard-detail-title">${safe(title)}</div><div class="dashboard-detail-meta">${meta}</div></div><div class="dashboard-detail-side">${badge ? `<span class="pill ${safe(badgeClass)}">${safe(badge)}</span>` : ''}${actions}</div></article>`;
 }
-function missionStatusLabel(status){
+function dashboardMissionStatusLabel(status){
   return ({planned:'Planifiée', active:'En cours', completed:'Terminée', cancelled:'Annulée', late:'En retard'}[status] || status || 'Planifiée');
 }
 function missionStatusClass(status){
@@ -1127,7 +1127,7 @@ async function showQGDashboardDetail(type){
       box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} couvrant la journée</span></div>` + rows.map(row => dashboardDetailItem({
         title:row.siteNom || row.title || 'Mission',
         meta:`Agent : <strong>${safe(row.agentNom || 'Non affecté')}</strong><br>${safe(dateText(row.scheduledStart))} → ${safe(dateText(row.scheduledEnd))}<br>${safe(row.type || row.missionType || 'Mission de sécurité')}`,
-        badge:missionStatusLabel(row.status), badgeClass:missionStatusClass(row.status),
+        badge:dashboardMissionStatusLabel(row.status), badgeClass:missionStatusClass(row.status),
         actions:`<button class="btn small" data-dashboard-mission="${safe(row.id)}">Ouvrir les missions</button>`
       })).join('');
       document.querySelectorAll('[data-dashboard-mission]').forEach(btn => btn.addEventListener('click', () => { closeModal(); navigate('missions'); }));
