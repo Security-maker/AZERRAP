@@ -31,6 +31,9 @@ import {
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
 
+// Indique à index.html que le module principal est bien chargé.
+window.__SENTINELLE_MODULE_LOADED__ = true;
+
 let fbApp = null;
 let auth = null;
 let db = null;
@@ -330,6 +333,8 @@ async function loadProfile(user){
 }
 
 function render(html){
+  // Empêche le faux écran 'Démarrage trop long' une fois qu'une vue est rendue.
+  window.__SENTINELLE_RENDERED__ = true;
   $app.className = '';
   $app.innerHTML = html;
   bindGlobalEvents();
