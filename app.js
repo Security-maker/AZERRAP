@@ -1448,9 +1448,13 @@ async function createMissionFromForm(fd, options={}){
     };
     created.push(await addDoc(collectionRef('missions'), docPayload));
   }
-  await addAudit(repeatCount > 1 ? 'missions_series_created' : 'mission_created', { siteId:site.id, agentId:agent.id, count:repeatCount, repeatMode });
+  const finalStart = Timestamp.fromDate(addDays(scheduledStart.toDate(), (repeatCount - 1) * interval));
+  const finalEnd = Timestamp.fromDate(addDays(scheduledEnd.toDate(), (repeatCount - 1) * interval));
+  const planningPush = await spNotifyMissionCreated({ agentId:agent.id, siteName:site.name, start:scheduledStart, end:repeatCount > 1 ? finalEnd : scheduledEnd, count:repeatCount, missionId:created[0]?.id || '' });
+  await addAudit(repeatCount > 1 ? 'missions_series_created' : 'mission_created', { siteId:site.id, agentId:agent.id, count:repeatCount, repeatMode, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
   toast(repeatCount > 1 ? `${repeatCount} missions planifiées` : 'Mission planifiée', 'success');
-  return { ok:true, created };
+  if (!planningPush?.ok) toast(`Planning enregistré, mais notification non envoyée : ${planningPush?.reason || planningPush?.error || 'aucun appareil abonné'}.`, 'warning');
+  return { ok:true, created, push:planningPush };
 }
 function openPlanningQuickMissionModal({ resourceId='', date=null }={}){
   const mode = qgPlanningState.mode || 'sites';
@@ -1498,19 +1502,21 @@ function openPlanningMissionModal(missionId){
   document.querySelector('#mission-detail-cancel')?.addEventListener('click', async () => {
     if (!confirm('Annuler cette mission ?')) return;
     await updateDoc(docRef('missions', m.id), { status:'cancelled', updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
-    await addAudit('mission_cancelled', { missionId:m.id });
+    const cancelPush = await spNotifyMissionCancelled(m);
+    await addAudit('mission_cancelled', { missionId:m.id, pushStatus:cancelPush?.ok?'sent':cancelPush?.reason||cancelPush?.error||'skipped' });
     closeModal(); toast('Mission annulée', 'warning');
   });
 }
 async function duplicateMissionWithOffset(m, days=7){
   const start = m.scheduledStart?.toDate ? addDays(m.scheduledStart.toDate(), days) : addDays(new Date(), days);
   const end = m.scheduledEnd?.toDate ? addDays(m.scheduledEnd.toDate(), days) : addDays(start, 0);
-  await addDoc(collectionRef('missions'), {
+  const duplicatedRef = await addDoc(collectionRef('missions'), {
     agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, siteColor:m.siteColor || planningColorForSite(m.siteId), hourlyRate:Number(m.hourlyRate || 0), type:m.type || 'Surveillance', instructions:m.instructions || '',
     scheduledStart:Timestamp.fromDate(start), scheduledEnd:Timestamp.fromDate(end), status:'planned', copiedFrom:m.id,
     createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
   });
-  await addAudit('mission_duplicated', { missionId:m.id, offsetDays:days });
+  const planningPush = await spNotifyMissionCreated({ agentId:m.agentId, siteName:m.siteNom, start:Timestamp.fromDate(start), end:Timestamp.fromDate(end), count:1, missionId:duplicatedRef.id });
+  await addAudit('mission_duplicated', { missionId:m.id, offsetDays:days, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
   closeModal(); toast('Mission dupliquée', 'success');
 }
 
@@ -1669,8 +1675,10 @@ function listenMissionsList(selector){
     box.innerHTML = priorityRows.length ? priorityRows.map(missionItem).join('') : `<div class="empty">Aucune mission prioritaire. Le planning complet reste visible en dessous.</div>`;
     document.querySelectorAll('[data-mission-cancel]').forEach(btn => btn.addEventListener('click', async () => {
       if (!confirm('Annuler cette mission ?')) return;
+      const cancelledMission = rows.find(m => m.id === btn.dataset.missionCancel);
       await updateDoc(docRef('missions', btn.dataset.missionCancel), { status:'cancelled', updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
-      await addAudit('mission_cancelled', { missionId:btn.dataset.missionCancel });
+      const cancelPush = await spNotifyMissionCancelled(cancelledMission);
+      await addAudit('mission_cancelled', { missionId:btn.dataset.missionCancel, pushStatus:cancelPush?.ok?'sent':cancelPush?.reason||cancelPush?.error||'skipped' });
       toast('Mission annulée', 'warning');
     }));
     document.querySelectorAll('[data-mission-pdf]').forEach(btn => btn.addEventListener('click', () => printMissionById(btn.dataset.missionPdf)));
@@ -1687,11 +1695,12 @@ async function duplicateMissionFlow(m){
     const fd = new FormData(e.currentTarget);
     const scheduledStart = fromLocalInputValue(fd.get('scheduledStart'));
     const scheduledEnd = fromLocalInputValue(fd.get('scheduledEnd'));
-    await addDoc(collectionRef('missions'), {
+    const duplicatedRef = await addDoc(collectionRef('missions'), {
       agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, siteColor:m.siteColor || planningColorForSite(m.siteId), hourlyRate:Number(m.hourlyRate || 0), type:m.type || 'Surveillance', instructions:m.instructions || '',
       scheduledStart, scheduledEnd, status:'planned', copiedFrom:m.id, createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
     });
-    await addAudit('mission_duplicated', { missionId:m.id });
+    const planningPush = await spNotifyMissionCreated({ agentId:m.agentId, siteName:m.siteNom, start:scheduledStart, end:scheduledEnd, count:1, missionId:duplicatedRef.id });
+    await addAudit('mission_duplicated', { missionId:m.id, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
     closeModal();
     toast('Mission dupliquée', 'success');
   });
@@ -2350,6 +2359,7 @@ function showSiteForm(s={}){
   const locateButton = document.querySelector('#site-geocode-btn');
   let lastGeocodedAddress = existingLat !== '' && existingLng !== '' ? String(s.address || '').trim() : '';
   let geocodeMeta = s.geocode || null;
+  const previousInstructions = String(s.instructions || '').trim();
   const setGeoStatus = (message, type='') => {
     if (!statusBox) return;
     statusBox.className = `geocode-status ${type}`.trim();
@@ -2409,7 +2419,10 @@ function showSiteForm(s={}){
       };
       if (isStrictAdmin()) Object.assign(payload, { hourlyRate:Number(fd.get('hourlyRate') || 0), vatRate:Number(fd.get('vatRate') || 0), billingEmail:fd.get('billingEmail') || '', billingAddress:fd.get('billingAddress') || '' });
       await setDoc(docRef('sites', siteId), payload, { merge:true });
-      await addAudit('site_saved', { siteId, geocoded:true, lat, lng });
+      const nextInstructions = String(payload.instructions || '').trim();
+      let instructionsPush = { ok:false, skipped:true, reason:'Consignes inchangées' };
+      if (s.id && nextInstructions !== previousInstructions) instructionsPush = await spNotifyInstructionsChanged({ id:siteId, name:payload.name }, nextInstructions);
+      await addAudit('site_saved', { siteId, geocoded:true, lat, lng, instructionsChanged:s.id && nextInstructions !== previousInstructions, pushStatus:instructionsPush?.ok?'sent':instructionsPush?.reason||instructionsPush?.error||'skipped' });
       closeModal(); toast('Site enregistré et positionné sur la carte', 'success');
     } catch(error) {
       console.error(error);
@@ -2624,7 +2637,15 @@ async function renderQGDocuments(){
   document.querySelector('#document-generator-form')?.addEventListener('submit', async e=>{
     e.preventDefault();
     const btn=e.currentTarget.querySelector('button[type="submit"]'); btn.disabled=true;
-    try { const archived = await generateAndArchiveDocument(new FormData(e.currentTarget), {sites, missions}); if (archived) downloadGeneratedPdf(archived, { silent:true }); toast('PDF archivé dans Documents.', 'success'); }
+    try {
+      const archived = await generateAndArchiveDocument(new FormData(e.currentTarget), {sites, missions});
+      if (archived) {
+        downloadGeneratedPdf(archived, { silent:true });
+        const documentPush = await spNotifyDocumentArchived(archived);
+        await addAudit('generated_document_notified', { documentId:archived.id, type:archived.type, pushStatus:documentPush?.ok?'sent':documentPush?.reason||documentPush?.error||'skipped' });
+      }
+      toast('PDF archivé dans Documents.', 'success');
+    }
     catch(error){ console.error(error); toast(userFriendlyError(error,'Génération impossible.'),'error'); }
     finally { btn.disabled=false; }
   });
@@ -3005,6 +3026,147 @@ function exportReportHtml(rows, filename, innerOnly=false){
 }
 
 
+
+// -------------------- V5.6 — NOTIFICATIONS OPÉRATIONNELLES --------------------
+const SP_PUSH_PREF_DEFAULTS = Object.freeze({ flash:true, planning:true, instructions:true, documents:true });
+
+function spLoadPushPreferences(){
+  try {
+    const stored = JSON.parse(localStorage.getItem('sentinelle_push_preferences') || '{}');
+    return { ...SP_PUSH_PREF_DEFAULTS, ...(stored && typeof stored === 'object' ? stored : {}) };
+  } catch(error) {
+    return { ...SP_PUSH_PREF_DEFAULTS };
+  }
+}
+
+async function spSavePushPreferences(preferences){
+  const normalized = { ...SP_PUSH_PREF_DEFAULTS };
+  Object.keys(normalized).forEach(key => { normalized[key] = preferences?.[key] !== false; });
+  localStorage.setItem('sentinelle_push_preferences', JSON.stringify(normalized));
+  if (!currentUser || !db) return normalized;
+  try {
+    const snap = await getDocs(query(collectionRef('pushTokens'), where('userId','==',currentUser.uid)));
+    for (const item of snap.docs) {
+      await updateDoc(docRef('pushTokens', item.id), { preferences:normalized, updatedAt:serverTimestamp() });
+    }
+  } catch(error) {
+    console.warn('Préférences push non synchronisées', error);
+  }
+  return normalized;
+}
+
+function spPushPreferenceEnabled(token, category){
+  const prefs = token?.preferences && typeof token.preferences === 'object' ? token.preferences : SP_PUSH_PREF_DEFAULTS;
+  return prefs?.[category] !== false;
+}
+
+function spStoredPushSecret(){
+  return String(localStorage.getItem('sentinelle_push_secret') || '').trim();
+}
+
+async function spResolveSiteAgentIds(siteId){
+  const ids = new Set();
+  if (!siteId) return [];
+  try {
+    const [usersSnap, missionsSnap] = await Promise.all([
+      getDocs(collectionRef('users')),
+      getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(1200)))
+    ]);
+    usersSnap.docs.map(d=>({id:d.id,...d.data()})).forEach(user => {
+      if (String(user.role || '').toLowerCase() === 'agent' && user.siteActuel === siteId) ids.add(user.uid || user.id);
+    });
+    const now = Date.now();
+    missionsSnap.docs.map(d=>({id:d.id,...d.data()})).forEach(mission => {
+      const end = mission.scheduledEnd?.toDate?.()?.getTime() || mission.scheduledStart?.toDate?.()?.getTime() || 0;
+      if (mission.siteId === siteId && mission.agentId && end >= now - 86400000 && !['cancelled'].includes(mission.status)) ids.add(mission.agentId);
+    });
+  } catch(error) {
+    console.warn('Résolution des agents du site impossible', error);
+  }
+  return [...ids];
+}
+
+async function spResolveOperationalSubscriptionIds({ userIds=[], siteId='', category='flash', role='agent' }={}){
+  const wantedUsers = new Set((userIds || []).map(String).filter(Boolean));
+  if (siteId && !wantedUsers.size) (await spResolveSiteAgentIds(siteId)).forEach(uid => wantedUsers.add(String(uid)));
+  const snapshot = await getDocs(collectionRef('pushTokens'));
+  let tokens = snapshot.docs.map(item => ({ id:item.id, ...item.data() }))
+    .filter(item => item.enabled !== false && String(item.subscriptionId || '').trim())
+    .filter(item => !role || String(item.role || '').toLowerCase() === String(role).toLowerCase())
+    .filter(item => spPushPreferenceEnabled(item, category));
+  if (wantedUsers.size) tokens = tokens.filter(item => wantedUsers.has(String(item.userId || '')));
+  return [...new Set(tokens.map(item => String(item.subscriptionId || '').trim()).filter(Boolean))];
+}
+
+async function spSendOperationalPush({ title, message, category='planning', priority='Information', userIds=[], siteId='', route='home', data={} }={}){
+  if (!pushIsConfigured() || !pushWorkerIsConfigured()) return { ok:false, skipped:true, reason:'Push non configuré' };
+  const secret = spStoredPushSecret();
+  if (!secret) return { ok:false, skipped:true, reason:'Clé push QG absente sur cet appareil' };
+  const subscriptionIds = await spResolveOperationalSubscriptionIds({ userIds, siteId, category, role:'agent' });
+  if (!subscriptionIds.length) return { ok:false, skipped:true, reason:'Aucun appareil abonné pour cette notification' };
+  const response = await fetch(pushConfig.pushWorkerUrl, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret':secret },
+    body:JSON.stringify({
+      title:String(title || 'Sentinelle Pro'),
+      message:String(message || 'Nouvelle information opérationnelle'),
+      priority,
+      subscriptionIds,
+      notificationType:category,
+      notificationId:`${category}_${Date.now()}`,
+      url:new URL(`./index.html?route=${encodeURIComponent(route)}`, location.href).href,
+      data
+    })
+  });
+  const result = await response.json().catch(()=>({}));
+  if (!response.ok || !result.id) throw new Error(result.error || result.message || 'Notification non livrée');
+  return { ...result, requestedRecipients:subscriptionIds.length };
+}
+
+function spMissionNotificationMessage({ siteName, start, end, count=1, status='created' }){
+  const period = `${dateText(start)} → ${dateText(end)}`;
+  if (status === 'cancelled') return `${siteName || 'Mission'} · ${period} · mission annulée par le QG.`;
+  if (count > 1) return `${count} nouvelles missions planifiées sur ${siteName || 'un site'} à partir du ${dateText(start)}.`;
+  return `${siteName || 'Nouvelle mission'} · ${period}. Consulte le planning et les consignes.`;
+}
+
+async function spNotifyMissionCreated({ agentId, siteName, start, end, count=1, missionId='' }){
+  return spSendOperationalPush({
+    title:count > 1 ? 'Nouvelles missions planifiées' : 'Nouvelle mission planifiée',
+    message:spMissionNotificationMessage({ siteName, start, end, count }),
+    category:'planning', priority:'Important', userIds:[agentId], route:'home', data:{ missionId, count }
+  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+}
+
+async function spNotifyMissionCancelled(mission){
+  if (!mission?.agentId) return { ok:false, skipped:true };
+  return spSendOperationalPush({
+    title:'Mission annulée',
+    message:spMissionNotificationMessage({ siteName:mission.siteNom, start:mission.scheduledStart, end:mission.scheduledEnd, status:'cancelled' }),
+    category:'planning', priority:'Urgent', userIds:[mission.agentId], route:'home', data:{ missionId:mission.id, status:'cancelled' }
+  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+}
+
+async function spNotifyInstructionsChanged(site, instructions){
+  if (!site?.id) return { ok:false, skipped:true };
+  return spSendOperationalPush({
+    title:`Consignes mises à jour · ${site.name || 'Site'}`,
+    message:String(instructions || 'Les consignes opérationnelles du site ont été modifiées. Ouvre Sentinelle Pro avant ta prochaine prise de poste.').slice(0,420),
+    category:'instructions', priority:'Important', siteId:site.id, route:'docs', data:{ siteId:site.id, updateType:'instructions' }
+  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+}
+
+async function spNotifyDocumentArchived(documentRecord){
+  const payload = documentRecord?.payload || {};
+  const missionAgentId = payload?.mission?.agentId || '';
+  if (!missionAgentId && !documentRecord?.siteId) return { ok:false, skipped:true, reason:'Document interne sans destinataire agent' };
+  return spSendOperationalPush({
+    title:`Nouveau document · ${documentTypeLabel(documentRecord?.type)}`,
+    message:`${documentRecord?.title || 'Un nouveau document'} est disponible dans la rubrique Documents.`,
+    category:'documents', priority:'Information', userIds:missionAgentId ? [missionAgentId] : [], siteId:missionAgentId ? '' : (documentRecord?.siteId || ''), route:'docs', data:{ documentId:documentRecord?.id || '', documentType:documentRecord?.type || '' }
+  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+}
+
 function renderPushSetup(){
   currentRoute = 'pushsetup';
   const permission = typeof Notification !== 'undefined' ? Notification.permission : 'indisponible';
@@ -3047,6 +3209,17 @@ function renderPushSetup(){
       </div>
     </section>
     <section class="card">
+      <div class="card-title"><div><h2>Notifications à recevoir</h2><p>Choisis les événements opérationnels envoyés sur cet appareil.</p></div></div>
+      ${(() => { const prefs = spLoadPushPreferences(); return `
+      <div class="list">
+        <label class="item"><div class="item-main"><div class="item-title">Planning et missions</div><div class="item-meta">Nouvelle mission, duplication, annulation et changement de planning.</div></div><input type="checkbox" data-push-pref="planning" ${prefs.planning?'checked':''}></label>
+        <label class="item"><div class="item-main"><div class="item-title">Messages Flash QG</div><div class="item-meta">Informations, urgences et messages prioritaires.</div></div><input type="checkbox" data-push-pref="flash" ${prefs.flash?'checked':''}></label>
+        <label class="item"><div class="item-main"><div class="item-title">Consignes opérationnelles</div><div class="item-meta">Modification des consignes d’un site ou d’une mission.</div></div><input type="checkbox" data-push-pref="instructions" ${prefs.instructions?'checked':''}></label>
+        <label class="item"><div class="item-main"><div class="item-title">Nouveaux documents</div><div class="item-meta">Rapports de mission et documents ajoutés pour ton site.</div></div><input type="checkbox" data-push-pref="documents" ${prefs.documents?'checked':''}></label>
+      </div>
+      <button class="btn primary full" id="push-save-preferences" type="button">Enregistrer mes préférences</button>`; })()}
+    </section>
+    <section class="card">
       <div class="card-title"><div><h2>Comment l’activer</h2><p>Procédure fiable pour les agents.</p></div></div>
       <ol class="setup-list">
         <li>Installer Sentinelle Pro sur l’écran d’accueil du téléphone.</li>
@@ -3059,6 +3232,12 @@ function renderPushSetup(){
     </section>`;
   render(page('Notifications Push', 'Autorisation appareil et diagnostic', body));
   document.querySelector('#push-activate-main')?.addEventListener('click', registerPushNotifications);
+  document.querySelector('#push-save-preferences')?.addEventListener('click', async () => {
+    const preferences = { ...SP_PUSH_PREF_DEFAULTS };
+    document.querySelectorAll('[data-push-pref]').forEach(input => { preferences[input.dataset.pushPref] = Boolean(input.checked); });
+    await spSavePushPreferences(preferences);
+    toast('Préférences de notifications enregistrées.', 'success');
+  });
   document.querySelector('#push-refresh-main')?.addEventListener('click', () => renderPushSetup());
   document.querySelector('#push-diagnose-main')?.addEventListener('click', diagnosePushSetup);
   document.querySelector('#push-secret-main')?.addEventListener('click', configurePushSecret);
@@ -3195,14 +3374,36 @@ async function syncOneSignalIdentity(){
   if (!currentUser || !currentProfile || !pushIsConfigured()) return null;
   const OneSignal = await initOneSignal();
   if (!OneSignal) return null;
+
   await OneSignal.login(currentUser.uid);
-  OneSignal.User.addTags({
+  await OneSignal.User.addTags({
     uid: currentUser.uid,
     role: String(currentProfile.role || ''),
     statut: String(currentProfile.statut || ''),
     siteActuel: String(currentProfile.siteActuel || ''),
     siteActuelNom: String(currentProfile.siteActuelNom || '')
   });
+
+  const subscriptionId = String(OneSignal.User.PushSubscription.id || '').trim();
+  const token = String(OneSignal.User.PushSubscription.token || '').trim();
+  if (subscriptionId) {
+    await setDoc(docRef('pushTokens', `${currentUser.uid}_${subscriptionId}`), {
+      provider:'onesignal',
+      subscriptionId,
+      token,
+      userId:currentUser.uid,
+      userNom:`${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
+      role:String(currentProfile.role || ''),
+      statut:String(currentProfile.statut || ''),
+      siteActuel:currentProfile.siteActuel || null,
+      siteActuelNom:currentProfile.siteActuelNom || null,
+      enabled:Boolean(OneSignal.User.PushSubscription.optedIn),
+      preferences:spLoadPushPreferences(),
+      userAgent:navigator.userAgent,
+      platform:navigator.platform || '',
+      updatedAt:serverTimestamp()
+    }, { merge:true }).catch(error => console.warn('Synchronisation pushTokens impossible', error));
+  }
   return OneSignal;
 }
 async function registerPushNotifications(){
@@ -3267,6 +3468,7 @@ async function registerPushNotifications(){
       userAgent:navigator.userAgent,
       platform:navigator.platform || '',
       enabled:true,
+      preferences:spLoadPushPreferences(),
       createdAt:serverTimestamp(),
       updatedAt:serverTimestamp()
     }, { merge:true });
@@ -3318,12 +3520,54 @@ async function diagnosePushSetup(){
   showModal('Diagnostic push', html);
 }
 
+function normalizedPushStatus(value){
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+async function resolveFlashSubscriptionIds(target){
+  const targetValue = String(target || 'all');
+  const snapshot = await getDocs(collectionRef('pushTokens'));
+  const tokens = snapshot.docs.map(item => ({ id:item.id, ...item.data() }))
+    .filter(item => item.enabled !== false && String(item.subscriptionId || '').trim())
+    .filter(item => spPushPreferenceEnabled(item, 'flash'));
+
+  let selected = tokens.filter(item => String(item.role || '').toLowerCase() === 'agent');
+
+  if (targetValue.startsWith('agent:')) {
+    const userId = targetValue.slice('agent:'.length);
+    selected = tokens.filter(item => item.userId === userId);
+  } else if (targetValue.startsWith('site:')) {
+    const siteId = targetValue.slice('site:'.length);
+    selected = selected.filter(item => item.siteActuel === siteId);
+  } else if (targetValue === 'working') {
+    let activeUserIds = new Set();
+    try {
+      const usersSnapshot = await getDocs(collectionRef('users'));
+      activeUserIds = new Set(usersSnapshot.docs
+        .map(item => ({ id:item.id, ...item.data() }))
+        .filter(item => ['en_poste','enposte','active'].includes(normalizedPushStatus(item.statut)))
+        .map(item => item.uid || item.id));
+    } catch(error) {
+      console.warn('Lecture des agents en poste impossible', error);
+    }
+    selected = selected.filter(item => activeUserIds.has(item.userId) || ['en_poste','enposte','active'].includes(normalizedPushStatus(item.statut)));
+  }
+
+  return [...new Set(selected.map(item => String(item.subscriptionId || '').trim()).filter(Boolean))];
+}
+
 async function sendPushForFlash(flash){
   if (!pushIsConfigured() || !pushWorkerIsConfigured()) {
     return { ok:false, skipped:true, reason:'OneSignal ou Worker non configuré' };
   }
   const secret = getPushSecret();
   if (!secret) return { ok:false, skipped:true, reason:'Clé d’envoi manquante' };
+
+  const subscriptionIds = await resolveFlashSubscriptionIds(flash.target);
+  if (!subscriptionIds.length) {
+    throw new Error('Aucun appareil agent abonné ne correspond à cette cible. Active les notifications sur le téléphone agent puis vérifie la rubrique Push.');
+  }
+
   const response = await fetch(pushConfig.pushWorkerUrl, {
     method:'POST',
     headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret': secret },
@@ -3332,15 +3576,23 @@ async function sendPushForFlash(flash){
       message: flash.message,
       priority: flash.priority,
       target: flash.target,
+      subscriptionIds,
       flashId: flash.id,
       sentBy: currentUser?.uid || '',
-      url: new URL('./index.html', location.href).href
+      url: new URL('./index.html?route=flash', location.href).href
     })
   });
   const result = await response.json().catch(()=>({}));
-  if (!response.ok) throw new Error(result.error || 'Worker notification refusé');
-  return result;
+  if (!response.ok) {
+    const details = Array.isArray(result.errors) ? result.errors.join(' · ') : (result.error || result.message || 'Worker notification refusé');
+    throw new Error(details);
+  }
+  if (!result.id) {
+    throw new Error(result.error || 'OneSignal n’a créé aucun message : abonnement invalide ou désabonné.');
+  }
+  return { ...result, requestedRecipients:subscriptionIds.length };
 }
+
 async function configurePushSecret(){
   const current = localStorage.getItem('sentinelle_push_secret') || '';
   const next = window.prompt('Clé secrète Cloudflare Worker pour les notifications push', current) || '';

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-v5-5-1-push-permission-fix';
+const CACHE_NAME = 'sentinelle-pro-v5-6-operational-notifications';
 const APP_SHELL = [
   './',
   './index.html',
@@ -44,14 +44,14 @@ self.addEventListener('push', event => {
   try { payload = event.data ? event.data.json() : {}; } catch(error) { payload = {}; }
   const notification = payload.notification || payload.webpush?.notification || payload.data || {};
   const title = notification.title || payload.data?.title || 'Sentinelle Pro';
-  const body = notification.body || payload.data?.message || 'Nouveau message Flash du QG';
+  const body = notification.body || payload.data?.message || 'Nouvelle information opérationnelle';
   const options = {
     body,
     icon: './assets/icons/icon-192.png',
     badge: './assets/icons/icon-192.png',
     data: { url: './index.html', ...(payload.data || {}) },
     requireInteraction: notification.requireInteraction ?? true,
-    tag: notification.tag || 'sentinelle-flash',
+    tag: notification.tag || `sentinelle-${payload.data?.type || 'operationnel'}`,
     vibrate: [200, 100, 200]
   };
   event.waitUntil(self.registration.showNotification(title, options));
