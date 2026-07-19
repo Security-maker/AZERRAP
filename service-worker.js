@@ -1,4 +1,6 @@
-const CACHE_NAME = 'sentinelle-pro-v5-6-3-onesignal-worker-registration';
+importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
+
+const CACHE_NAME = 'sentinelle-pro-v5-6-4-onesignal-combined-worker';
 const APP_SHELL = [
   './',
   './index.html',
@@ -29,8 +31,8 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return;
 
-  // Le Worker OneSignal doit toujours être récupéré directement sur GitHub Pages,
-  // jamais depuis le cache applicatif.
+  // L’ancien fichier dédié OneSignal reste servi directement pour compatibilité,
+  // mais les nouveaux abonnements utilisent le Worker principal combiné.
   if (url.pathname.endsWith('/push/onesignal/OneSignalSDKWorker.js')) {
     event.respondWith(fetch(request, { cache:'no-store' }));
     return;
@@ -45,31 +47,3 @@ self.addEventListener('fetch', event => {
   );
 });
 
-self.addEventListener('push', event => {
-  let payload = {};
-  try { payload = event.data ? event.data.json() : {}; } catch(error) { payload = {}; }
-  const notification = payload.notification || payload.webpush?.notification || payload.data || {};
-  const title = notification.title || payload.data?.title || 'Sentinelle Pro';
-  const body = notification.body || payload.data?.message || 'Nouvelle information opérationnelle';
-  const options = {
-    body,
-    icon: './assets/icons/icon-192.png',
-    badge: './assets/icons/icon-192.png',
-    data: { url: './index.html', ...(payload.data || {}) },
-    requireInteraction: notification.requireInteraction ?? true,
-    tag: notification.tag || `sentinelle-${payload.data?.type || 'operationnel'}`,
-    vibrate: [200, 100, 200]
-  };
-  event.waitUntil(self.registration.showNotification(title, options));
-});
-
-self.addEventListener('notificationclick', event => {
-  event.notification.close();
-  const url = event.notification?.data?.url || './index.html';
-  event.waitUntil(clients.matchAll({ type:'window', includeUncontrolled:true }).then(list => {
-    for (const client of list) {
-      if ('focus' in client) return client.focus();
-    }
-    if (clients.openWindow) return clients.openWindow(url);
-  }));
-});
