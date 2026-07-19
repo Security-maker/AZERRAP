@@ -1,11 +1,10 @@
-importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
-
-const CACHE_NAME = 'sentinelle-pro-v5-6-4-onesignal-combined-worker';
+const CACHE_NAME = 'sentinelle-pro-v5-6-5-onesignal-official';
 const APP_SHELL = [
   './',
   './index.html',
   './style.css',
   './app.js',
+  './push-init.js',
   './firebase-config.js',
   './manifest.json',
   './offline.html',
@@ -31,8 +30,7 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return;
 
-  // L’ancien fichier dédié OneSignal reste servi directement pour compatibilité,
-  // mais les nouveaux abonnements utilisent le Worker principal combiné.
+  // Le Worker OneSignal dédié ne doit jamais être servi depuis le cache PWA.
   if (url.pathname.endsWith('/push/onesignal/OneSignalSDKWorker.js')) {
     event.respondWith(fetch(request, { cache:'no-store' }));
     return;
