@@ -804,3 +804,79 @@ body.menu-open{overflow:hidden}
    V5.7.4 — Annexes photographiques des rapports PDF
    ========================================================= */
 .azza-photo-annexes{margin-top:22px}.azza-photo-annexes>h3{margin-bottom:14px}.azza-photo-proof{display:grid;grid-template-columns:minmax(220px,46%) 1fr;gap:18px;align-items:start;margin:0 0 18px;padding:14px;border:1px solid #dce5ee;border-radius:14px;background:#f7fafc;break-inside:avoid;page-break-inside:avoid}.azza-photo-proof img{display:block;width:100%;max-height:390px;object-fit:contain;border-radius:10px;background:#eef3f7}.azza-photo-proof strong{display:block;color:#141c25;font-size:12px;margin-bottom:8px}.azza-photo-proof p{margin:0;color:#4c5966;font-size:10px;line-height:1.55}@media(max-width:700px){.azza-photo-proof{grid-template-columns:1fr}}@media print{.azza-photo-proof{break-inside:avoid!important;page-break-inside:avoid!important}.azza-photo-proof img{max-height:150mm}}
+
+
+/* =========================================================
+   V5.7.4.1 — Correctif mobile de la fin de poste
+   La fenêtre occupe réellement tout l'écran et bloque l'arrière-plan.
+   ========================================================= */
+html.modal-open,
+body.modal-open{
+  height:100%;
+  overflow:hidden!important;
+  overscroll-behavior:none;
+}
+.modal-backdrop{
+  width:100vw;
+  height:100vh;
+  height:100dvh;
+  max-height:100dvh;
+  overflow:hidden;
+  overscroll-behavior:contain;
+}
+.end-shift-actions{display:grid;gap:8px}
+@media(max-width:760px){
+  .modal-backdrop.end-shift-backdrop{
+    inset:0!important;
+    width:100vw!important;
+    height:100vh!important;
+    height:100dvh!important;
+    min-height:100svh;
+    max-height:100dvh!important;
+    padding:0!important;
+    align-items:stretch!important;
+    justify-items:stretch!important;
+    background:var(--obsidian);
+    overflow:hidden!important;
+  }
+  .end-shift-backdrop .modal.end-shift-modal{
+    align-self:stretch;
+    width:100%!important;
+    max-width:none!important;
+    height:100%!important;
+    max-height:none!important;
+    margin:0!important;
+    border:0!important;
+    border-radius:0!important;
+    padding:calc(10px + var(--safe-top)) 14px calc(16px + var(--safe-bottom))!important;
+    overflow-y:auto!important;
+    overflow-x:hidden!important;
+    overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+  }
+  .end-shift-modal .modal-head{
+    position:sticky;
+    top:0;
+    z-index:6;
+    margin:calc(-10px - var(--safe-top)) -14px 14px;
+    padding:calc(10px + var(--safe-top)) 14px 12px;
+    background:rgba(8,27,51,.98);
+    border-bottom:1px solid var(--border);
+    box-shadow:0 10px 24px rgba(5,10,19,.38);
+  }
+  .end-shift-modal .modal-head h2{font-size:20px}
+  .end-shift-modal .checkline{
+    align-items:flex-start;
+    gap:12px;
+  }
+  .end-shift-modal .checkline input{
+    width:22px;
+    height:22px;
+    min-width:22px;
+    flex:0 0 22px;
+    margin-top:0;
+  }
+  .end-shift-modal .end-shift-actions{
+    padding-bottom:max(4px,var(--safe-bottom));
+  }
+}

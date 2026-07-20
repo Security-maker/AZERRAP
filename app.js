@@ -1168,9 +1168,14 @@ async function endShift(shift){
       <div class="field"><label>Note de relève pour l’agent suivant</label><textarea class="textarea" name="handoverNote" placeholder="RAS, point à surveiller, incident en cours, consigne client..."></textarea></div>
       <label class="checkline"><input type="checkbox" name="certify" required> Je confirme avoir terminé mon service et transmis les informations utiles.</label>
       <div class="field"><label>Signature agent</label><input class="input" name="signatureName" required value="${safe(agentName)}" placeholder="Nom et prénom"></div>
-      <button class="btn danger full end-shift-cta" type="submit">Confirmer la fin de poste</button>
-      <p class="muted end-shift-note">La fin de service sera ajoutée automatiquement à la main courante. Aucun rapport manuel n’est nécessaire.</p>
+      <div class="end-shift-actions">
+        <button class="btn danger full end-shift-cta" type="submit">Confirmer la fin de poste</button>
+        <p class="muted end-shift-note">La fin de service sera ajoutée automatiquement à la main courante. Aucun rapport manuel n’est nécessaire.</p>
+      </div>
     </form>`);
+    const endShiftModalRoot = document.querySelector('#modal-root');
+    endShiftModalRoot?.classList.add('end-shift-backdrop');
+    endShiftModalRoot?.querySelector('.modal')?.classList.add('end-shift-modal');
     document.querySelector('#end-shift-form')?.addEventListener('submit', async e => {
       e.preventDefault();
       const form = e.currentTarget;
@@ -4710,6 +4715,14 @@ async function downloadCollaboratorPlanningPdf(agentId,monthValue,{agentView=fal
   }catch(error){console.error(error);toast(userFriendlyError(error,'PDF planning impossible.'),'error');}
 }
 
+function lockModalViewport(){
+  document.documentElement.classList.add('modal-open');
+  document.body.classList.add('modal-open');
+}
+function unlockModalViewport(){
+  document.documentElement.classList.remove('modal-open');
+  document.body.classList.remove('modal-open');
+}
 function showModal(title, body, size=''){
   closeModal();
   const div = document.createElement('div');
@@ -4717,10 +4730,14 @@ function showModal(title, body, size=''){
   div.id = 'modal-root';
   div.innerHTML = `<div class="modal ${size === 'wide' ? 'wide':''}"><div class="modal-head"><h2>${safe(title)}</h2><button class="btn small ghost" id="modal-close">Fermer</button></div>${body}</div>`;
   document.body.appendChild(div);
+  lockModalViewport();
   document.querySelector('#modal-close').addEventListener('click', closeModal);
   div.addEventListener('click', e => { if (e.target === div) closeModal(); });
 }
-function closeModal(){ document.querySelector('#modal-root')?.remove(); }
+function closeModal(){
+  document.querySelector('#modal-root')?.remove();
+  unlockModalViewport();
+}
 
 window.addEventListener('beforeunload', () => {
   if (currentUser && db) updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen:serverTimestamp() }).catch(()=>{});
