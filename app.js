@@ -1215,7 +1215,7 @@ function listenAgentRecentReports(){
 }
 function reportTimeline(r){
   const sev = String(r.severity || 'normal').toLowerCase();
-  return `<div class="timeline-entry ${sev}"><div class="item-title">${safe(r.category || 'Rapport')} · ${safe(r.siteNom || '')}</div><div class="item-meta">${dateText(r.createdAt)} · Gravité ${safe(r.severity || 'Normal')}</div><div style="margin-top:6px">${safe(r.message || '')}</div></div>`;
+  return `<div class="timeline-entry ${sev}"><div class="item-title">${safe(r.category || 'Rapport')} · ${safe(r.siteNom || '')}</div><div class="item-meta">${dateText(r.createdAt)} · Gravité ${safe(r.severity || 'Normal')}${r.photoUrl?' · 📷 Photo jointe':''}</div><div style="margin-top:6px">${safe(r.message || '')}</div></div>`;
 }
 
 async function renderAgentMCI(){
@@ -1248,7 +1248,9 @@ function mciForm(shift){
     <div class="field"><label>Modèle rapide</label><select class="select" id="mci-template"><option value="">Écrire librement</option>${templates.map(t=>`<option value="${safe(t)}">${safe(t.slice(0,72))}${t.length>72?'…':''}</option>`).join('')}</select></div>
     <div class="field"><label>Niveau</label><select class="select" name="severity"><option>Normal</option><option>À surveiller</option><option>Important</option><option>Critique</option></select></div>
     <div class="field"><label>Rapport</label><textarea class="textarea" name="message" required placeholder="Décrire l’événement de manière factuelle..."></textarea></div>
-    <div class="btn-row"><button type="button" class="btn" id="voice-btn">🎙️ Micro</button><button type="button" class="btn disabled" id="photo-disabled" title="Firebase Storage nécessite Blaze">📷 Photo indisponible</button><button type="button" class="btn" id="gps-btn">◎ GPS</button></div>
+    <div class="btn-row"><button type="button" class="btn" id="voice-btn">🎙️ Micro</button><label class="btn" for="mci-photo-input">📷 Photo</label><button type="button" class="btn" id="gps-btn">◎ GPS</button></div>
+    <input id="mci-photo-input" type="file" accept="image/*" capture="environment" style="display:none">
+    <div class="camera-preview" id="mci-photo-preview" style="display:none"></div>
     <input type="hidden" name="gpsRequested" value="false">
     <div id="voice-state" class="muted" style="margin:12px 0;font-size:12px"></div>
     <div class="divider"></div><button class="btn primary full" type="submit">Envoyer au QG</button>
@@ -1256,6 +1258,24 @@ function mciForm(shift){
 }
 function bindMCIForm(shift){
   const form = document.querySelector('#mci-form');
+  let pendingMciPhoto = null;
+  const photoInput = document.querySelector('#mci-photo-input');
+  const photoPreview = document.querySelector('#mci-photo-preview');
+  const refreshPhotoPreview = () => {
+    if (!photoPreview) return;
+    if (!pendingMciPhoto?.dataUrl) {
+      photoPreview.style.display = 'none';
+      photoPreview.innerHTML = '';
+      return;
+    }
+    photoPreview.style.display = 'flex';
+    photoPreview.innerHTML = `<img src="${safe(pendingMciPhoto.dataUrl)}" alt="Photo jointe à la main courante"><div><strong>Photo prête</strong><span>${Math.max(1,Math.round(Number(pendingMciPhoto.bytes || 0)/1024))} Ko · compression automatique</span><button type="button" class="btn small ghost" id="mci-photo-remove">Retirer</button></div>`;
+    document.querySelector('#mci-photo-remove')?.addEventListener('click', () => {
+      pendingMciPhoto = null;
+      if (photoInput) photoInput.value = '';
+      refreshPhotoPreview();
+    });
+  };
   document.querySelectorAll('.cat-btn').forEach(btn => btn.addEventListener('click', () => {
     document.querySelectorAll('.cat-btn').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active'); form.category.value = btn.dataset.cat;
@@ -1274,25 +1294,61 @@ function bindMCIForm(shift){
     }, 900);
   });
   document.querySelector('#gps-btn')?.addEventListener('click', () => { form.gpsRequested.value = 'true'; toast('Position GPS demandée pour ce rapport.', 'success'); });
-  document.querySelector('#photo-disabled')?.addEventListener('click', () => toast('Photos désactivées : Firebase Storage nécessite le plan Blaze. Utilise une note MCI texte ou un lien document.', 'warning'));
+  photoInput?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      toast('Compression de la photo...', 'info');
+      pendingMciPhoto = await compressCheckInPhoto(file);
+      refreshPhotoPreview();
+      toast('Photo ajoutée à la main courante.', 'success');
+    } catch(error) {
+      console.error(error);
+      pendingMciPhoto = null;
+      event.target.value = '';
+      refreshPhotoPreview();
+      toast(userFriendlyError(error, 'Photo impossible.'), 'error');
+    }
+  });
   form.addEventListener('submit', async e => {
     e.preventDefault();
-    if (!isOnline()) return toast('Réseau indisponible — rapport non transmis. Appelle le QG si urgent.', 'error');
     const fd = new FormData(form);
-    let photoUrl = null; // Version Spark : pas d'upload photo sans Firebase Storage/Blaze
+    const onlineAtSubmission = isOnline();
+    const gps = fd.get('gpsRequested') === 'true' ? await getGPS() : null;
+    const reportRef = doc(collectionRef('reports'));
+    const reportData = {
+      agentId: currentUser.uid,
+      agentNom: `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
+      siteId: shift.siteId, siteNom: shift.siteNom, shiftId: shift.id, missionId: shift.missionId || null,
+      category: fd.get('category'), severity: fd.get('severity'), message: fd.get('message'),
+      photoUrl: pendingMciPhoto?.dataUrl || null,
+      photoAvailable: Boolean(pendingMciPhoto?.dataUrl),
+      photoBytes: Number(pendingMciPhoto?.bytes || 0),
+      photoMimeType: pendingMciPhoto?.mimeType || null,
+      photoWidth: Number(pendingMciPhoto?.width || 0),
+      photoHeight: Number(pendingMciPhoto?.height || 0),
+      photoCapturedAt: pendingMciPhoto?.capturedAt || null,
+      gps, status:'new', isLocked:true, createdAt: serverTimestamp(), createdBy: currentUser.uid
+    };
     try {
-      const gps = fd.get('gpsRequested') === 'true' ? await getGPS() : null;
-      await addDoc(collectionRef('reports'), {
-        agentId: currentUser.uid,
-        agentNom: `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
-        siteId: shift.siteId, siteNom: shift.siteNom, shiftId: shift.id, missionId: shift.missionId || null,
-        category: fd.get('category'), severity: fd.get('severity'), message: fd.get('message'),
-        photoUrl, gps, status:'new', isLocked:true, createdAt: serverTimestamp(), createdBy: currentUser.uid
-      });
-      await updateDoc(docRef('users', currentUser.uid), { lastSeen: serverTimestamp() }).catch(()=>{});
-      await addAudit('report_create', { siteId: shift.siteId, shiftId: shift.id, missionId: shift.missionId || null, category: fd.get('category'), severity: fd.get('severity') });
-      form.reset(); form.category.value = 'Ronde'; toast('Rapport envoyé au QG', 'success');
-    } catch(error){ console.error(error); toast('Erreur envoi rapport.', 'error'); }
+      const reportWrite = setDoc(reportRef, reportData);
+      if (onlineAtSubmission) {
+        await reportWrite;
+        await updateDoc(docRef('users', currentUser.uid), { lastSeen: serverTimestamp() }).catch(()=>{});
+        await addAudit('report_create', { siteId: shift.siteId, shiftId: shift.id, missionId: shift.missionId || null, category: fd.get('category'), severity: fd.get('severity'), photoAvailable:Boolean(pendingMciPhoto?.dataUrl) });
+      } else {
+        reportWrite.catch(error => console.error('Synchronisation MCI hors ligne impossible', error));
+      }
+      form.reset();
+      form.category.value = 'Ronde';
+      pendingMciPhoto = null;
+      refreshPhotoPreview();
+      document.querySelectorAll('.cat-btn').forEach((btn,index) => btn.classList.toggle('active', index===0));
+      toast(onlineAtSubmission ? 'Rapport envoyé au QG' : 'Rapport enregistré hors ligne. Il sera transmis au retour du réseau.', onlineAtSubmission ? 'success' : 'warning');
+    } catch(error){
+      console.error(error);
+      toast(userFriendlyError(error, 'Erreur envoi rapport.'), 'error');
+    }
   });
 }
 function listenSiteReports(siteId){

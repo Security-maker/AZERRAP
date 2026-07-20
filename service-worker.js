@@ -1,5 +1,5 @@
-const CACHE_NAME = 'sentinelle-pro-v5-7-2-badge-agent';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-2';
+const CACHE_NAME = 'sentinelle-pro-v5-7-3-mci-photo-firestore';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-3';
 const APP_SHELL = [
   './',
   './index.html',
