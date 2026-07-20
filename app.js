@@ -2,13 +2,17 @@ import { firebaseConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './firebase-conf
 import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
 import {
   getAuth,
+  setPersistence,
+  browserLocalPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged
 } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
 import {
-  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   collection,
   doc,
   getDoc,
@@ -51,7 +55,9 @@ let mapBoundsCache = [];
 let mapSitePoints = [];
 let mapAgentPoints = [];
 let sosTimer = null;
+let sosCountdownTimer = null;
 let sosArming = false;
+let sosTriggered = false;
 let activeShiftCache = null;
 let lastSitesCache = [];
 let qgReportMissionGroups = [];
@@ -91,6 +97,36 @@ const safe = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;'
 const id = () => Math.random().toString(36).slice(2, 10);
 const isConfigured = () => firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).includes('REMPLACE_MOI');
 const isOnline = () => navigator.onLine;
+const OFFLINE_PROFILE_KEY = 'sentinelle_offline_profile_v1';
+const OFFLINE_READY_KEY = 'sentinelle_offline_ready_v1';
+
+function saveOfflineProfile(profile){
+  if (!profile?.uid) return;
+  try {
+    localStorage.setItem(OFFLINE_PROFILE_KEY, JSON.stringify({ uid:profile.uid, profile, savedAt:new Date().toISOString() }));
+  } catch (_) {}
+}
+function readOfflineProfile(uid){
+  try {
+    const row = JSON.parse(localStorage.getItem(OFFLINE_PROFILE_KEY) || 'null');
+    return row?.uid === uid && row?.profile ? row.profile : null;
+  } catch (_) { return null; }
+}
+function setOfflineReady(uid){
+  try { localStorage.setItem(OFFLINE_READY_KEY, JSON.stringify({ uid, syncedAt:new Date().toISOString() })); } catch (_) {}
+}
+function getOfflineReady(uid=currentUser?.uid){
+  try {
+    const row = JSON.parse(localStorage.getItem(OFFLINE_READY_KEY) || 'null');
+    return row?.uid === uid ? row : null;
+  } catch (_) { return null; }
+}
+function offlineReadyText(){
+  const row = getOfflineReady();
+  if (!row?.syncedAt) return 'Non préparé';
+  const d = new Date(row.syncedAt);
+  return Number.isNaN(d.getTime()) ? 'Préparé' : `Dernière synchro ${d.toLocaleString('fr-FR',{dateStyle:'short',timeStyle:'short'})}`;
+}
 
 function toast(message, type='info'){
   const el = document.createElement('div');
@@ -295,14 +331,22 @@ function boot(){
       navigator.serviceWorker.register('./service-worker.js').catch(() => {});
     });
   }
-  window.addEventListener('online', () => toast('Connexion rétablie', 'success'));
-  window.addEventListener('offline', () => toast('Mode hors ligne — SOS non garanti', 'warning'));
+  window.addEventListener('online', () => {
+    toast('Connexion rétablie — synchronisation en cours', 'success');
+    if (currentUser && currentProfile && rolePortal(currentProfile.role) === 'agent') {
+      primeAgentOfflineData().catch(error => console.warn('Synchronisation hors ligne impossible', error));
+    }
+  });
+  window.addEventListener('offline', () => toast('Mode hors ligne — données locales actives, PTI non transmis en temps réel', 'warning'));
 
   if (!isConfigured()) return renderSetupMissing();
   try {
     fbApp = initializeApp(firebaseConfig);
     auth = getAuth(fbApp);
-    db = getFirestore(fbApp);
+    setPersistence(auth, browserLocalPersistence).catch(error => console.warn('Persistance Auth indisponible', error));
+    db = initializeFirestore(fbApp, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+    });
     storage = null; // Storage volontairement désactivé pour rester compatible Spark
   } catch (error) {
     console.error(error);
@@ -320,22 +364,55 @@ function boot(){
 
 async function loadProfile(user){
   try {
-    const snap = await getDoc(docRef('users', user.uid));
-    if (!snap.exists()) return renderMissingProfile(user);
-    currentProfile = { uid:user.uid, ...snap.data() };
-    await updateDoc(docRef('users', user.uid), { lastSeen: serverTimestamp(), isOnline: true }).catch(() => {});
+    let profileData = null;
+    try {
+      const snap = await getDoc(docRef('users', user.uid));
+      if (snap.exists()) profileData = snap.data();
+    } catch (error) {
+      if (navigator.onLine) throw error;
+    }
+    if (!profileData) profileData = readOfflineProfile(user.uid);
+    if (!profileData) {
+      if (!navigator.onLine) return renderOfflineDeviceNotPrepared(user);
+      return renderMissingProfile(user);
+    }
+    currentProfile = { uid:user.uid, ...profileData };
+    saveOfflineProfile(currentProfile);
+    if (navigator.onLine) {
+      updateDoc(docRef('users', user.uid), { lastSeen: serverTimestamp(), isOnline: true }).catch(() => {});
+    }
     const requestedRoute = new URLSearchParams(location.search).get('route') || 'home';
     const portal = rolePortal(currentProfile.role);
     const allowedAgentRoutes = ['home','planning','mci','round','docs','flash','pushsetup','intel'];
     const allowedQGRoutes = ['home','missions','notifications','reports','documents','billing','intel','device','sites','agents','alerts','flash','pushsetup','history'];
     currentRoute = portal === 'agent' && allowedAgentRoutes.includes(requestedRoute) ? requestedRoute : portal === 'qg' && allowedQGRoutes.includes(requestedRoute) ? requestedRoute : 'home';
     navigate(currentRoute);
-    syncOneSignalIdentity().catch(() => {});
+    if (navigator.onLine) {
+      syncOneSignalIdentity().catch(() => {});
+      primeAgentOfflineData().catch(error => console.warn('Préparation hors ligne incomplète', error));
+    }
     startFlashListener();
   } catch (error) {
     console.error(error);
+    if (!navigator.onLine && currentUser) return renderOfflineDeviceNotPrepared(currentUser);
     renderFatal('Accès refusé', 'Impossible de charger le profil utilisateur. Vérifie Firestore et les règles de sécurité.');
   }
+}
+
+async function primeAgentOfflineData(){
+  if (!currentUser || !currentProfile || rolePortal(currentProfile.role) !== 'agent' || !navigator.onLine) return;
+  await Promise.allSettled([
+    getAgentPlannedMissions(),
+    getActiveSites(),
+    findActiveShift(),
+    getDocs(query(collectionRef('documents'), limit(250))),
+    getDocs(query(collectionRef('roundCheckpoints'), limit(500))),
+    getDocs(query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(30))),
+    getDocs(query(collectionRef('shifts'), where('agentId','==',currentUser.uid), limit(100)))
+  ]);
+  saveOfflineProfile(currentProfile);
+  setOfflineReady(currentUser.uid);
+  document.querySelector('#offline-ready-status')?.replaceChildren(document.createTextNode(offlineReadyText()));
 }
 
 function render(html){
@@ -401,6 +478,9 @@ function renderSetupMissing(){
 function renderFatal(title, message){
   render(`<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo"><h1>${safe(title)}</h1><p class="subtitle">Erreur système</p><div class="setup-box danger-copy">${safe(message)}</div></section></div>`);
 }
+function renderOfflineDeviceNotPrepared(user){
+  render(`<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro"><h1>Accès hors ligne indisponible</h1><p class="subtitle">Cet appareil n’a pas encore été préparé</p><div class="setup-box warning-copy">Une première connexion avec réseau est nécessaire sur cet appareil pour vérifier le compte et mettre en cache le profil, le planning et les consignes. Ensuite, l’application pourra redémarrer sans réseau tant que l’agent ne se déconnecte pas.</div><button class="btn full" type="button" onclick="location.reload()">Réessayer</button></section></div>`);
+}
 function renderLogin(){
   currentProfile = null;
   render(`
@@ -411,7 +491,8 @@ function renderLogin(){
         <p class="subtitle">Portail opérationnel sécurisé</p>
         <div class="field"><label>Email</label><input class="input" name="email" type="email" autocomplete="email" required placeholder="agent@agence.fr"></div>
         <div class="field"><label>Mot de passe</label><input class="input" name="password" type="password" autocomplete="current-password" required placeholder="••••••••"></div>
-        <button class="btn primary full" type="submit">Connexion sécurisée</button>
+        <button class="btn primary full" type="submit" ${navigator.onLine?'':'disabled'}>${navigator.onLine?'Connexion sécurisée':'Connexion impossible sans réseau'}</button>
+        ${navigator.onLine?'':`<div class="setup-box warning-copy">Aucune session active n’est disponible sur cet appareil. La toute première connexion Firebase ne peut pas être vérifiée sans réseau. Connecte cet appareil une fois, puis conserve la session pour les futurs démarrages hors ligne.</div>`}
         <div class="divider"></div>
         <p class="muted" style="font-size:12px;line-height:1.55">Les comptes se créent dans Firebase Authentication. Le rôle se règle dans Firestore collection <strong>users</strong>.</p>
       </form>
@@ -450,8 +531,12 @@ async function findActiveShift(){
   return { id:d.id, ...d.data() };
 }
 async function getActiveSites(){
-  const snap = await getDocs(query(collectionRef('sites'), where('isActive','==',true), orderBy('name'))).catch(async () => getDocs(query(collectionRef('sites'), where('isActive','==',true))));
-  lastSitesCache = snap.docs.map(d => ({ id:d.id, ...d.data() }));
+  try {
+    const snap = await getDocs(query(collectionRef('sites'), where('isActive','==',true), orderBy('name'))).catch(async () => getDocs(query(collectionRef('sites'), where('isActive','==',true))));
+    lastSitesCache = snap.docs.map(d => ({ id:d.id, ...d.data() }));
+  } catch (error) {
+    console.warn('Sites indisponibles hors ligne', error);
+  }
   return lastSitesCache;
 }
 
@@ -660,14 +745,18 @@ function dateOnlyKey(value){ const d=timestampToDate(value); return d?`${d.getFu
 
 async function renderAgentHome(){
   currentRoute = 'home';
-  const shift = await findActiveShift();
+  const shift = await findActiveShift().catch(() => activeShiftCache || null);
   activeShiftCache = shift;
   const isWorking = !!shift;
   const body = `
     <section class="grid cols-3">
       <div class="card stat ${isWorking?'green':'orange'}"><div class="stat-label">Statut agent</div><div class="stat-value">${isWorking?'En poste':'Hors poste'}</div><div class="muted">${safe(currentProfile.prenom || '')} ${safe(currentProfile.nom || '')}</div></div>
       <div class="card stat blue"><div class="stat-label">Mission / site</div><div class="stat-value" style="font-size:22px">${safe(shift?.siteNom || 'Aucune')}</div><div class="muted">${isWorking ? 'Mission active' : 'Mission à sélectionner'}</div></div>
-      <div class="card stat ${navigator.onLine?'green':'red'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'OK':'OFF'}</div><div class="muted">${navigator.onLine?'Synchronisation active':'SOS non garanti'}</div></div>
+      <div class="card stat ${navigator.onLine?'green':'orange'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'OK':'OFF'}</div><div class="muted">${navigator.onLine?'Synchronisation active':'Données locales actives'}</div></div>
+    </section>
+    <section class="card offline-ready-card ${navigator.onLine?'':'offline-active'}" style="margin-top:16px">
+      <div class="card-title"><div><h2>Mode hors ligne</h2><p id="offline-ready-status">${safe(offlineReadyText())}</p></div>${navigator.onLine?'<button class="btn small" id="offline-sync-now">Synchroniser maintenant</button>':'<span class="pill orange">Hors ligne</span>'}</div>
+      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">${navigator.onLine?'Le profil, le planning, les consignes, les documents et les points de ronde sont conservés sur cet appareil pour les prochaines coupures réseau.':'Les actions Firestore sont mises en attente et se synchroniseront au retour du réseau. Une alerte PTI hors ligne ne peut pas prévenir le QG immédiatement : appelle le QG ou le 112.'}</div>
     </section>
     <section class="grid cols-2" style="margin-top:16px">
       <div class="card">
@@ -695,6 +784,11 @@ async function renderAgentHome(){
     </section>`;
   render(page('Accueil Agent', 'Exécution terrain rapide et sécurisée', body));
   bindAgentHome(shift);
+  document.querySelector('#offline-sync-now')?.addEventListener('click', async event => {
+    const button = event.currentTarget; button.disabled = true; button.textContent = 'Synchronisation…';
+    await primeAgentOfflineData().catch(() => {});
+    button.textContent = 'Synchronisé'; setTimeout(() => { if (button.isConnected) { button.disabled=false; button.textContent='Synchroniser maintenant'; } }, 1200);
+  });
   if (shift) loadAgentHandoverCard(shift);
   listenAgentRecentReports();
 }
@@ -740,7 +834,7 @@ async function bindAgentHome(shift){
   if (whatsappBtn) whatsappBtn.addEventListener('click', () => openWhatsapp(shift));
   document.querySelector('#enable-push')?.addEventListener('click', () => registerPushNotifications());
   if (!shift) {
-    const [sites, missions] = await Promise.all([getActiveSites(), getAgentPlannedMissions()]);
+    const [sites, missions] = await Promise.all([getActiveSites().catch(()=>[]), getAgentPlannedMissions().catch(()=>[])]);
     const select = document.querySelector('#site-select');
     const missionSelect = document.querySelector('#mission-select');
     const photoInput = document.querySelector('#checkin-photo-input');
@@ -3190,61 +3284,144 @@ function invoiceCard(invoice){
 }
 async function showBillingProfileModal(){
   const profile = await loadBillingProfile();
-  showModal('Coordonnées de facturation', `<form id="billing-profile-form"><div class="setup-box">Ces informations apparaissent sur les factures. Vérifie tes mentions légales et ton régime de TVA avant envoi au client.</div><div class="form-grid">
-    <div class="field"><label>Nom / raison sociale</label><input class="input" name="companyName" value="${safe(profile.companyName || '')}" required></div>
-    <div class="field"><label>Forme juridique</label><input class="input" name="legalForm" value="${safe(profile.legalForm || '')}" placeholder="Micro-entreprise, SAS..."></div>
-    <div class="field"><label>SIRET</label><input class="input" name="siret" value="${safe(profile.siret || '')}"></div>
-    <div class="field"><label>N° TVA intracommunautaire</label><input class="input" name="vatNumber" value="${safe(profile.vatNumber || '')}"></div>
-    <div class="field"><label>Adresse</label><input class="input" name="address" value="${safe(profile.address || '')}"></div>
-    <div class="field"><label>Code postal</label><input class="input" name="postalCode" value="${safe(profile.postalCode || '')}"></div>
-    <div class="field"><label>Ville</label><input class="input" name="city" value="${safe(profile.city || '')}"></div>
-    <div class="field"><label>Email</label><input class="input" type="email" name="email" value="${safe(profile.email || '')}"></div>
-    <div class="field"><label>Téléphone</label><input class="input" name="phone" value="${safe(profile.phone || '')}"></div>
-    <div class="field"><label>IBAN</label><input class="input mono" name="iban" value="${safe(profile.iban || '')}"></div>
-    <div class="field"><label>BIC</label><input class="input mono" name="bic" value="${safe(profile.bic || '')}"></div>
-    <div class="field"><label>Délai de paiement (jours)</label><input class="input" type="number" min="0" max="120" name="paymentDays" value="${safe(profile.paymentDays ?? 30)}"></div>
-    <div class="field"><label>TVA par défaut (%)</label><input class="input" type="number" min="0" max="100" step="0.1" name="defaultVatRate" value="${safe(profile.defaultVatRate ?? 20)}"></div>
-    <div class="field"><label>Mention TVA / paiement</label><input class="input" name="legalNotice" value="${safe(profile.legalNotice || '')}" placeholder="TVA non applicable, art. 293 B du CGI..."></div>
-  </div><button class="btn primary full" type="submit">Enregistrer les coordonnées</button></form>`, 'wide');
+  const defaultL61214 = "L’autorisation d’exercice ne confère aucune prérogative de puissance publique à l’entreprise ou aux personnes qui en bénéficient.";
+  showModal('Coordonnées légales et facturation', `<form id="billing-profile-form">
+    <div class="setup-box"><strong>Facturation agence de sécurité.</strong><br>Renseigne l’identité complète de l’entreprise, le numéro d’autorisation d’exercice CNAPS et les conditions de règlement. Ces informations seront intégrées aux factures et aux PDF.</div>
+    <div class="invoice-form-section"><h3>Identité de l’entreprise</h3><div class="form-grid">
+      <div class="field"><label>Nom / raison sociale *</label><input class="input" name="companyName" value="${safe(profile.companyName || '')}" required></div>
+      <div class="field"><label>Forme juridique *</label><input class="input" name="legalForm" value="${safe(profile.legalForm || '')}" placeholder="SAS, SARL…" required></div>
+      <div class="field"><label>Capital social (€)</label><input class="input" name="shareCapital" value="${safe(profile.shareCapital || '')}" placeholder="1 000"></div>
+      <div class="field"><label>SIREN *</label><input class="input" name="siren" value="${safe(profile.siren || '')}" inputmode="numeric" required></div>
+      <div class="field"><label>SIRET *</label><input class="input" name="siret" value="${safe(profile.siret || '')}" inputmode="numeric" required></div>
+      <div class="field"><label>RCS / ville d’immatriculation</label><input class="input" name="rcsCity" value="${safe(profile.rcsCity || '')}" placeholder="RCS Fréjus"></div>
+      <div class="field"><label>N° TVA intracommunautaire</label><input class="input" name="vatNumber" value="${safe(profile.vatNumber || '')}"></div>
+      <div class="field"><label>Autorisation d’exercice CNAPS *</label><input class="input mono" name="cnapsAuthorization" value="${safe(profile.cnapsAuthorization || '')}" placeholder="AUT-…" required></div>
+      <div class="field span-2"><label>Activité autorisée</label><input class="input" name="securityActivity" value="${safe(profile.securityActivity || 'Surveillance humaine ou surveillance par des systèmes électroniques de sécurité ou gardiennage')}"></div>
+      <div class="field span-2"><label>Mention obligatoire — article L612-14 du CSI</label><textarea class="textarea" name="securityLegalNotice" rows="3">${safe(profile.securityLegalNotice || defaultL61214)}</textarea></div>
+    </div></div>
+    <div class="invoice-form-section"><h3>Coordonnées</h3><div class="form-grid">
+      <div class="field span-2"><label>Adresse *</label><input class="input" name="address" value="${safe(profile.address || '')}" required></div>
+      <div class="field"><label>Code postal *</label><input class="input" name="postalCode" value="${safe(profile.postalCode || '')}" required></div>
+      <div class="field"><label>Ville *</label><input class="input" name="city" value="${safe(profile.city || '')}" required></div>
+      <div class="field"><label>Email *</label><input class="input" type="email" name="email" value="${safe(profile.email || '')}" required></div>
+      <div class="field"><label>Téléphone *</label><input class="input" name="phone" value="${safe(profile.phone || '')}" required></div>
+    </div></div>
+    <div class="invoice-form-section"><h3>Règlement et fiscalité</h3><div class="form-grid">
+      <div class="field"><label>Mode de règlement</label><input class="input" name="paymentMethod" value="${safe(profile.paymentMethod || 'Virement bancaire')}"></div>
+      <div class="field"><label>Délai de paiement (jours)</label><input class="input" type="number" min="0" max="60" name="paymentDays" value="${safe(profile.paymentDays ?? 30)}"></div>
+      <div class="field"><label>IBAN</label><input class="input mono" name="iban" value="${safe(profile.iban || '')}"></div>
+      <div class="field"><label>BIC</label><input class="input mono" name="bic" value="${safe(profile.bic || '')}"></div>
+      <div class="field"><label>TVA par défaut (%)</label><input class="input" type="number" min="0" max="100" step="0.1" name="defaultVatRate" value="${safe(profile.defaultVatRate ?? 20)}"></div>
+      <div class="field"><label>Mention TVA</label><input class="input" name="legalNotice" value="${safe(profile.legalNotice || '')}" placeholder="TVA non applicable, art. 293 B du CGI…"></div>
+      <div class="field span-2"><label>Escompte pour paiement anticipé</label><textarea class="textarea" name="earlyPaymentDiscount" rows="2">${safe(profile.earlyPaymentDiscount || 'Aucun escompte accordé pour paiement anticipé.')}</textarea></div>
+      <div class="field span-2"><label>Pénalités de retard</label><textarea class="textarea" name="latePenaltyText" rows="3">${safe(profile.latePenaltyText || 'Pénalités de retard exigibles dès le lendemain de la date d’échéance, calculées au taux de refinancement semestriel de la BCE majoré de 10 points.')}</textarea></div>
+      <div class="field span-2"><label>Autres mentions légales</label><textarea class="textarea" name="additionalLegalNotice" rows="3">${safe(profile.additionalLegalNotice || '')}</textarea></div>
+    </div></div>
+    <button class="btn primary full" type="submit">Enregistrer les mentions légales</button>
+  </form>`, 'wide');
   document.querySelector('#billing-profile-form').addEventListener('submit', async e=>{
-    e.preventDefault(); const fd=new FormData(e.currentTarget); const payload=Object.fromEntries(fd.entries());
-    payload.paymentDays=Number(payload.paymentDays||30);payload.defaultVatRate=Number(payload.defaultVatRate||0);payload.updatedAt=serverTimestamp();payload.updatedBy=currentUser.uid;
-    await setDoc(docRef('billingSettings','profile'),payload,{merge:true});billingProfileCache=payload;await addAudit('billing_profile_saved',{});closeModal();toast('Coordonnées de facturation enregistrées.','success');
+    e.preventDefault();
+    const fd=new FormData(e.currentTarget);
+    const payload=Object.fromEntries(fd.entries());
+    payload.paymentDays=Math.min(60,Math.max(0,Number(payload.paymentDays||30)));
+    payload.defaultVatRate=Number(payload.defaultVatRate||0);
+    payload.updatedAt=serverTimestamp();
+    payload.updatedBy=currentUser.uid;
+    await setDoc(docRef('billingSettings','profile'),payload,{merge:true});
+    billingProfileCache=payload;
+    await addAudit('billing_profile_saved',{cnapsConfigured:Boolean(payload.cnapsAuthorization)});
+    closeModal();
+    toast('Mentions légales et coordonnées enregistrées.','success');
   });
 }
 async function showInvoiceCreateModal(sites){
   const profile = billingProfileCache || await loadBillingProfile();
-  if (!profile.companyName) toast('Renseigne d’abord les coordonnées de l’entreprise.', 'warning');
-  const today = startOfDay(new Date()); const first = new Date(today.getFullYear(),today.getMonth(),1); const due = addDays(today,Number(profile.paymentDays||30));
+  if (!profile.companyName || !profile.cnapsAuthorization) toast('Complète d’abord les coordonnées légales et l’autorisation CNAPS.', 'warning');
+  const today = startOfDay(new Date());
+  const first = new Date(today.getFullYear(),today.getMonth(),1);
+  const due = addDays(today,Number(profile.paymentDays||30));
   const options = `<option value="">Choisir un site / client</option>${sites.map(site=>`<option value="${safe(site.id)}">${safe(site.name)} · ${safe(site.clientName||'Client')}</option>`).join('')}`;
-  showModal('Créer une facture', `<form id="invoice-create-form"><div class="setup-box">Les missions terminées de la période seront ajoutées automatiquement. Les missions déjà facturées sont ignorées pour éviter les doublons.</div><div class="form-grid">
-    <div class="field"><label>Site / client</label><select class="select" name="siteId" id="invoice-site-select" required>${options}</select></div>
-    <div class="field"><label>Tarif horaire HT (€)</label><input class="input" type="number" min="0" step="0.01" name="hourlyRate" id="invoice-hourly-rate" required></div>
-    <div class="field"><label>Début période</label><input class="input" type="date" name="periodStart" value="${first.toISOString().slice(0,10)}" required></div>
-    <div class="field"><label>Fin période</label><input class="input" type="date" name="periodEnd" value="${today.toISOString().slice(0,10)}" required></div>
-    <div class="field"><label>Date facture</label><input class="input" type="date" name="issueDate" value="${today.toISOString().slice(0,10)}" required></div>
-    <div class="field"><label>Échéance</label><input class="input" type="date" name="dueDate" value="${due.toISOString().slice(0,10)}" required></div>
-    <div class="field"><label>TVA (%)</label><input class="input" type="number" min="0" max="100" step="0.1" name="vatRate" id="invoice-vat-rate" value="${safe(profile.defaultVatRate ?? 20)}"></div>
-    <div class="field"><label>Référence client</label><input class="input" name="clientReference" placeholder="Bon de commande, contrat..."></div>
-    <div class="field"><label>Complément / forfait</label><input class="input" name="extraLabel" placeholder="Frais, forfait, majoration..."></div>
-    <div class="field"><label>Montant complément HT (€)</label><input class="input" type="number" min="0" step="0.01" name="extraAmount" value="0"></div>
-  </div><div id="invoice-site-preview" class="billing-client-preview muted">Choisis un site.</div><button class="btn primary full" type="submit">Générer la facture</button></form>`, 'wide');
+  showModal('Créer une facture', `<form id="invoice-create-form">
+    <div class="setup-box">Les missions terminées de la période seront ajoutées automatiquement. Vérifie l’identité et l’adresse de facturation du client avant de générer le PDF définitif.</div>
+    <div class="invoice-form-section"><h3>Client et prestation</h3><div class="form-grid">
+      <div class="field"><label>Site / client</label><select class="select" name="siteId" id="invoice-site-select" required>${options}</select></div>
+      <div class="field"><label>Tarif horaire HT (€)</label><input class="input" type="number" min="0" step="0.01" name="hourlyRate" id="invoice-hourly-rate" required></div>
+      <div class="field"><label>Raison sociale du client *</label><input class="input" name="clientName" id="invoice-client-name" required></div>
+      <div class="field"><label>Email de facturation</label><input class="input" type="email" name="billingEmail" id="invoice-billing-email"></div>
+      <div class="field span-2"><label>Adresse de facturation *</label><input class="input" name="billingAddress" id="invoice-billing-address" required></div>
+      <div class="field"><label>SIREN client</label><input class="input" name="clientSiren" id="invoice-client-siren"></div>
+      <div class="field"><label>N° TVA client</label><input class="input" name="clientVatNumber" id="invoice-client-vat"></div>
+      <div class="field span-2"><label>Adresse du lieu de prestation</label><input class="input" name="serviceAddress" id="invoice-service-address"></div>
+      <div class="field span-2"><label>Catégorie de l’opération</label><input class="input" name="operationCategory" value="Prestation de services de sécurité privée"></div>
+    </div></div>
+    <div class="invoice-form-section"><h3>Période et règlement</h3><div class="form-grid">
+      <div class="field"><label>Début période</label><input class="input" type="date" name="periodStart" value="${first.toISOString().slice(0,10)}" required></div>
+      <div class="field"><label>Fin période</label><input class="input" type="date" name="periodEnd" value="${today.toISOString().slice(0,10)}" required></div>
+      <div class="field"><label>Date facture</label><input class="input" type="date" name="issueDate" value="${today.toISOString().slice(0,10)}" required></div>
+      <div class="field"><label>Échéance</label><input class="input" type="date" name="dueDate" value="${due.toISOString().slice(0,10)}" required></div>
+      <div class="field"><label>TVA (%)</label><input class="input" type="number" min="0" max="100" step="0.1" name="vatRate" id="invoice-vat-rate" value="${safe(profile.defaultVatRate ?? 20)}"></div>
+      <div class="field"><label>Référence client</label><input class="input" name="clientReference" placeholder="Bon de commande, contrat…"></div>
+      <div class="field"><label>Complément / forfait</label><input class="input" name="extraLabel" placeholder="Frais, forfait, majoration…"></div>
+      <div class="field"><label>Montant complément HT (€)</label><input class="input" type="number" min="0" step="0.01" name="extraAmount" value="0"></div>
+    </div></div>
+    <div id="invoice-site-preview" class="billing-client-preview muted">Choisis un site.</div>
+    <button class="btn primary full" type="submit">Générer la facture</button>
+  </form>`, 'wide');
   const select=document.querySelector('#invoice-site-select');
-  const sync=()=>{const site=sites.find(s=>s.id===select.value);if(!site)return;document.querySelector('#invoice-hourly-rate').value=Number(site.hourlyRate||0);document.querySelector('#invoice-vat-rate').value=Number(site.vatRate ?? profile.defaultVatRate ?? 20);document.querySelector('#invoice-site-preview').innerHTML=`<strong>${safe(site.clientName||site.name)}</strong><br>${safe(site.billingAddress||site.address||'Adresse non renseignée')} · ${safe(site.billingEmail||'Email non renseigné')}`;};
+  const sync=()=>{
+    const site=sites.find(s=>s.id===select.value);
+    if(!site)return;
+    document.querySelector('#invoice-hourly-rate').value=Number(site.hourlyRate||0);
+    document.querySelector('#invoice-vat-rate').value=Number(site.vatRate ?? profile.defaultVatRate ?? 20);
+    document.querySelector('#invoice-client-name').value=site.clientName||site.name||'';
+    document.querySelector('#invoice-billing-address').value=site.billingAddress||site.clientAddress||site.address||'';
+    document.querySelector('#invoice-billing-email').value=site.billingEmail||site.clientEmail||'';
+    document.querySelector('#invoice-client-siren').value=site.clientSiren||'';
+    document.querySelector('#invoice-client-vat').value=site.clientVatNumber||'';
+    document.querySelector('#invoice-service-address').value=site.address||'';
+    document.querySelector('#invoice-site-preview').innerHTML=`<strong>${safe(site.clientName||site.name)}</strong><br>${safe(site.billingAddress||site.address||'Adresse non renseignée')} · ${safe(site.billingEmail||'Email non renseigné')}`;
+  };
   select.addEventListener('change',sync);
   document.querySelector('#invoice-create-form').addEventListener('submit',async e=>{
-    e.preventDefault();const fd=new FormData(e.currentTarget);const site=sites.find(s=>s.id===fd.get('siteId'));if(!site)return toast('Site introuvable.','error');
-    const periodStart=startOfDay(new Date(fd.get('periodStart'))), periodEnd=endOfDay(new Date(fd.get('periodEnd')));if(periodEnd<periodStart)return toast('Période invalide.','warning');
+    e.preventDefault();
+    const fd=new FormData(e.currentTarget);
+    const site=sites.find(s=>s.id===fd.get('siteId'));
+    if(!site)return toast('Site introuvable.','error');
+    const periodStart=startOfDay(new Date(fd.get('periodStart'))), periodEnd=endOfDay(new Date(fd.get('periodEnd')));
+    const issueDate=startOfDay(new Date(fd.get('issueDate'))), dueDate=startOfDay(new Date(fd.get('dueDate')));
+    if(periodEnd<periodStart)return toast('Période invalide.','warning');
+    if(dueDate<issueDate)return toast('L’échéance ne peut pas précéder la date de facture.','warning');
+    if(dueDate>addDays(issueDate,60))return toast('Le délai de paiement ne peut pas dépasser 60 jours après émission.','warning');
     const missionsSnap=await getDocs(query(collectionRef('missions'),where('siteId','==',site.id))).catch(()=>({docs:[]}));
     const existingSnap=await getDocs(query(collectionRef('invoices'),limit(500))).catch(()=>({docs:[]}));
     const billed=new Set(existingSnap.docs.flatMap(d=>{const x=d.data();return x.status==='cancelled'?[]:(x.missionIds||[])}));
     const missions=missionsSnap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>m.status==='completed'&&!billed.has(m.id)).filter(m=>{const ms=missionStartMs(m),me=missionEndMs(m);return ms&&me&&ms<=periodEnd.getTime()&&me>=periodStart.getTime()}).sort((a,b)=>missionStartMs(a)-missionStartMs(b));
-    const hourlyRate=Number(fd.get('hourlyRate')||0);const lines=missions.map(m=>{const qty=missionBillableHours(m);return {missionId:m.id,date:m.scheduledStart,description:`${m.type||'Mission'} — ${m.agentNom||'Agent'} — ${dateOnlyText(m.scheduledStart)}`,quantity:qty,unit:'heure',unitPrice:hourlyRate,amount:round2(qty*hourlyRate)};});
-    const extraAmount=Number(fd.get('extraAmount')||0);if(extraAmount>0)lines.push({description:fd.get('extraLabel')||'Complément de facturation',quantity:1,unit:'forfait',unitPrice:extraAmount,amount:round2(extraAmount)});
+    const hourlyRate=Number(fd.get('hourlyRate')||0);
+    const lines=missions.map(m=>{const qty=missionBillableHours(m);return {missionId:m.id,date:m.scheduledStart,description:`${m.type||'Mission'} — ${m.agentNom||'Agent'} — ${dateOnlyText(m.scheduledStart)}`,quantity:qty,unit:'heure',unitPrice:hourlyRate,amount:round2(qty*hourlyRate)};});
+    const extraAmount=Number(fd.get('extraAmount')||0);
+    if(extraAmount>0)lines.push({description:fd.get('extraLabel')||'Complément de facturation',quantity:1,unit:'forfait',unitPrice:extraAmount,amount:round2(extraAmount)});
     if(!lines.length)return toast('Aucune mission terminée non facturée sur cette période et aucun complément saisi.','warning');
-    const subtotal=round2(lines.reduce((sum,line)=>sum+Number(line.amount||0),0));const vatRate=Number(fd.get('vatRate')||0);const vatAmount=round2(subtotal*vatRate/100);const total=round2(subtotal+vatAmount);const number=await nextInvoiceNumber();
-    const payload={number,clientName:site.clientName||site.name,siteId:site.id,siteNom:site.name,siteColor:normalizeHexColor(site.planningColor)||planningColorForSite(site.id),billingAddress:site.billingAddress||site.address||'',billingEmail:site.billingEmail||'',clientReference:fd.get('clientReference')||'',periodStart:Timestamp.fromDate(periodStart),periodEnd:Timestamp.fromDate(periodEnd),issueDate:Timestamp.fromDate(startOfDay(new Date(fd.get('issueDate')))),dueDate:Timestamp.fromDate(startOfDay(new Date(fd.get('dueDate')))),lines,missionIds:missions.map(m=>m.id),subtotal,vatRate,vatAmount,total,currency:'EUR',status:'draft',createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid};
-    const ref=await addDoc(collectionRef('invoices'),payload);await addAudit('invoice_created',{invoiceId:ref.id,number,siteId:site.id,total});closeModal();toast(`Facture ${number} créée.`, 'success');
+    const subtotal=round2(lines.reduce((sum,line)=>sum+Number(line.amount||0),0));
+    const vatRate=Number(fd.get('vatRate')||0);
+    const vatAmount=round2(subtotal*vatRate/100);
+    const total=round2(subtotal+vatAmount);
+    const number=await nextInvoiceNumber();
+    const payload={
+      number,
+      clientName:String(fd.get('clientName')||site.clientName||site.name||'').trim(),
+      siteId:site.id,siteNom:site.name,siteColor:normalizeHexColor(site.planningColor)||planningColorForSite(site.id),
+      billingAddress:String(fd.get('billingAddress')||'').trim(),billingEmail:String(fd.get('billingEmail')||'').trim(),
+      clientSiren:String(fd.get('clientSiren')||'').trim(),clientVatNumber:String(fd.get('clientVatNumber')||'').trim(),
+      serviceAddress:String(fd.get('serviceAddress')||site.address||'').trim(),operationCategory:String(fd.get('operationCategory')||'Prestation de services').trim(),
+      clientReference:fd.get('clientReference')||'',periodStart:Timestamp.fromDate(periodStart),periodEnd:Timestamp.fromDate(periodEnd),
+      issueDate:Timestamp.fromDate(issueDate),dueDate:Timestamp.fromDate(dueDate),
+      lines,missionIds:missions.map(m=>m.id),subtotal,vatRate,vatAmount,total,currency:'EUR',status:'draft',
+      createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+    };
+    const ref=await addDoc(collectionRef('invoices'),payload);
+    await addAudit('invoice_created',{invoiceId:ref.id,number,siteId:site.id,total});
+    closeModal();
+    toast(`Facture ${number} créée.`, 'success');
   });
 }
 async function updateInvoiceStatus(invoiceId,status){
@@ -3257,7 +3434,16 @@ function showInvoiceDetail(invoice){
 }
 async function printInvoice(invoice){
   if(!invoice)return;
-  await loadBillingProfile();
+  const profile = await loadBillingProfile();
+  const missing = [];
+  if(!profile.companyName) missing.push('raison sociale');
+  if(!profile.siret) missing.push('SIRET');
+  if(!profile.address || !profile.city) missing.push('adresse entreprise');
+  if(!profile.cnapsAuthorization) missing.push('autorisation CNAPS');
+  if(missing.length) {
+    toast(`Mentions à compléter : ${missing.join(', ')}.`, 'warning');
+    return showBillingProfileModal();
+  }
   const data = {
     type:'invoice',
     title:`Facture ${invoice.number || invoice.id} — ${invoice.clientName || invoice.siteNom || 'Client'}`,
@@ -3265,7 +3451,7 @@ async function printInvoice(invoice){
     siteNom:invoice.siteNom || null,
     missionId:null,
     rowCount:invoice.lines?.length || 0,
-    payload:{ invoice }
+    payload:{ invoice, profile }
   };
   try {
     const archived = await archivePdfDocument(data, { silent:true });
@@ -3273,12 +3459,39 @@ async function printInvoice(invoice){
     toast('Facture PDF téléchargée et archivée dans Documents.', 'success');
   } catch(error) {
     console.error(error);
-    const root=document.querySelector('#print-root');root?.remove();const el=document.createElement('div');el.id='print-root';el.className='print-root';el.innerHTML=invoiceHtml(invoice,billingProfileCache||{});document.body.appendChild(el);toast('Archivage impossible. Aperçu impression ouvert.','warning');window.addEventListener('afterprint',()=>setTimeout(()=>el.remove(),500),{once:true});setTimeout(()=>window.print(),250);setTimeout(()=>el.remove(),20000);
+    const root=document.querySelector('#print-root');root?.remove();
+    const el=document.createElement('div');el.id='print-root';el.className='print-root';el.innerHTML=invoiceHtml(invoice,profile);document.body.appendChild(el);
+    toast('Archivage impossible. Aperçu impression ouvert.','warning');
+    window.addEventListener('afterprint',()=>setTimeout(()=>el.remove(),500),{once:true});
+    setTimeout(()=>window.print(),250);setTimeout(()=>el.remove(),20000);
   }
 }
 function invoiceHtml(invoice,profile={}){
-  const logo=new URL('./assets/logo.png',location.href).href;const lines=(invoice.lines||[]).map(line=>`<tr><td>${safe(line.description||'')}</td><td>${safe(line.quantity||0)} ${safe(line.unit||'')}</td><td>${money(line.unitPrice)}</td><td>${money(line.amount)}</td></tr>`).join('');
-  return `<article class="report-doc invoice-doc"><header><img src="${logo}" alt="Sentinelle Pro"><div><h1>FACTURE ${safe(invoice.number||'')}</h1><p>Émise le ${dateOnlyText(invoice.issueDate)} · échéance ${dateOnlyText(invoice.dueDate)}</p></div></header><section class="invoice-parties"><div><h3>Émetteur</h3><strong>${safe(profile.companyName||'Entreprise')}</strong><p>${safe(profile.legalForm||'')}<br>${safe(profile.address||'')}<br>${safe(profile.postalCode||'')} ${safe(profile.city||'')}<br>${safe(profile.email||'')} ${safe(profile.phone||'')}<br>${profile.siret?`SIRET : ${safe(profile.siret)}`:''}${profile.vatNumber?`<br>TVA : ${safe(profile.vatNumber)}`:''}</p></div><div><h3>Client</h3><strong>${safe(invoice.clientName||invoice.siteNom||'Client')}</strong><p>${safe(invoice.billingAddress||'Adresse non renseignée')}<br>${safe(invoice.billingEmail||'')}<br>Site : ${safe(invoice.siteNom||'')}</p></div></section><section><p><strong>Période facturée :</strong> ${dateOnlyText(invoice.periodStart)} → ${dateOnlyText(invoice.periodEnd)}${invoice.clientReference?` · <strong>Référence :</strong> ${safe(invoice.clientReference)}`:''}</p><table class="invoice-print-table"><thead><tr><th>Désignation</th><th>Quantité</th><th>Prix unitaire HT</th><th>Total HT</th></tr></thead><tbody>${lines}</tbody></table></section><section class="invoice-totals"><div><span>Total HT</span><strong>${money(invoice.subtotal)}</strong></div><div><span>TVA ${safe(invoice.vatRate||0)} %</span><strong>${money(invoice.vatAmount)}</strong></div><div class="grand-total"><span>Total TTC</span><strong>${money(invoice.total)}</strong></div></section><section class="invoice-payment"><p><strong>Règlement :</strong> ${profile.iban?`IBAN ${safe(profile.iban)}`:'coordonnées bancaires à renseigner'} ${profile.bic?`· BIC ${safe(profile.bic)}`:''}</p>${profile.legalNotice?`<p>${safe(profile.legalNotice)}</p>`:''}</section><footer>Facture générée par Sentinelle Pro. Vérifie les mentions légales et fiscales applicables avant envoi définitif au client.</footer></article>`;
+  const logo=new URL('./assets/logo.png',location.href).href;
+  const lines=(invoice.lines||[]).map(line=>`<tr><td>${safe(line.description||'')}</td><td>${safe(line.quantity||0)} ${safe(line.unit||'')}</td><td>${money(line.unitPrice)}</td><td>${money(line.amount)}</td></tr>`).join('');
+  const legal61214=profile.securityLegalNotice || "L’autorisation d’exercice ne confère aucune prérogative de puissance publique à l’entreprise ou aux personnes qui en bénéficient.";
+  const issuerIdentity=[
+    profile.legalForm,
+    profile.shareCapital?`au capital de ${safe(profile.shareCapital)} €`:'',
+    profile.rcsCity||''
+  ].filter(Boolean).map(safe).join(' · ');
+  const paymentParts=[profile.paymentMethod||'Virement bancaire',profile.iban?`IBAN ${profile.iban}`:'',profile.bic?`BIC ${profile.bic}`:''].filter(Boolean).map(safe).join(' · ');
+  return `<article class="report-doc invoice-doc invoice-security-doc">
+    <header><img src="${logo}" alt="Sentinelle Pro"><div><h1>FACTURE ${safe(invoice.number||'')}</h1><p>Date d’émission : ${dateOnlyText(invoice.issueDate)} · Date d’échéance : ${dateOnlyText(invoice.dueDate)}</p></div></header>
+    <section class="invoice-parties">
+      <div><h3>Émetteur</h3><strong>${safe(profile.companyName||'Entreprise')}</strong><p>${issuerIdentity}<br>${safe(profile.address||'')}<br>${safe(profile.postalCode||'')} ${safe(profile.city||'')}<br>${safe(profile.email||'')} · ${safe(profile.phone||'')}<br>${profile.siren?`SIREN : ${safe(profile.siren)}<br>`:''}${profile.siret?`SIRET : ${safe(profile.siret)}<br>`:''}${profile.vatNumber?`TVA : ${safe(profile.vatNumber)}`:''}</p></div>
+      <div><h3>Client facturé</h3><strong>${safe(invoice.clientName||invoice.siteNom||'Client')}</strong><p>${safe(invoice.billingAddress||'Adresse non renseignée')}<br>${safe(invoice.billingEmail||'')}${invoice.clientSiren?`<br>SIREN : ${safe(invoice.clientSiren)}`:''}${invoice.clientVatNumber?`<br>TVA : ${safe(invoice.clientVatNumber)}`:''}<br>Lieu de prestation : ${safe(invoice.serviceAddress||invoice.siteNom||'')}</p></div>
+    </section>
+    <section class="invoice-operation"><p><strong>Nature de l’opération :</strong> ${safe(invoice.operationCategory||'Prestation de services de sécurité privée')}<br><strong>Période de réalisation :</strong> ${dateOnlyText(invoice.periodStart)} → ${dateOnlyText(invoice.periodEnd)}${invoice.clientReference?`<br><strong>Référence client :</strong> ${safe(invoice.clientReference)}`:''}</p></section>
+    <section><table class="invoice-print-table"><thead><tr><th>Désignation</th><th>Quantité</th><th>Prix unitaire HT</th><th>Total HT</th></tr></thead><tbody>${lines}</tbody></table></section>
+    <section class="invoice-totals"><div><span>Total HT</span><strong>${money(invoice.subtotal)}</strong></div><div><span>TVA ${safe(invoice.vatRate||0)} %</span><strong>${money(invoice.vatAmount)}</strong></div><div class="grand-total"><span>Total TTC</span><strong>${money(invoice.total)}</strong></div></section>
+    <section class="invoice-legal-grid">
+      <div class="invoice-legal-box"><h3>Conditions de règlement</h3><p><strong>Règlement :</strong> ${paymentParts}<br><strong>Échéance :</strong> ${dateOnlyText(invoice.dueDate)}<br>${safe(profile.earlyPaymentDiscount||'Aucun escompte accordé pour paiement anticipé.')}<br>${safe(profile.latePenaltyText||'Pénalités de retard exigibles dès le lendemain de l’échéance.')}<br>Indemnité forfaitaire pour frais de recouvrement en cas de retard : <strong>40 €</strong>.</p>${profile.legalNotice?`<p>${safe(profile.legalNotice)}</p>`:''}</div>
+      <div class="invoice-legal-box security"><h3>Sécurité privée — CNAPS</h3><p><strong>Autorisation d’exercice CNAPS :</strong> ${safe(profile.cnapsAuthorization||'Non renseignée')}<br><strong>Activité :</strong> ${safe(profile.securityActivity||'Sécurité privée')}</p><p><strong>Art. L612-14 du CSI :</strong> ${safe(legal61214)}</p></div>
+    </section>
+    ${profile.additionalLegalNotice?`<section class="invoice-additional-legal">${safe(profile.additionalLegalNotice)}</section>`:''}
+    <footer>${safe(profile.companyName||'Entreprise')} · ${profile.siret?`SIRET ${safe(profile.siret)} · `:''}${profile.cnapsAuthorization?`Autorisation CNAPS ${safe(profile.cnapsAuthorization)} · `:''}Document généré par Sentinelle Pro.</footer>
+  </article>`;
 }
 function requestDeleteInvoice(invoice){
   if(!invoice)return;confirmDestructiveAction({title:'Supprimer la facture',message:`La facture ${invoice.number||invoice.id} sera supprimée définitivement. Le compteur de numérotation ne sera pas réutilisé.`,onConfirm:async()=>{await addAudit('invoice_deleted',{invoiceId:invoice.id,number:invoice.number||''});await deleteDoc(docRef('invoices',invoice.id));toast('Facture supprimée.','success')}});
@@ -4031,61 +4244,84 @@ async function markFlashRead(flashId){
   toast('Lecture confirmée', 'success');
 }
 
+function resetSosButton(){
+  clearTimeout(sosTimer); clearInterval(sosCountdownTimer);
+  sosTimer = null; sosCountdownTimer = null; sosArming = false;
+  const btn = document.querySelector('#sos-btn');
+  btn?.classList.remove('arming');
+  if (btn) btn.innerHTML = 'SOS<br><small>PTI</small>';
+  document.querySelector('#sos-help')?.classList.add('hidden');
+}
 function bindSos(){
   const btn = document.querySelector('#sos-btn');
   const help = document.querySelector('#sos-help');
   if (!btn) return;
+  const blockNative = e => { e.preventDefault(); e.stopPropagation(); };
+  ['contextmenu','selectstart','dragstart','copy'].forEach(type => btn.addEventListener(type, blockNative));
   const start = e => {
-    e.preventDefault();
+    blockNative(e);
     if (sosArming) return;
-    sosArming = true;
-    btn.classList.add('arming');
-    help?.classList.remove('hidden');
+    sosTriggered = false; sosArming = true;
+    btn.setPointerCapture?.(e.pointerId);
+    btn.classList.add('arming'); help?.classList.remove('hidden');
     if (navigator.vibrate) navigator.vibrate(70);
-    sosTimer = setTimeout(triggerSOS, 3000);
+    const startedAt = Date.now();
+    const renderCountdown = () => {
+      const remaining = Math.max(1, Math.ceil((3000 - (Date.now() - startedAt)) / 1000));
+      if (btn.isConnected && sosArming) btn.innerHTML = `${remaining}<br><small>MAINTENIR</small>`;
+    };
+    renderCountdown(); sosCountdownTimer = setInterval(renderCountdown, 100);
+    sosTimer = setTimeout(async () => {
+      sosTriggered = true; sosArming = false; clearInterval(sosCountdownTimer); sosCountdownTimer = null;
+      btn.innerHTML = '✓<br><small>ALERTE</small>';
+      await triggerSOS();
+    }, 3000);
   };
-  const stop = () => {
+  const stop = e => {
+    if (e) blockNative(e);
+    if (sosTriggered) { setTimeout(resetSosButton, 700); return; }
     if (!sosArming) return;
-    clearTimeout(sosTimer);
-    sosTimer = null;
-    sosArming = false;
-    btn.classList.remove('arming');
-    help?.classList.add('hidden');
+    resetSosButton();
   };
-  btn.addEventListener('pointerdown', start);
-  btn.addEventListener('pointerup', stop);
-  btn.addEventListener('pointerleave', stop);
-  btn.addEventListener('pointercancel', stop);
+  btn.addEventListener('pointerdown', start, { passive:false });
+  btn.addEventListener('pointerup', stop, { passive:false });
+  btn.addEventListener('pointerleave', stop, { passive:false });
+  btn.addEventListener('pointercancel', stop, { passive:false });
 }
 async function triggerSOS(){
-  sosArming = false;
+  const queuedOffline = !navigator.onLine;
   document.querySelector('#sos-btn')?.classList.remove('arming');
   document.querySelector('#sos-help')?.classList.add('hidden');
-  if (!isOnline()) {
-    alert('Réseau indisponible — appelez directement le QG ou les secours. L’alerte SOS n’a pas été transmise.');
-    return;
-  }
-  const confirmSend = confirm('Déclencher une alerte SOS/PTI au QG ?');
-  if (!confirmSend) return;
   try {
-    const shift = await findActiveShift();
+    const shift = await findActiveShift().catch(() => activeShiftCache || null);
     const gps = await getGPS();
     const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
     const alertDoc = await addDoc(collectionRef('alerts'), {
       agentId: currentUser.uid, agentNom, siteActuel: shift?.siteId || currentProfile.siteActuel || null, siteActuelNom: shift?.siteNom || currentProfile.siteActuelNom || null,
-      positionGPS: gps, heure: serverTimestamp(), typeAlerte:'SOS/PTI', statut:'active', message:'Alerte PTI déclenchée par l’agent', niveau:'critique', createdAt:serverTimestamp(), createdBy:currentUser.uid
+      positionGPS: gps, heure: serverTimestamp(), localTriggeredAt:new Date().toISOString(), queuedOffline,
+      typeAlerte:'SOS/PTI', statut:'active', message:queuedOffline?'Alerte PTI enregistrée hors ligne — transmission au retour du réseau':'Alerte PTI déclenchée par l’agent', niveau:'critique', createdAt:serverTimestamp(), createdBy:currentUser.uid
     });
-    await updateDoc(docRef('users', currentUser.uid), { statut:'alerte', lastSeen:serverTimestamp() }).catch(()=>{});
-    await addAudit('sos_triggered', { alertId: alertDoc.id, siteId: shift?.siteId || null });
+    updateDoc(docRef('users', currentUser.uid), { statut:'alerte', lastSeen:serverTimestamp() }).catch(()=>{});
+    addAudit('sos_triggered', { alertId: alertDoc.id, siteId: shift?.siteId || null, queuedOffline }).catch(()=>{});
     if (navigator.vibrate) navigator.vibrate([200,80,200,80,200]);
-    showSOSSent(alertDoc.id);
+    showSOSSent(alertDoc.id, { queuedOffline });
   } catch(error){
     console.error(error);
-    alert('L’alerte SOS n’a pas pu être transmise. Appelez directement le QG ou les secours.');
+    showModal('Alerte non enregistrée', `<div class="setup-box danger-copy">L’appareil n’a pas pu enregistrer l’alerte. Appelle immédiatement le QG ou les secours.</div><div class="grid cols-2">${qgPhoneButton()}<a class="btn danger full" href="tel:112">Appeler le 112</a></div>`);
   }
 }
-function showSOSSent(alertId){
-  showModal('Alerte envoyée au QG', `<div class="setup-box danger-copy">QG notifié. Restez en sécurité.</div><div class="grid cols-2"><a class="btn danger full" href="tel:112">Appeler secours 112</a><button class="btn full" id="false-alert">Fausse alerte</button></div><p class="muted" style="font-size:12px;margin-top:14px">La fausse alerte est tracée et ne supprime pas silencieusement l’historique.</p>`);
+function qgPhoneButton(){
+  const digits = String(DEFAULT_QG_WHATSAPP || '').replace(/\D/g,'');
+  if (!digits || digits === '33600000000') return '';
+  const tel = String(DEFAULT_QG_WHATSAPP).replace(/[^+\d]/g,'');
+  return `<a class="btn warning full" href="tel:${safe(tel)}">Appeler le QG</a>`;
+}
+function showSOSSent(alertId,{queuedOffline=false}={}){
+  const title = queuedOffline ? 'Alerte enregistrée hors ligne' : 'Alerte envoyée au QG';
+  const message = queuedOffline
+    ? 'L’alerte est conservée sur cet appareil et sera synchronisée au retour du réseau. Le QG n’est pas prévenu en temps réel : appelle-le immédiatement ou compose le 112.'
+    : 'QG notifié. Restez en sécurité.';
+  showModal(title, `<div class="setup-box danger-copy">${safe(message)}</div><div class="grid cols-2">${qgPhoneButton()}<a class="btn danger full" href="tel:112">Appeler secours 112</a><button class="btn full" id="false-alert">Fausse alerte</button></div><p class="muted" style="font-size:12px;margin-top:14px">La fausse alerte est tracée et ne supprime pas silencieusement l’historique.</p>`);
   document.querySelector('#false-alert')?.addEventListener('click', async () => {
     const reason = prompt('Confirme la fausse alerte avec une justification :');
     if (!reason || reason.trim().length < 5) return toast('Justification trop courte.', 'warning');
@@ -4093,6 +4329,7 @@ function showSOSSent(alertId){
     await addAudit('sos_false_alert_requested', { alertId, reason:reason.trim() });
     toast('Fausse alerte signalée au QG', 'warning'); closeModal();
   });
+  setTimeout(resetSosButton, 900);
 }
 
 function userFriendlyError(error, fallback){
@@ -4395,22 +4632,53 @@ function createGeneratedDocumentPdf(d){
     y = pdfWrapped(doc, `Note de relève : ${shift.handoverNote || 'RAS'}`, 18, y, 174, 5);
   } else if(d.type === 'invoice'){
     const inv = d.payload?.invoice || d.payload || {};
+    const profile = d.payload?.profile || {};
+    const l61214 = profile.securityLegalNotice || "L’autorisation d’exercice ne confère aucune prérogative de puissance publique à l’entreprise ou aux personnes qui en bénéficient.";
     y = pdfMetricCards(doc, [
       {label:'Total HT', value:money(inv.subtotal || 0)},
       {label:'TVA', value:money(inv.vatAmount || 0)},
       {label:'Total TTC', value:money(inv.total || 0)},
       {label:'Statut', value:invoiceStatusLabel(inv.status || 'draft')}
     ], y);
-    y = pdfSectionTitle(doc, 'Détails de facturation', y);
-    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
-    generatedDocumentMeta(d).forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
+    y = pdfSectionTitle(doc, 'Émetteur et client', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.2); doc.setTextColor(...C.grey);
+    const issuer = [
+      profile.companyName || 'Entreprise',
+      [profile.legalForm, profile.shareCapital ? `capital ${profile.shareCapital} €` : '', profile.rcsCity].filter(Boolean).join(' · '),
+      [profile.address, profile.postalCode, profile.city].filter(Boolean).join(' '),
+      [profile.siren ? `SIREN ${profile.siren}` : '', profile.siret ? `SIRET ${profile.siret}` : '', profile.vatNumber ? `TVA ${profile.vatNumber}` : ''].filter(Boolean).join(' · ')
+    ].filter(Boolean).join(' — ');
+    const client = [
+      inv.clientName || inv.siteNom || 'Client',
+      inv.billingAddress || 'Adresse non renseignée',
+      [inv.clientSiren ? `SIREN ${inv.clientSiren}` : '', inv.clientVatNumber ? `TVA ${inv.clientVatNumber}` : ''].filter(Boolean).join(' · '),
+      inv.serviceAddress ? `Lieu de prestation : ${inv.serviceAddress}` : ''
+    ].filter(Boolean).join(' — ');
+    y = pdfWrapped(doc, `Émetteur : ${issuer}`, 18, y, 174, 4.4);
+    y = pdfWrapped(doc, `Client : ${client}`, 18, y, 174, 4.4);
+    y = pdfWrapped(doc, `Nature : ${inv.operationCategory || 'Prestation de services de sécurité privée'} · Période : ${dateOnlyText(inv.periodStart)} au ${dateOnlyText(inv.periodEnd)}${inv.clientReference ? ` · Référence : ${inv.clientReference}` : ''}`, 18, y, 174, 4.4);
     y += 3;
     y = pdfSectionTitle(doc, 'Lignes facturées', y);
     y = pdfDrawTable(doc, ['Désignation','Qté','PU HT','Total HT'], inv.lines || rows, [100,20,30,32], y, l=>[l.description, `${l.quantity || 0} ${l.unit || ''}`, money(l.unitPrice || 0), money(l.amount || 0)]);
-    y += 2; y = pdfEnsureSpace(doc, y, 24);
+    y += 2; y = pdfEnsureSpace(doc, y, 28);
     doc.setFillColor(...C.obsidian); doc.roundedRect(120, y, 76, 24, 3, 3, 'F');
     doc.setTextColor(...C.white); doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.text('TOTAL TTC', 126, y+8);
     doc.setTextColor(...C.azure); doc.setFontSize(15); doc.text(money(inv.total || 0), 190, y+17, {align:'right'});
+    y += 31;
+    y = pdfSectionTitle(doc, 'Conditions de règlement', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.1); doc.setTextColor(...C.grey);
+    y = pdfWrapped(doc, `Mode : ${profile.paymentMethod || 'Virement bancaire'}${profile.iban ? ` · IBAN ${profile.iban}` : ''}${profile.bic ? ` · BIC ${profile.bic}` : ''}`, 18, y, 174, 4.4);
+    y = pdfWrapped(doc, `Échéance : ${dateOnlyText(inv.dueDate)}. ${profile.earlyPaymentDiscount || 'Aucun escompte accordé pour paiement anticipé.'}`, 18, y, 174, 4.4);
+    y = pdfWrapped(doc, profile.latePenaltyText || 'Pénalités de retard exigibles dès le lendemain de la date d’échéance.', 18, y, 174, 4.4);
+    y = pdfWrapped(doc, 'Indemnité forfaitaire pour frais de recouvrement en cas de retard : 40 €.', 18, y, 174, 4.4);
+    if(profile.legalNotice) y = pdfWrapped(doc, profile.legalNotice, 18, y, 174, 4.4);
+    y += 3;
+    y = pdfSectionTitle(doc, 'Sécurité privée — CNAPS', y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.1); doc.setTextColor(...C.grey);
+    y = pdfWrapped(doc, `Autorisation d’exercice CNAPS : ${profile.cnapsAuthorization || 'Non renseignée'}`, 18, y, 174, 4.4);
+    if(profile.securityActivity) y = pdfWrapped(doc, `Activité autorisée : ${profile.securityActivity}`, 18, y, 174, 4.4);
+    y = pdfWrapped(doc, `Art. L612-14 du CSI : ${l61214}`, 18, y, 174, 4.4);
+    if(profile.additionalLegalNotice) y = pdfWrapped(doc, profile.additionalLegalNotice, 18, y, 174, 4.4);
   } else {
     y = pdfMetricCards(doc, [
       {label:'Lignes', value:d.rowCount || rows.length || 0},
@@ -4447,14 +4715,11 @@ function missionReportHtml({ mission, shift={}, reports=[] }){
 function generatedDocumentHtml(d){
   const p=d?.payload||{};
   if(d.type==='mission') return missionReportHtml({mission:p.mission||{},shift:p.shift||{},reports:p.rows||[]});
+  if(d.type==='invoice') return invoiceHtml(p.invoice||p||{}, p.profile||{});
   const logo=new URL('./assets/logo.png',location.href).href;
   const rows=generatedDocumentRows(d);
   let headers=[], mapper;
-  if(d.type==='invoice'){
-    const inv=p.invoice||p||{};
-    headers=['Désignation','Quantité','PU HT','Total HT']; mapper=l=>[l.description, `${l.quantity || 0} ${l.unit || ''}`, money(l.unitPrice), money(l.amount)];
-    rows.splice(0, rows.length, ...(inv.lines || rows));
-  } else if(d.type==='mci'){ headers=['Date','Agent','Site','Catégorie','Gravité','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.category,r.severity,r.message]; }
+  if(d.type==='mci'){ headers=['Date','Agent','Site','Catégorie','Gravité','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.category,r.severity,r.message]; }
   else if(d.type==='rounds'){ headers=['Date','Agent','Site','Point','Méthode','Validité']; mapper=r=>[dateText(r.scannedAt),r.agentNom,r.siteNom,r.checkpointName,r.scanMethod,r.isValid?'Valide':'Refusé']; }
   else { headers=['Date','Agent','Site','Alerte','Statut','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.typeAlerte,r.statut,r.message]; }
   return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">${safe(pdfBrandDocType(d.type))}<br><small>${dateText(d.createdAt)}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Type</span><strong>${safe(documentTypeLabel(d.type))}</strong></div><div><span>Site</span><strong>${safe(d.siteNom||'Tous sites')}</strong></div><div><span>Volume</span><strong>${d.rowCount||rows.length} ligne(s)</strong></div></section>${p.truncated?'<section class="azza-warning">Aperçu limité aux 350 premières lignes. Le volume total reste enregistré.</section>':''}<section><h3>Contenu du document</h3>${azzeraDocHtmlTable(headers, rows, mapper)}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;

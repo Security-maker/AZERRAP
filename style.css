@@ -760,3 +760,35 @@ body.menu-open{overflow:hidden}
   .agent-plan-mission{padding:10px;gap:8px}.agent-plan-title strong{font-size:13px}.agent-plan-actions{display:grid;grid-template-columns:1fr}.agent-plan-actions .btn{width:100%}.agent-month-cell{min-height:105px}
   .collaborator-toolbar{grid-template-columns:1fr}.collaborator-toolbar .btn{grid-column:auto}.collaborator-scroll{max-height:58vh}.collaborator-grid{grid-template-columns:116px repeat(var(--month-days),54px);min-width:calc(116px + (var(--month-days) * 54px))}.collaborator-cell{min-height:70px}.collaborator-site{min-height:70px}.collaborator-site strong{font-size:10px}.collaborator-details{padding:10px}
 }
+
+/* =========================================================
+   V5.7.1 — Conformité facturation, PTI tactile et hors ligne
+   ========================================================= */
+.sos-btn,.sos-btn *{
+  -webkit-user-select:none!important;
+  user-select:none!important;
+  -webkit-touch-callout:none!important;
+  -webkit-user-drag:none!important;
+  touch-action:none!important;
+  -webkit-tap-highlight-color:transparent;
+}
+.sos-btn{cursor:pointer;overscroll-behavior:contain;will-change:transform,box-shadow}
+.sos-btn.arming{animation:sos-arming-pulse .72s ease-in-out infinite alternate;box-shadow:0 0 0 8px rgba(255,46,46,.13),0 0 42px rgba(255,46,46,.52)}
+@keyframes sos-arming-pulse{from{transform:scale(1)}to{transform:scale(1.055)}}
+.offline-ready-card{border-color:rgba(100,208,255,.27);background:linear-gradient(145deg,rgba(100,208,255,.08),rgba(8,27,51,.9))}
+.offline-ready-card.offline-active{border-color:rgba(255,159,28,.36);background:linear-gradient(145deg,rgba(255,159,28,.08),rgba(8,27,51,.92))}
+.invoice-form-section{margin:0 0 18px;padding:16px;border:1px solid var(--border);border-radius:18px;background:rgba(5,10,19,.28)}
+.invoice-form-section h3{margin:0 0 14px;color:var(--azure);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.form-grid .span-2{grid-column:1/-1}
+.invoice-security-doc .invoice-operation{border:1px solid #dce5ee;border-left:5px solid #64d0ff;border-radius:12px;background:#f7fafc;padding:12px 14px}
+.invoice-legal-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:stretch}
+.invoice-legal-box{border:1px solid #dce5ee;border-radius:14px;padding:15px;background:#f7fafc;break-inside:avoid;page-break-inside:avoid}
+.invoice-legal-box.security{border-left:5px solid #64d0ff}
+.invoice-legal-box h3{margin:0 0 9px;color:#141c25;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+.invoice-legal-box p{margin:0 0 8px;color:#4c4c4c;font-size:11px;line-height:1.55}.invoice-legal-box p:last-child{margin-bottom:0}
+.invoice-additional-legal{border-top:1px solid #dce5ee;padding-top:12px;color:#4c4c4c;font-size:10px;line-height:1.5}
+@media(max-width:700px){.invoice-legal-grid{grid-template-columns:1fr}.form-grid .span-2{grid-column:auto}}
+@media print{
+  .invoice-legal-grid{grid-template-columns:1fr 1fr!important}
+  .invoice-legal-box,.invoice-security-doc .invoice-operation{break-inside:avoid!important;page-break-inside:avoid!important}
+}
