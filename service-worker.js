@@ -1,10 +1,10 @@
-const CACHE_NAME = 'sentinelle-pro-v5-7-1-offline';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-1';
+const CACHE_NAME = 'sentinelle-pro-v5-7-2-badge-agent';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-2';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=571',
-  './app.js?v=571',
+  './style.css?v=572',
+  './app.js?v=572',
   './push-init.js?v=565',
   './firebase-config.js',
   './manifest.json',

@@ -224,6 +224,49 @@ async function compressCheckInPhoto(file){
     URL.revokeObjectURL(objectUrl);
   }
 }
+
+async function compressBadgePhoto(file){
+  if (!file || !String(file.type || '').startsWith('image/')) throw new Error('Choisis une photo agent valide.');
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = objectUrl;
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('Photo illisible. Essaie une photo JPEG ou PNG.'));
+    });
+    const targetW = 420;
+    const targetH = 520;
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d', { alpha:false });
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0,0,targetW,targetH);
+    const iw = image.naturalWidth || image.width;
+    const ih = image.naturalHeight || image.height;
+    const scale = Math.max(targetW / iw, targetH / ih);
+    const sw = Math.round(targetW / scale);
+    const sh = Math.round(targetH / scale);
+    const sx = Math.max(0, Math.round((iw - sw) / 2));
+    const sy = Math.max(0, Math.round((ih - sh) / 2));
+    ctx.drawImage(image, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    let quality = .74;
+    let blob = null;
+    while (quality >= .38) {
+      blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (blob && blob.size <= 190000) break;
+      quality -= .08;
+    }
+    if (!blob) throw new Error('Compression de la photo impossible.');
+    if (blob.size > 300000) throw new Error('La photo reste trop lourde. Reprends-la avec moins de détails.');
+    return { dataUrl: await blobToDataUrl(blob), bytes: blob.size, width:targetW, height:targetH, mimeType:'image/jpeg', capturedAt:new Date().toISOString() };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function geocodeAddress(address){
   const queryText = String(address || '').trim();
   if (queryText.length < 5) throw new Error('Renseigne une adresse plus précise.');
@@ -302,7 +345,7 @@ function navBtn(route, icon, label){
 }
 function agentNav(){
   return [
-    navBtn('home','⌂','Accueil'), navBtn('planning','◷','Planning'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('intel','◌','Veille')
+    navBtn('home','⌂','Accueil'), navBtn('planning','◷','Planning'), navBtn('badge','▣','Badge'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('intel','◌','Veille')
   ].join('');
 }
 function qgNav(){
@@ -383,7 +426,7 @@ async function loadProfile(user){
     }
     const requestedRoute = new URLSearchParams(location.search).get('route') || 'home';
     const portal = rolePortal(currentProfile.role);
-    const allowedAgentRoutes = ['home','planning','mci','round','docs','flash','pushsetup','intel'];
+    const allowedAgentRoutes = ['home','planning','badge','mci','round','docs','flash','pushsetup','intel'];
     const allowedQGRoutes = ['home','missions','notifications','reports','documents','billing','intel','device','sites','agents','alerts','flash','pushsetup','history'];
     currentRoute = portal === 'agent' && allowedAgentRoutes.includes(requestedRoute) ? requestedRoute : portal === 'qg' && allowedQGRoutes.includes(requestedRoute) ? requestedRoute : 'home';
     navigate(currentRoute);
@@ -454,7 +497,7 @@ function navigate(route){
   clearSubs();
   const portal = rolePortal(currentProfile.role);
   if (portal === 'agent') {
-    ({ home:renderAgentHome, planning:renderAgentPlanning, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, pushsetup:renderPushSetup, intel:renderAgentIntel }[route] || renderAgentHome)();
+    ({ home:renderAgentHome, planning:renderAgentPlanning, badge:renderAgentBadge, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, pushsetup:renderPushSetup, intel:renderAgentIntel }[route] || renderAgentHome)();
   } else {
     ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
   }
@@ -703,6 +746,125 @@ function openAgentMissionDetail(mission, sitesById){
   document.querySelector('#agent-detail-ack')?.addEventListener('click',async()=>{await acknowledgeAgentMission(mission);closeModal();});
   document.querySelector('#agent-detail-start')?.addEventListener('click',()=>{pendingMissionSelectionId=mission.id;closeModal();navigate('home');});
 }
+
+const DEFAULT_BADGE_COMPANY = {
+  name:'AZZERA PROTECT',
+  address:'131 Avenue de Verdun',
+  postalCity:'83600 Fréjus',
+  phone:'04.65.84.08.98',
+  cnaps:'AUT-083-2123-05-14-20240931815',
+  legalNotice:"Article L612-14 - Code de la sécurité intérieure : L’autorisation d’exercice ne confère aucune prérogative de puissance publique à l’entreprise ou aux personnes qui en bénéficient."
+};
+function agentFullName(agent={}){ return `${agent.prenom || ''} ${agent.nom || ''}`.trim() || agent.email || 'Agent'; }
+function agentInitials(agent={}){ return String(agentFullName(agent)).split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase() || 'AG'; }
+function badgeDate(value){ if(!value) return '—'; const d = value?.toDate ? value.toDate() : new Date(value); return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleDateString('fr-FR'); }
+function badgeLine(value){ return safe(value || '—'); }
+function badgeProfessionalCard(agent={}){ return agent.professionalCard || agent.professionalCardNumber || agent.cnapsCardNumber || '—'; }
+function badgeActivities(agent={}){ return agent.authorizedActivities || agent.securityActivity || 'Surveillance humaine ou gardiennage'; }
+function badgeCompany(agent={}){
+  return {
+    name: agent.badgeCompanyName || DEFAULT_BADGE_COMPANY.name,
+    address: agent.badgeCompanyAddress || DEFAULT_BADGE_COMPANY.address,
+    postalCity: agent.badgeCompanyPostalCity || DEFAULT_BADGE_COMPANY.postalCity,
+    phone: agent.badgeCompanyPhone || DEFAULT_BADGE_COMPANY.phone,
+    cnaps: agent.badgeCompanyCnapsAuthorization || DEFAULT_BADGE_COMPANY.cnaps,
+    legalNotice: agent.badgeCompanyLegalNotice || DEFAULT_BADGE_COMPANY.legalNotice
+  };
+}
+function badgePhoto(agent={}){
+  const src = agent.badgePhotoDataUrl || agent.photoDataUrl || '';
+  if (src) return `<img src="${safe(src)}" alt="Photo agent">`;
+  return `<div class="agent-badge-photo-placeholder">${safe(agentInitials(agent))}</div>`;
+}
+function splitBadgeList(value){ return String(value || '').split(/[\n,;]+/).map(x=>x.trim()).filter(Boolean); }
+function badgeCardHtml(agent={}, options={}){
+  const company = badgeCompany(agent);
+  const activities = splitBadgeList(badgeActivities(agent));
+  const specialties = splitBadgeList(agent.specialties || agent.qualifications || '');
+  return `<article class="agent-badge-shell ${options.print?'print-mode':''}">
+    <section class="agent-badge-card recto">
+      <div class="agent-badge-top"><img src="assets/logo.png" alt="Azzera Protect"><div><strong>${badgeLine(company.name)}</strong><span>${badgeLine(company.address)}</span><span>${badgeLine(company.postalCity)}</span><span>${badgeLine(company.phone)}</span></div></div>
+      <div class="agent-badge-middle"><div class="agent-badge-data"><p><strong>Nom :</strong> ${badgeLine(agent.nom)}</p><p><strong>Prénom :</strong> ${badgeLine(agent.prenom)}</p><p><strong>Né(e) le :</strong> ${safe(badgeDate(agent.birthDate))}${agent.birthPlace?` · ${badgeLine(agent.birthPlace)}`:''}</p><p><strong>N° carte pro :</strong> ${badgeLine(badgeProfessionalCard(agent))}</p>${agent.professionalCardExpiryDate?`<p><strong>Expiration :</strong> ${safe(badgeDate(agent.professionalCardExpiryDate))}</p>`:''}</div><figure class="agent-badge-photo">${badgePhoto(agent)}</figure></div>
+      <div class="agent-badge-legal">${safe(company.legalNotice)}</div>
+    </section>
+    <section class="agent-badge-card verso">
+      <div class="agent-badge-top"><img src="assets/logo.png" alt="Azzera Protect"><div><strong>${badgeLine(company.name)}</strong><span>${badgeLine(company.address)}</span><span>${badgeLine(company.postalCity)}</span><span>${badgeLine(company.phone)}</span></div></div>
+      <div class="agent-badge-verso-grid"><div><p><strong>Matricule :</strong> ${badgeLine(agent.matricule || agent.badgeNumber)}</p><p><strong>Badge interne :</strong> ${badgeLine(agent.badgeNumber || agent.matricule)}</p><p><strong>NUB :</strong> ${badgeLine(agent.nub)}</p></div><div><p><strong>Activité(s) autorisée(s) :</strong></p><ul>${(activities.length?activities:['Surveillance humaine']).map(x=>`<li>${safe(x)}</li>`).join('')}</ul></div></div>
+      <div class="agent-badge-specialties"><strong>Spécialité(s) / qualification(s)</strong><ul>${(specialties.length?specialties:['Agent de sécurité']).map(x=>`<li>${safe(x)}</li>`).join('')}</ul></div>
+      <div class="agent-badge-footer"><strong>${badgeLine(company.name)}</strong><span>${badgeLine(company.cnaps)}</span></div>
+    </section>
+  </article>`;
+}
+async function renderAgentBadge(){
+  currentRoute = 'badge';
+  const body = `<section class="card agent-badge-page"><div class="card-title"><div><h2>Mon badge</h2><p>Carte professionnelle employeur consultable même en intervention</p></div><div class="btn-row"><button class="btn small" id="agent-badge-pdf">PDF</button><button class="btn small" id="agent-badge-print">Imprimer</button></div></div><div class="setup-box">Cette carte opérationnelle complète le titre CNAPS dématérialisé. Elle ne remplace pas les vérifications réglementaires de l’employeur.</div><div id="agent-badge-preview">${badgeCardHtml(currentProfile || {})}</div></section>`;
+  render(page('Mon badge','Carte professionnelle employeur',body));
+  const redraw = agent => {
+    const box = document.querySelector('#agent-badge-preview');
+    if (box) box.innerHTML = badgeCardHtml(agent || currentProfile || {});
+    const oldPdfBtn = document.querySelector('#agent-badge-pdf');
+    const oldPrintBtn = document.querySelector('#agent-badge-print');
+    if (oldPdfBtn) oldPdfBtn.replaceWith(oldPdfBtn.cloneNode(true));
+    if (oldPrintBtn) oldPrintBtn.replaceWith(oldPrintBtn.cloneNode(true));
+    document.querySelector('#agent-badge-pdf')?.addEventListener('click',()=>downloadAgentBadgePdf(agent || currentProfile || {}));
+    document.querySelector('#agent-badge-print')?.addEventListener('click',()=>printAgentBadge(agent || currentProfile || {}));
+  };
+  redraw(currentProfile);
+  unsubscribeList.push(onSnapshot(docRef('users', currentUser.uid), snap=>{
+    if(!snap.exists()) return;
+    currentProfile = { uid:currentUser.uid, id:currentUser.uid, ...snap.data() };
+    saveOfflineProfile(currentProfile);
+    redraw(currentProfile);
+  },()=>{}));
+}
+function openAgentBadgePreview(agent){
+  if(!agent) return;
+  showModal(`Badge · ${agentFullName(agent)}`, `<div class="agent-badge-modal"><div class="setup-box">Aperçu recto-verso de la carte employeur. La photo et les informations CNAPS se modifient depuis la fiche agent.</div><div id="qg-agent-badge-preview">${badgeCardHtml(agent)}</div><div class="btn-row"><button class="btn primary" id="qg-agent-badge-pdf">Télécharger PDF</button><button class="btn" id="qg-agent-badge-print">Imprimer</button><button class="btn ghost" id="qg-agent-badge-edit">Modifier la fiche</button></div></div>`, 'wide');
+  document.querySelector('#qg-agent-badge-pdf')?.addEventListener('click',()=>downloadAgentBadgePdf(agent));
+  document.querySelector('#qg-agent-badge-print')?.addEventListener('click',()=>printAgentBadge(agent));
+  document.querySelector('#qg-agent-badge-edit')?.addEventListener('click',()=>{ closeModal(); showAgentForm(agent); });
+}
+function printAgentBadge(agent){
+  document.querySelector('#print-root')?.remove();
+  const root=document.createElement('div');
+  root.id='print-root';
+  root.className='print-root agent-badge-print-root';
+  root.innerHTML=`<div class="agent-badge-print-page">${badgeCardHtml(agent,{print:true})}</div>`;
+  document.body.appendChild(root);
+  toast('Badge prêt. Choisis Imprimer puis Enregistrer en PDF si besoin.','success');
+  window.addEventListener('afterprint',()=>setTimeout(()=>root.remove(),400),{once:true});
+  setTimeout(()=>window.print(),220);
+  setTimeout(()=>root.remove(),15000);
+}
+function badgePdfList(doc, items, x, y, maxWidth=78){
+  const lines = (items.length?items:['—']).slice(0,6).flatMap(item=>doc.splitTextToSize(`• ${item}`, maxWidth));
+  lines.forEach(line=>{ doc.text(line, x, y); y += 4.3; });
+  return y;
+}
+function downloadAgentBadgePdf(agent){
+  try{
+    const jsPDF=getJsPDF(); if(!jsPDF) throw new Error('Bibliothèque PDF indisponible.');
+    const C=AZZERA_DOC_BRAND;
+    const doc=new jsPDF({unit:'mm',format:'a4',orientation:'portrait'});
+    const company=badgeCompany(agent);
+    const card=(x,y)=>{ doc.setDrawColor(20,28,37); doc.setLineWidth(.45); doc.rect(x,y,180,74); doc.setFillColor(244,248,251); doc.rect(x,y+22,180,52,'F'); };
+    doc.setProperties({title:`Badge ${agentFullName(agent)}`,subject:'Carte professionnelle employeur',author:'AZZERA PROTECT · Sentinelle Pro'});
+    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(...C.obsidian); doc.text('Carte professionnelle employeur',15,15);
+    card(15,24); pdfDrawLogo(doc,25,31,18,16); doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(...C.obsidian); doc.text(company.name,55,34); doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.text(company.address,55,40); doc.text(company.postalCity,55,45); doc.text(company.phone,55,50);
+    if(agent.badgePhotoDataUrl){ try{ doc.addImage(agent.badgePhotoDataUrl, 'JPEG', 150, 35, 35, 43, undefined, 'FAST'); }catch(_){} } else { doc.setDrawColor(190); doc.rect(150,35,35,43); doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.text(agentInitials(agent),167.5,58,{align:'center'}); }
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.text('Nom :',25,62); doc.text('Prénom :',25,68); doc.text('Né(e) le :',25,74); doc.text('N° carte pro :',25,80); doc.setFont('helvetica','normal'); doc.text(String(agent.nom||'—'),50,62); doc.text(String(agent.prenom||'—'),50,68); doc.text(`${badgeDate(agent.birthDate)}${agent.birthPlace?` · ${agent.birthPlace}`:''}`,50,74); doc.text(String(badgeProfessionalCard(agent)),50,80);
+    doc.setFontSize(6.7); doc.setTextColor(...C.grey); doc.text(doc.splitTextToSize(company.legalNotice,160),25,92);
+    card(15,112); pdfDrawLogo(doc,25,119,18,16); doc.setTextColor(...C.obsidian); doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.text(company.name,55,122); doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.text(company.address,55,128); doc.text(company.postalCity,55,133); doc.text(company.phone,55,138);
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.text('Matricule :',25,153); doc.text('NUB :',25,159); doc.text('Expiration :',25,165); doc.setFont('helvetica','normal'); doc.text(String(agent.matricule||agent.badgeNumber||'—'),52,153); doc.text(String(agent.nub||'—'),52,159); doc.text(badgeDate(agent.professionalCardExpiryDate),52,165);
+    doc.setFont('helvetica','bold'); doc.text('Activité(s) autorisée(s)',105,153); doc.setFont('helvetica','normal'); badgePdfList(doc, splitBadgeList(badgeActivities(agent)), 105, 159, 78);
+    doc.setFont('helvetica','bold'); doc.text('Spécialité(s)',105,177); doc.setFont('helvetica','normal'); badgePdfList(doc, splitBadgeList(agent.specialties || agent.qualifications || 'Agent de sécurité'), 105, 183, 78);
+    doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.text(company.name,25,198); doc.text(company.cnaps,25,204);
+    pdfAddFooter(doc);
+    doc.save(documentSlug(`badge-${agentFullName(agent)}`,'pdf'));
+    toast('Badge PDF téléchargé.','success');
+  }catch(error){ console.error(error); toast(userFriendlyError(error,'PDF badge impossible.'),'error'); }
+}
+
 async function renderAgentPlanning(){
   currentRoute='planning';
   const monthValue=localMonthValue();
@@ -2623,8 +2785,9 @@ function renderQGAgents(){
 function renderAgentsTable(rows){
   const box = document.querySelector('#agents-table');
   if (!rows.length) return box.innerHTML = `<div class="empty">Aucun profil agent.</div>`;
-  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><div class="table-actions"><button class="btn small primary" data-agent-planning="${safe(u.id)}">Planning</button><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button>${isStrictAdmin() && u.id !== currentUser.uid ? `<button class="btn small danger" data-delete-agent="${safe(u.id)}">Supprimer</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><div class="table-actions"><button class="btn small primary" data-agent-planning="${safe(u.id)}">Planning</button><button class="btn small" data-agent-badge="${safe(u.id)}">Badge</button><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button>${isStrictAdmin() && u.id !== currentUser.uid ? `<button class="btn small danger" data-delete-agent="${safe(u.id)}">Supprimer</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('[data-agent-planning]').forEach(btn => btn.addEventListener('click', () => { sessionStorage.setItem('sentinellePlanningAgentId',btn.dataset.agentPlanning); navigate('missions'); }));
+  document.querySelectorAll('[data-agent-badge]').forEach(btn => btn.addEventListener('click', () => openAgentBadgePreview(rows.find(u=>u.id===btn.dataset.agentBadge))));
   document.querySelectorAll('[data-edit-agent]').forEach(btn => btn.addEventListener('click', () => showAgentForm(rows.find(u=>u.id===btn.dataset.editAgent))));
   document.querySelectorAll('[data-delete-agent]').forEach(btn => btn.addEventListener('click', () => requestDeleteAgent(rows.find(u=>u.id===btn.dataset.deleteAgent))));
 }
@@ -2701,9 +2864,11 @@ function requestDeleteReports(rows, label='ces MCI'){
 
 function showAgentForm(u={}){
   const isEdit = !!u.id;
+  const c = badgeCompany(u);
+  let pendingBadgePhotoDataUrl = u.badgePhotoDataUrl || u.photoDataUrl || '';
   showModal(isEdit?'Modifier profil':'Créer compte agent', `<form id="agent-form">
     ${!isEdit ? `<div class="setup-box">Création directe : l’application crée le compte Firebase Auth puis le profil sécurisé dans Firestore. Si le compte existe déjà, colle simplement son UID Firebase Auth.</div>` : ''}
-    <div class="form-grid">
+    <div class="invoice-form-section"><h3>Identité et accès</h3><div class="form-grid">
       <div class="field"><label>UID Firebase Auth ${isEdit?'':'(optionnel si nouveau compte)'}</label><input class="input mono" name="uid" value="${safe(u.id || u.uid || '')}" ${isEdit?'readonly':''} placeholder="Coller l’UID si le compte existe déjà"></div>
       <div class="field"><label>Email de connexion</label><input class="input" name="email" type="email" value="${safe(u.email || '')}" required></div>
       ${!isEdit ? `<div class="field"><label>Mot de passe initial</label><input class="input" name="password" type="password" minlength="6" placeholder="Minimum 6 caractères"></div><div class="field"><label>Confirmer mot de passe</label><input class="input" name="passwordConfirm" type="password" minlength="6"></div>` : ''}
@@ -2714,10 +2879,61 @@ function showAgentForm(u={}){
       <div class="field field-wide"><label>Adresse</label><input class="input" name="address" value="${safe(u.address || '')}" placeholder="Adresse du collaborateur"></div>
       <div class="field"><label>Code postal</label><input class="input" name="postalCode" value="${safe(u.postalCode || '')}"></div>
       <div class="field"><label>Ville</label><input class="input" name="city" value="${safe(u.city || '')}"></div>
-      <div class="field field-wide"><label>Carte professionnelle</label><input class="input" name="professionalCard" value="${safe(u.professionalCard || '')}" placeholder="CAR-..."></div>
       <div class="field"><label>Rôle</label><select class="select" name="role"><option ${u.role==='agent'?'selected':''}>agent</option><option ${u.role==='superviseur'?'selected':''}>superviseur</option><option ${u.role==='admin'?'selected':''}>admin</option></select></div>
       <div class="field"><label>Statut</label><select class="select" name="statut"><option ${u.statut==='actif'?'selected':''}>actif</option><option ${u.statut==='hors_poste'?'selected':''}>hors_poste</option><option ${u.statut==='désactivé'?'selected':''}>désactivé</option></select></div>
-    </div><button class="btn primary full" type="submit">${isEdit?'Enregistrer profil':'Créer compte et profil'}</button></form>`, 'wide');
+    </div></div>
+
+    <div class="invoice-form-section agent-card-form-section"><h3>Carte professionnelle employeur</h3>
+      <div class="agent-photo-editor"><div class="agent-photo-preview" id="agent-badge-photo-preview">${pendingBadgePhotoDataUrl?`<img src="${safe(pendingBadgePhotoDataUrl)}" alt="Photo agent">`:`<span>${safe(agentInitials(u))}</span>`}</div><div class="agent-photo-controls"><div class="field"><label>Photo agent</label><input class="input" id="badge-photo-file" type="file" accept="image/*" capture="user"></div><button class="btn small ghost" type="button" id="badge-photo-clear">Retirer la photo</button><p class="muted">Photo stockée dans la fiche agent, compressée pour rester compatible Firebase Spark.</p></div></div>
+      <div class="form-grid">
+        <div class="field"><label>Date de naissance</label><input class="input" type="date" name="birthDate" value="${safe(u.birthDate || '')}"></div>
+        <div class="field"><label>Lieu de naissance</label><input class="input" name="birthPlace" value="${safe(u.birthPlace || '')}" placeholder="Ville, pays"></div>
+        <div class="field"><label>NUB CNAPS</label><input class="input mono" name="nub" value="${safe(u.nub || '')}" placeholder="NUB / identifiant CNAPS"></div>
+        <div class="field"><label>N° carte professionnelle</label><input class="input mono" name="professionalCard" value="${safe(badgeProfessionalCard(u) === '—' ? '' : badgeProfessionalCard(u))}" placeholder="CAR-..."></div>
+        <div class="field"><label>Date de délivrance</label><input class="input" type="date" name="professionalCardIssueDate" value="${safe(u.professionalCardIssueDate || '')}"></div>
+        <div class="field"><label>Date d’expiration</label><input class="input" type="date" name="professionalCardExpiryDate" value="${safe(u.professionalCardExpiryDate || '')}"></div>
+        <div class="field"><label>N° badge interne</label><input class="input" name="badgeNumber" value="${safe(u.badgeNumber || '')}" placeholder="BADGE-001"></div>
+        <div class="field"><label>Dernière vérification CNAPS</label><input class="input" type="date" name="cnapsLastCheckDate" value="${safe(u.cnapsLastCheckDate || '')}"></div>
+        <div class="field span-2"><label>Activité(s) autorisée(s)</label><textarea class="textarea" name="authorizedActivities" rows="3" placeholder="Surveillance humaine, gardiennage, événementiel...">${safe(u.authorizedActivities || u.securityActivity || '')}</textarea></div>
+        <div class="field span-2"><label>Spécialité(s) / qualification(s)</label><textarea class="textarea" name="specialties" rows="3" placeholder="Agent événementiel, Agent de sécurité confirmé, SSIAP...">${safe(u.specialties || u.qualifications || '')}</textarea></div>
+        <div class="field"><label>Début contrat</label><input class="input" type="date" name="contractStartDate" value="${safe(u.contractStartDate || '')}"></div>
+        <div class="field"><label>Fin contrat</label><input class="input" type="date" name="contractEndDate" value="${safe(u.contractEndDate || '')}"></div>
+      </div>
+    </div>
+
+    <div class="invoice-form-section"><h3>Informations carte employeur</h3><div class="form-grid">
+      <div class="field"><label>Nom entreprise</label><input class="input" name="badgeCompanyName" value="${safe(c.name)}"></div>
+      <div class="field"><label>Téléphone entreprise</label><input class="input" name="badgeCompanyPhone" value="${safe(c.phone)}"></div>
+      <div class="field"><label>Adresse entreprise</label><input class="input" name="badgeCompanyAddress" value="${safe(c.address)}"></div>
+      <div class="field"><label>CP / Ville</label><input class="input" name="badgeCompanyPostalCity" value="${safe(c.postalCity)}"></div>
+      <div class="field span-2"><label>Autorisation d’exercice CNAPS entreprise</label><input class="input mono" name="badgeCompanyCnapsAuthorization" value="${safe(c.cnaps)}" placeholder="AUT-..."></div>
+      <div class="field span-2"><label>Mention carte</label><textarea class="textarea" name="badgeCompanyLegalNotice" rows="3">${safe(c.legalNotice)}</textarea></div>
+    </div></div>
+    <button class="btn primary full" type="submit">${isEdit?'Enregistrer profil et badge':'Créer compte et profil'}</button></form>`, 'wide');
+
+  const preview = document.querySelector('#agent-badge-photo-preview');
+  const refreshPreview = () => {
+    if (!preview) return;
+    preview.innerHTML = pendingBadgePhotoDataUrl ? `<img src="${safe(pendingBadgePhotoDataUrl)}" alt="Photo agent">` : `<span>${safe(agentInitials({prenom:document.querySelector('[name="prenom"]')?.value, nom:document.querySelector('[name="nom"]')?.value}))}</span>`;
+  };
+  document.querySelector('[name="prenom"]')?.addEventListener('input', refreshPreview);
+  document.querySelector('[name="nom"]')?.addEventListener('input', refreshPreview);
+  document.querySelector('#badge-photo-file')?.addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const photo = await compressBadgePhoto(file);
+      pendingBadgePhotoDataUrl = photo.dataUrl;
+      refreshPreview();
+      toast('Photo agent ajoutée au badge.', 'success');
+    } catch(error) {
+      console.error(error);
+      toast(userFriendlyError(error,'Photo impossible.'),'error');
+      e.target.value = '';
+    }
+  });
+  document.querySelector('#badge-photo-clear')?.addEventListener('click', () => { pendingBadgePhotoDataUrl=''; refreshPreview(); });
+
   document.querySelector('#agent-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = e.currentTarget;
@@ -2738,16 +2954,22 @@ function showAgentForm(u={}){
       await setDoc(docRef('users', uid), {
         uid, email,
         prenom:fd.get('prenom'), nom:fd.get('nom'), telephone:fd.get('telephone'), matricule:fd.get('matricule'),
-        address:fd.get('address'), postalCode:fd.get('postalCode'), city:fd.get('city'), professionalCard:fd.get('professionalCard'),
+        address:fd.get('address'), postalCode:fd.get('postalCode'), city:fd.get('city'),
+        birthDate:fd.get('birthDate'), birthPlace:fd.get('birthPlace'), nub:fd.get('nub'),
+        professionalCard:fd.get('professionalCard'), professionalCardNumber:fd.get('professionalCard'), professionalCardIssueDate:fd.get('professionalCardIssueDate'), professionalCardExpiryDate:fd.get('professionalCardExpiryDate'),
+        badgeNumber:fd.get('badgeNumber'), cnapsLastCheckDate:fd.get('cnapsLastCheckDate'), authorizedActivities:fd.get('authorizedActivities'), specialties:fd.get('specialties'), qualifications:fd.get('specialties'),
+        contractStartDate:fd.get('contractStartDate'), contractEndDate:fd.get('contractEndDate'), badgePhotoDataUrl:pendingBadgePhotoDataUrl,
+        badgeCompanyName:fd.get('badgeCompanyName'), badgeCompanyPhone:fd.get('badgeCompanyPhone'), badgeCompanyAddress:fd.get('badgeCompanyAddress'), badgeCompanyPostalCity:fd.get('badgeCompanyPostalCity'), badgeCompanyCnapsAuthorization:fd.get('badgeCompanyCnapsAuthorization'), badgeCompanyLegalNotice:fd.get('badgeCompanyLegalNotice'),
         role:fd.get('role'), statut:fd.get('statut'),
         isOnline:u.isOnline ?? false,
         siteActuel:u.siteActuel ?? null,
         siteActuelNom:u.siteActuelNom ?? null,
         updatedAt:serverTimestamp(), updatedBy:currentUser.uid,
+        badgeUpdatedAt:serverTimestamp(), badgeUpdatedBy:currentUser.uid,
         createdAt:u.createdAt || serverTimestamp(), createdBy:u.createdBy || currentUser.uid
       }, { merge:true });
-      await addAudit(isEdit?'user_profile_updated':'user_account_created', { uid, role:fd.get('role') });
-      closeModal(); toast(isEdit?'Profil enregistré':'Compte et profil créés', 'success');
+      await addAudit(isEdit?'user_profile_updated':'user_account_created', { uid, role:fd.get('role'), badgeConfigured:Boolean(fd.get('professionalCard') || pendingBadgePhotoDataUrl) });
+      closeModal(); toast(isEdit?'Profil et badge enregistrés':'Compte et profil créés', 'success');
     } catch(error) {
       console.error(error);
       toast(userFriendlyError(error, 'Création impossible. Vérifie les droits Firebase et les champs.'), 'error');
