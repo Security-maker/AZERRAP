@@ -3268,7 +3268,7 @@ function isoDateValue(value){
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI', invoice:'Facture'}[type] || type || 'Document'); }
-function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'' }; }
+function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'', photoUrl:r.photoUrl||'', photoAvailable:Boolean(r.photoAvailable||r.photoUrl), photoBytes:Number(r.photoBytes||0), photoMimeType:r.photoMimeType||'', photoWidth:Number(r.photoWidth||0), photoHeight:Number(r.photoHeight||0), photoCapturedAt:isoDateValue(r.photoCapturedAt)||null, gps:r.gps||null }; }
 function compactRound(r){ return { id:r.id||'', scannedAt:isoDateValue(r.scannedAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', checkpointName:r.checkpointName||'', scanMethod:r.scanMethod||'', isValid:r.isValid !== false }; }
 function compactAlert(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt || r.heure), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteActuel||r.siteId||'', siteNom:r.siteActuelNom||r.siteNom||'', typeAlerte:r.typeAlerte||'SOS/PTI', statut:r.statut||'', niveau:r.niveau||'', message:r.message||'', closeReason:r.closeReason||r.closureReason||'' }; }
 function compactMission(m){ return { id:m.id||'', agentId:m.agentId||'', agentNom:m.agentNom||'', siteId:m.siteId||'', siteNom:m.siteNom||'', type:m.type||'', instructions:m.instructions||'', status:m.status||'', scheduledStart:isoDateValue(m.scheduledStart), scheduledEnd:isoDateValue(m.scheduledEnd), actualStart:isoDateValue(m.actualStart), actualEnd:isoDateValue(m.actualEnd), conformityScore:m.conformityScore ?? null, roundsCount:m.roundsCount||0, incidentsCount:m.incidentsCount||0 }; }
@@ -4852,6 +4852,64 @@ function pdfDrawTable(doc, headers, rows, widths, y, rowMapper){
   });
   return y + 4;
 }
+
+function reportHasPhoto(report){
+  return Boolean(report?.photoUrl && String(report.photoUrl).startsWith('data:image/'));
+}
+function reportPhotoLabel(report){
+  return reportHasPhoto(report) ? 'Photo jointe' : '—';
+}
+function pdfImageFormat(dataUrl){
+  return String(dataUrl||'').startsWith('data:image/png') ? 'PNG' : 'JPEG';
+}
+function pdfPhotoMetaLines(report, index){
+  const gps = report?.gps;
+  const lat = Number(gps?.latitude ?? gps?.lat);
+  const lng = Number(gps?.longitude ?? gps?.lng);
+  const gpsText = Number.isFinite(lat) && Number.isFinite(lng) ? `${lat.toFixed(6)}, ${lng.toFixed(6)}` : 'Non renseigné';
+  return [
+    `Photo ${index + 1} · Rapport ${report?.id || '—'}`,
+    `Date et heure : ${dateText(report?.photoCapturedAt || report?.createdAt)}`,
+    `Agent : ${report?.agentNom || '—'} · Site : ${report?.siteNom || '—'}`,
+    `Catégorie : ${report?.category || '—'} · Gravité : ${report?.severity || '—'}`,
+    `GPS : ${gpsText}`
+  ];
+}
+function pdfDrawPhotoAnnexes(doc, reports){
+  const C = AZZERA_DOC_BRAND;
+  const photos = (reports||[]).filter(reportHasPhoto);
+  if(!photos.length) return;
+  photos.forEach((report,index)=>{
+    doc.addPage();
+    doc.setFillColor(...C.obsidian); doc.rect(0,0,210,30,'F');
+    pdfDrawLogo(doc,14,6,16,16);
+    doc.setTextColor(...C.white); doc.setFont('helvetica','bold'); doc.setFontSize(12);
+    doc.text('ANNEXES PHOTOGRAPHIQUES', 36, 14);
+    doc.setTextColor(...C.azure); doc.setFontSize(7.5);
+    doc.text(`PIÈCE ${index+1} / ${photos.length}`, 196, 14, {align:'right'});
+
+    const maxW=178, maxH=162, x=16, y=38;
+    let iw=Number(report.photoWidth||0), ih=Number(report.photoHeight||0);
+    if(!(iw>0 && ih>0)){ iw=4; ih=3; }
+    const ratio=Math.min(maxW/iw,maxH/ih);
+    const w=iw*ratio, h=ih*ratio;
+    const ix=x+(maxW-w)/2;
+    doc.setFillColor(245,248,251); doc.roundedRect(x,y,maxW,maxH,3,3,'F');
+    try { doc.addImage(report.photoUrl,pdfImageFormat(report.photoUrl),ix,y+(maxH-h)/2,w,h,undefined,'FAST'); }
+    catch(error){
+      console.error('Photo PDF impossible',error);
+      doc.setTextColor(...C.grey); doc.setFont('helvetica','normal'); doc.setFontSize(9);
+      doc.text('La photo n’a pas pu être incorporée au PDF.',105,y+maxH/2,{align:'center'});
+    }
+    let my=209;
+    doc.setTextColor(...C.obsidian); doc.setFont('helvetica','bold'); doc.setFontSize(10);
+    doc.text(`Rapport photographique n° ${report.id || index+1}`,16,my); my+=7;
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.2); doc.setTextColor(...C.grey);
+    pdfPhotoMetaLines(report,index).slice(1).forEach(line=>{ doc.text(pdfTextValue(line),16,my); my+=5; });
+    const message=doc.splitTextToSize(`Observation : ${report.message || '—'}`,178);
+    doc.text(message,16,my); 
+  });
+}
 function pdfDocumentTitle(d){ return pdfTextValue(d.title || documentTypeLabel(d.type)); }
 function pdfMissionPayload(d){ const p=d?.payload||{}; return { mission:p.mission||{}, shift:p.shift||{}, rows:p.rows||[] }; }
 function createGeneratedDocumentPdf(d){
@@ -4903,7 +4961,7 @@ function createGeneratedDocumentPdf(d){
     metaLines.forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
     y += 3;
     y = pdfSectionTitle(doc, 'Main courante de mission', y);
-    y = pdfDrawTable(doc, ['Heure','Agent','Catégorie','Gravité','Message'], missionRows, [31,34,27,24,66], y, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, r.message]);
+    y = pdfDrawTable(doc, ['Heure','Agent','Catégorie','Gravité','Photo','Message'], missionRows, [27,29,25,21,20,60], y, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message]);
     y = pdfSectionTitle(doc, 'Relève et signature', y);
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
     y = pdfWrapped(doc, `Signature agent : ${shift.signatureName || '—'}`, 18, y, 174, 5);
@@ -4969,16 +5027,24 @@ function createGeneratedDocumentPdf(d){
     generatedDocumentMeta(d).forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
     y += 3;
     y = pdfSectionTitle(doc, documentTypeLabel(d.type), y);
-    if(d.type === 'mci') y = pdfDrawTable(doc, ['Date','Agent','Site','Gravité','Message'], rows, [30,32,32,24,64], y, r=>[dateText(r.createdAt), r.agentNom, r.siteNom, r.severity || r.category, r.message]);
+    if(d.type === 'mci') y = pdfDrawTable(doc, ['Date','Agent','Site','Gravité','Photo','Message'], rows, [27,28,28,21,20,58], y, r=>[dateText(r.createdAt), r.agentNom, r.siteNom, r.severity || r.category, reportPhotoLabel(r), r.message]);
     else if(d.type === 'rounds') y = pdfDrawTable(doc, ['Date','Agent','Site','Point','État'], rows, [30,32,32,58,30], y, r=>[dateText(r.scannedAt), r.agentNom, r.siteNom, r.checkpointName, r.isValid === false ? 'Refusé' : 'Validé']);
     else y = pdfDrawTable(doc, ['Date','Agent','Site','Statut','Message'], rows, [30,32,32,24,64], y, r=>[dateText(r.createdAt), r.agentNom, r.siteNom, r.statut || r.niveau, r.message]);
   }
+  if(d.type === 'mission') pdfDrawPhotoAnnexes(doc, pdfMissionPayload(d).rows);
+  else if(d.type === 'mci') pdfDrawPhotoAnnexes(doc, rows);
   pdfAddFooter(doc);
   return doc;
 }
 function azzeraDocHtmlTable(headers, rows, mapper){
   const body = rows.map((r,i)=>`<tr>${mapper(r,i).map(c=>`<td>${safe(c)}</td>`).join('')}</tr>`).join('');
   return `<table><thead><tr>${headers.map(h=>`<th>${safe(h)}</th>`).join('')}</tr></thead><tbody>${body || `<tr><td colspan="${headers.length}">Aucune donnée.</td></tr>`}</tbody></table>`;
+}
+
+function photoAnnexesHtml(reports=[]){
+  const photos=reports.filter(reportHasPhoto);
+  if(!photos.length) return '';
+  return `<section class="azza-photo-annexes"><h3>Annexes photographiques</h3>${photos.map((r,i)=>`<article class="azza-photo-proof"><img src="${safe(r.photoUrl)}" alt="Photo du rapport ${i+1}"><div><strong>Photo ${i+1} · Rapport ${safe(r.id||'—')}</strong><p>${safe(dateText(r.photoCapturedAt||r.createdAt))} · ${safe(r.agentNom||'—')} · ${safe(r.siteNom||'—')}<br>${safe(r.category||'—')} · ${safe(r.severity||'—')}<br>${safe(r.message||'')}</p></div></article>`).join('')}</section>`;
 }
 function missionReportHtml({ mission, shift={}, reports=[] }){
   const logo = new URL('./assets/logo.png', location.href).href;
@@ -4988,7 +5054,7 @@ function missionReportHtml({ mission, shift={}, reports=[] }){
     ['Événements', shift.incidentsCount || mission.incidentsCount || 0],
     ['Conformité', (shift.conformityScore ?? mission.conformityScore ?? '—') + '%']
   ];
-  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Mission</span><strong>${safe(mission.id || '—')}</strong></div></section><section class="azza-text"><p><strong>Prévu :</strong> ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br><strong>Réalisé :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Catégorie','Gravité','Message'], reports, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, r.message])}</section><section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Mission</span><strong>${safe(mission.id || '—')}</strong></div></section><section class="azza-text"><p><strong>Prévu :</strong> ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br><strong>Réalisé :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Catégorie','Gravité','Photo','Message'], reports, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message])}</section>${photoAnnexesHtml(reports)}<section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
 }
 function generatedDocumentHtml(d){
   const p=d?.payload||{};
@@ -4997,8 +5063,8 @@ function generatedDocumentHtml(d){
   const logo=new URL('./assets/logo.png',location.href).href;
   const rows=generatedDocumentRows(d);
   let headers=[], mapper;
-  if(d.type==='mci'){ headers=['Date','Agent','Site','Catégorie','Gravité','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.category,r.severity,r.message]; }
+  if(d.type==='mci'){ headers=['Date','Agent','Site','Catégorie','Gravité','Photo','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.category,r.severity,reportPhotoLabel(r),r.message]; }
   else if(d.type==='rounds'){ headers=['Date','Agent','Site','Point','Méthode','Validité']; mapper=r=>[dateText(r.scannedAt),r.agentNom,r.siteNom,r.checkpointName,r.scanMethod,r.isValid?'Valide':'Refusé']; }
   else { headers=['Date','Agent','Site','Alerte','Statut','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.typeAlerte,r.statut,r.message]; }
-  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">${safe(pdfBrandDocType(d.type))}<br><small>${dateText(d.createdAt)}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Type</span><strong>${safe(documentTypeLabel(d.type))}</strong></div><div><span>Site</span><strong>${safe(d.siteNom||'Tous sites')}</strong></div><div><span>Volume</span><strong>${d.rowCount||rows.length} ligne(s)</strong></div></section>${p.truncated?'<section class="azza-warning">Aperçu limité aux 350 premières lignes. Le volume total reste enregistré.</section>':''}<section><h3>Contenu du document</h3>${azzeraDocHtmlTable(headers, rows, mapper)}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">${safe(pdfBrandDocType(d.type))}<br><small>${dateText(d.createdAt)}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Type</span><strong>${safe(documentTypeLabel(d.type))}</strong></div><div><span>Site</span><strong>${safe(d.siteNom||'Tous sites')}</strong></div><div><span>Volume</span><strong>${d.rowCount||rows.length} ligne(s)</strong></div></section>${p.truncated?'<section class="azza-warning">Aperçu limité aux 350 premières lignes. Le volume total reste enregistré.</section>':''}<section><h3>Contenu du document</h3>${azzeraDocHtmlTable(headers, rows, mapper)}</section>${d.type==='mci'?photoAnnexesHtml(rows):''}<footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
 }

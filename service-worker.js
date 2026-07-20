@@ -1,10 +1,10 @@
-const CACHE_NAME = 'sentinelle-pro-v5-7-3-mci-photo-firestore';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-3';
+const CACHE_NAME = 'sentinelle-pro-v5-7-4-pdf-photo-annexes';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-4';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=572',
-  './app.js?v=572',
+  './style.css?v=574',
+  './app.js?v=574',
   './push-init.js?v=565',
   './firebase-config.js',
   './manifest.json',
