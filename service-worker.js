@@ -1,10 +1,10 @@
-const CACHE_NAME = 'sentinelle-pro-v5-7-4-1-end-shift-mobile';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-4-1';
+const CACHE_NAME = 'sentinelle-pro-v5-7-5-monthly-planning';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-5';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=5741',
-  './app.js?v=5741',
+  './style.css?v=575',
+  './app.js?v=575',
   './push-init.js?v=565',
   './firebase-config.js',
   './manifest.json',

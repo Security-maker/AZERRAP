@@ -67,7 +67,7 @@ let qgAllSitesCache = [];
 let qgAllAgentsCache = [];
 let qgInvoicesCache = [];
 let billingProfileCache = null;
-let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14, status: '', density: 'comfort', collaboratorAgentId: '', collaboratorMonth: '' };
+let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14, status: '', density: 'comfort', collaboratorAgentId: '', collaboratorMonth: '', publications: new Map() };
 let pendingMissionSelectionId = null;
 let oneSignalInitialized = false;
 let oneSignalInitPromise = null;
@@ -588,7 +588,7 @@ async function getAgentPlannedMissions(){
   const snap = await getDocs(query(collectionRef('missions'), where('agentId','==',currentUser.uid))).catch(()=>({docs:[]}));
   const now = Date.now();
   return snap.docs.map(d => ({ id:d.id, ...d.data() }))
-    .filter(m => ['planned','assigned'].includes(m.status || 'planned') || ((m.scheduledEnd?.toDate?.()?.getTime() || 0) > now && m.status !== 'completed'))
+    .filter(m => !missionIsDraft(m) && (['planned','assigned'].includes(m.status || 'planned') || ((m.scheduledEnd?.toDate?.()?.getTime() || 0) > now && m.status !== 'completed')))
     .sort((a,b)=>(a.scheduledStart?.toDate?.()?.getTime() || 0) - (b.scheduledStart?.toDate?.()?.getTime() || 0));
 }
 function toLocalInputValue(value){
@@ -610,6 +610,7 @@ function missionStatusColor(status){
   return status === 'completed' ? 'green' : status === 'active' ? 'blue' : status === 'cancelled' ? 'red' : 'orange';
 }
 function missionIsLate(m){
+  if(missionIsDraft(m)) return false;
   const start = m.scheduledStart?.toDate?.()?.getTime();
   return start && Date.now() > start + 10*60*1000 && !['active','completed','cancelled'].includes(m.status);
 }
@@ -652,6 +653,33 @@ function hoursText(minutes){
   return m ? `${h} h ${String(m).padStart(2,'0')}` : `${h} h`;
 }
 function missionRevision(mission){ return Math.max(1, Number(mission?.planningRevision || 1)); }
+function missionIsDraft(mission){ return String(mission?.publicationStatus || '').toLowerCase() === 'draft'; }
+function planningMonthForValue(value){ const d=timestampToDate(value); return d?localMonthValue(d):localMonthValue(); }
+function planningPublicationDocId(monthValue){ return String(monthValue || localMonthValue()).replace(/[^0-9-]/g,''); }
+async function getMonthlyPlanningPublication(monthValue,{force=false}={}){
+  const key=planningPublicationDocId(monthValue);
+  if(!force&&qgPlanningState.publications.has(key)) return qgPlanningState.publications.get(key);
+  const snap=await getDoc(docRef('planningPublications',key)).catch(()=>null);
+  const value=snap?.exists?.()?{id:snap.id,...snap.data()}:{id:key,status:'individual',month:key,version:0};
+  qgPlanningState.publications.set(key,value);
+  return value;
+}
+async function batchUpdateMissionDocuments(rows,buildPayload){
+  for(let offset=0;offset<rows.length;offset+=400){
+    const batch=writeBatch(db);
+    rows.slice(offset,offset+400).forEach(row=>batch.update(docRef('missions',row.id),buildPayload(row)));
+    await batch.commit();
+  }
+}
+function monthlyPlanningSignature(missions){
+  const rows=(missions||[]).filter(m=>m.status!=='cancelled'&&!missionIsDraft(m)).slice().sort((a,b)=>String(a.id).localeCompare(String(b.id)));
+  const raw=rows.map(m=>`${m.id}:${missionRevision(m)}:${m.status||'planned'}`).join('|');
+  return `${rows.length}:${Math.abs(hashCode(raw))}`;
+}
+function planningAcknowledgementRef(agentId,monthValue){
+  return doc(db,'planningAcknowledgements',String(agentId),'months',planningPublicationDocId(monthValue));
+}
+
 function missionIsAcknowledged(mission){
   return Number(mission?.acknowledgedRevision || 0) >= missionRevision(mission) && !!mission?.acknowledgedAt;
 }
@@ -871,11 +899,12 @@ async function renderAgentPlanning(){
   const body=`<section class="card agent-planning-card">
     <div class="card-title"><div><h2>Mon planning</h2><p>Missions, horaires, consignes et prise de connaissance</p></div><button class="btn small" id="agent-planning-download">PDF mensuel</button></div>
     <div class="agent-planning-toolbar"><div class="segmented"><button class="active" data-agent-plan-view="list">Liste</button><button data-agent-plan-view="month">Mois</button></div><div class="field compact-field"><label>Mois</label><input class="input" id="agent-planning-month" type="month" value="${monthValue}"></div></div>
+    <div id="agent-monthly-ack" class="agent-monthly-ack"></div>
     <div id="agent-planning-summary" class="mission-kpis"></div>
     <div id="agent-planning-content"><div class="empty">Chargement du planning...</div></div>
   </section>`;
   render(page('Mon planning','Uniquement tes missions personnelles',body));
-  const state={missions:[],sitesById:new Map(),view:'list',month:monthValue};
+  const state={missions:[],sitesById:new Map(),view:'list',month:monthValue,monthlyAck:null};
   const sitesSnap=await getDocs(collectionRef('sites')).catch(()=>({docs:[]}));
   state.sitesById=new Map(sitesSnap.docs.map(d=>[d.id,{id:d.id,...d.data()}]));
   const redraw=()=>{
@@ -890,13 +919,51 @@ async function renderAgentPlanning(){
     const box=document.querySelector('#agent-planning-content');
     if(box) box.innerHTML=state.view==='month'?agentPlanningCalendarHtml(state.missions,state.sitesById,state.month):agentPlanningListHtml(state.missions,state.sitesById,state.month);
     bindAgentPlanningActions(state);
+    renderAgentMonthlyAcknowledgement(state);
   };
   document.querySelectorAll('[data-agent-plan-view]').forEach(btn=>btn.addEventListener('click',()=>{state.view=btn.dataset.agentPlanView;document.querySelectorAll('[data-agent-plan-view]').forEach(b=>b.classList.toggle('active',b===btn));redraw();}));
-  document.querySelector('#agent-planning-month')?.addEventListener('change',e=>{state.month=e.target.value||localMonthValue();redraw();});
+  document.querySelector('#agent-planning-month')?.addEventListener('change',async e=>{state.month=e.target.value||localMonthValue();state.monthlyAck=null;redraw();await loadAgentMonthlyAcknowledgement(state);});
   document.querySelector('#agent-planning-download')?.addEventListener('click',()=>downloadCollaboratorPlanningPdf(currentUser.uid,state.month,{agentView:true}));
   const q=query(collectionRef('missions'),where('agentId','==',currentUser.uid));
-  unsubscribeList.push(onSnapshot(q,snap=>{state.missions=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));redraw();},()=>{const box=document.querySelector('#agent-planning-content');if(box)box.innerHTML='<div class="empty error">Planning indisponible.</div>';}));
+  unsubscribeList.push(onSnapshot(q,async snap=>{state.missions=snap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>!missionIsDraft(m)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));redraw();await loadAgentMonthlyAcknowledgement(state);},()=>{const box=document.querySelector('#agent-planning-content');if(box)box.innerHTML='<div class="empty error">Planning indisponible.</div>';}));
 }
+async function loadAgentMonthlyAcknowledgement(state){
+  if(!currentUser?.uid||!state?.month) return;
+  const snap=await getDoc(planningAcknowledgementRef(currentUser.uid,state.month)).catch(()=>null);
+  state.monthlyAck=snap?.exists?.()?{id:snap.id,...snap.data()}:null;
+  renderAgentMonthlyAcknowledgement(state);
+}
+function renderAgentMonthlyAcknowledgement(state){
+  const box=document.querySelector('#agent-monthly-ack');
+  if(!box) return;
+  const range=monthRange(state.month);
+  const missions=state.missions.filter(m=>m.monthlyPlanning===true&&m.status!=='cancelled'&&missionOverlapsRange(m,range.start,range.end));
+  if(!missions.length){box.innerHTML='';return;}
+  const signature=monthlyPlanningSignature(missions);
+  const confirmed=state.monthlyAck?.signature===signature;
+  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  if(confirmed){
+    box.innerHTML=`<div class="agent-monthly-ack-copy"><span class="pill green">Planning confirmé</span><div><strong>${safe(label)}</strong><p>Prise de connaissance enregistrée le ${safe(dateText(state.monthlyAck.confirmedAt))}.</p></div></div>`;
+    return;
+  }
+  box.innerHTML=`<div class="agent-monthly-ack-copy"><span class="pill orange">À confirmer</span><div><strong>${safe(label)} · ${missions.length} mission${missions.length>1?'s':''}</strong><p>Consulte les horaires et les consignes, puis confirme la prise de connaissance du mois.</p></div></div><button class="btn success" id="agent-confirm-monthly-planning">J’ai pris connaissance du planning</button>`;
+  document.querySelector('#agent-confirm-monthly-planning')?.addEventListener('click',()=>acknowledgeMonthlyPlanning(state));
+}
+async function acknowledgeMonthlyPlanning(state){
+  const range=monthRange(state.month);
+  const missions=state.missions.filter(m=>m.monthlyPlanning===true&&m.status!=='cancelled'&&missionOverlapsRange(m,range.start,range.end));
+  if(!missions.length) return toast('Aucune mission à confirmer.','warning');
+  const button=document.querySelector('#agent-confirm-monthly-planning'); if(button) button.disabled=true;
+  try{
+    await batchUpdateMissionDocuments(missions,m=>({acknowledgedAt:serverTimestamp(),acknowledgedBy:currentUser.uid,acknowledgedRevision:missionRevision(m),updatedAt:serverTimestamp(),updatedBy:currentUser.uid}));
+    const signature=monthlyPlanningSignature(missions);
+    await setDoc(planningAcknowledgementRef(currentUser.uid,state.month),{agentId:currentUser.uid,month:state.month,signature,missionCount:missions.length,confirmedAt:serverTimestamp(),updatedAt:serverTimestamp()},{merge:true});
+    await addAudit('monthly_planning_acknowledged',{month:state.month,missionCount:missions.length,signature});
+    toast('Prise de connaissance du planning enregistrée.','success');
+    await loadAgentMonthlyAcknowledgement(state);
+  }catch(error){console.error(error);toast(userFriendlyError(error,'Confirmation du planning impossible.'),'error');if(button)button.disabled=false;}
+}
+
 function bindAgentPlanningActions(state){
   document.querySelectorAll('[data-agent-mission-open]').forEach(btn=>btn.addEventListener('click',()=>{const m=state.missions.find(x=>x.id===btn.dataset.agentMissionOpen);if(m)openAgentMissionDetail(m,state.sitesById);}));
   document.querySelectorAll('[data-agent-mission-ack]').forEach(btn=>btn.addEventListener('click',async()=>{const m=state.missions.find(x=>x.id===btn.dataset.agentMissionAck);if(m)await acknowledgeAgentMission(m);}));
@@ -1610,6 +1677,7 @@ async function showQGDashboardDetail(type){
       const today = new Date(); today.setHours(0,0,0,0);
       const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
       const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => {
+        if(missionIsDraft(row)) return false;
         const start = timestampToDate(row.scheduledStart)?.getTime() || 0;
         const end = timestampToDate(row.scheduledEnd)?.getTime() || start;
         return start < tomorrow.getTime() && end >= today.getTime();
@@ -1700,7 +1768,7 @@ function listenQGStats(){
     const today = new Date(); today.setHours(0,0,0,0);
     const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
     const rows = snap.docs.map(d=>d.data());
-    setText('#stat-missions', rows.filter(m => { const start=timestampToDate(m.scheduledStart)?.getTime() || 0; const end=timestampToDate(m.scheduledEnd)?.getTime() || start; return start<tomorrow.getTime() && end>=today.getTime(); }).length);
+    setText('#stat-missions', rows.filter(m => { const start=timestampToDate(m.scheduledStart)?.getTime() || 0; const end=timestampToDate(m.scheduledEnd)?.getTime() || start; return !missionIsDraft(m) && start<tomorrow.getTime() && end>=today.getTime(); }).length);
   }, () => setText('#stat-missions', '0')));
 }
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
@@ -1813,7 +1881,7 @@ function listenQGMissionsPreview(){
   const box = document.querySelector('#qg-missions-preview'); if (!box) return;
   const q = query(collectionRef('missions'), orderBy('scheduledStart','asc'), limit(8));
   unsubscribeList.push(onSnapshot(q, snap => {
-    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m => !['completed','cancelled'].includes(m.status));
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m => !missionIsDraft(m) && !['completed','cancelled'].includes(m.status));
     box.innerHTML = rows.length ? rows.slice(0,5).map(missionItem).join('') : `<div class="empty">Aucune mission à venir.</div>`;
   }, () => box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les règles/index Firebase.</div>`));
 }
@@ -1849,8 +1917,9 @@ async function renderQGMissions(){
     <div id="planning-board" class="planning-board"><div class="empty">Chargement du planning...</div></div>
   </section>
   <section class="card collaborator-planning-card" style="margin-top:16px">
-    <div class="card-title"><div><h2>Planning mensuel collaborateur</h2><p>Édition individuelle inspirée du planning papier : sites, vacations, totaux journaliers et PDF</p></div><div class="btn-row"><button class="btn small" id="collaborator-planning-print">Télécharger PDF</button></div></div>
+    <div class="card-title"><div><h2>Planning mensuel collaborateur</h2><p>Prépare le mois sans alerter les agents, puis publie-le en une seule fois.</p></div><div class="btn-row"><button class="btn small" id="collaborator-planning-print">Télécharger PDF</button></div></div>
     <div class="collaborator-toolbar"><div class="field"><label>Collaborateur</label><select class="select" id="collaborator-planning-agent"><option value="">Choisir un agent</option></select></div><div class="field"><label>Mois</label><input class="input" id="collaborator-planning-month" type="month" value="${localMonthValue(today)}"></div><button class="btn primary" id="collaborator-planning-add">+ Ajouter une vacation</button></div>
+    <div id="monthly-publication-panel" class="monthly-publication-panel"><div class="empty">Chargement du statut mensuel...</div></div>
     <div id="collaborator-planning-summary" class="mission-kpis"></div>
     <div id="collaborator-planning-board" class="collaborator-board"><div class="empty">Choisis un collaborateur.</div></div>
   </section>`;
@@ -1888,6 +1957,7 @@ async function renderQGMissions(){
   listenMissionsList('#missions-live');
   listenPlanningBoard();
   renderCollaboratorPlanning();
+  refreshMonthlyPublicationPanel();
 }
 
 function bindPlanningControls(){
@@ -1912,9 +1982,97 @@ function bindPlanningControls(){
   document.querySelector('#planning-quick-create')?.addEventListener('click', () => openPlanningQuickMissionModal({}));
 }
 
+async function refreshMonthlyPublicationPanel(){
+  const box=document.querySelector('#monthly-publication-panel');
+  if(!box) return;
+  const month=qgPlanningState.collaboratorMonth||document.querySelector('#collaborator-planning-month')?.value||localMonthValue();
+  box.innerHTML='<div class="empty">Chargement du statut mensuel...</div>';
+  const publication=await getMonthlyPlanningPublication(month,{force:true});
+  const range=monthRange(month);
+  const monthMissions=qgPlanningState.missions.filter(m=>planningMonthForValue(m.scheduledStart)===month&&!['completed'].includes(m.status));
+  const draftRows=monthMissions.filter(m=>missionIsDraft(m));
+  const publishedRows=monthMissions.filter(m=>!missionIsDraft(m));
+  const confirmationMissions=monthMissions.filter(m=>m.monthlyPlanning===true&&!missionIsDraft(m)&&m.status!=='cancelled');
+  const agents=new Set((publication.status==='published'?confirmationMissions:monthMissions.filter(m=>m.status!=='cancelled')).map(m=>m.agentId).filter(Boolean));
+  let confirmedCount=0;
+  if(publication.status==='published'&&agents.size){
+    const checks=await Promise.all([...agents].map(async agentId=>{
+      const snap=await getDoc(planningAcknowledgementRef(agentId,month)).catch(()=>null);
+      const ack=snap?.exists?.()?snap.data():null;
+      const signature=monthlyPlanningSignature(confirmationMissions.filter(m=>m.agentId===agentId));
+      return !!ack&&ack.signature===signature;
+    }));
+    confirmedCount=checks.filter(Boolean).length;
+  }
+  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  if(publication.status==='draft'){
+    box.innerHTML=`<div class="monthly-publication-copy"><span class="planning-publication-badge draft">Brouillon</span><div><strong>${safe(label)} en préparation</strong><p>${draftRows.length} vacation${draftRows.length>1?'s':''} masquée${draftRows.length>1?'s':''} aux agents · aucune notification envoyée.</p></div></div><div class="monthly-publication-stats"><span><strong>${draftRows.length}</strong> brouillons</span><span><strong>${agents.size}</strong> agents concernés</span></div><button class="btn success" id="publish-monthly-planning">Valider et publier le mois</button>`;
+    document.querySelector('#publish-monthly-planning')?.addEventListener('click',()=>publishMonthlyPlanning(month));
+    return;
+  }
+  if(publication.status==='published'){
+    box.innerHTML=`<div class="monthly-publication-copy"><span class="planning-publication-badge published">Publié</span><div><strong>${safe(label)} publié</strong><p>Publié le ${safe(dateText(publication.publishedAt))}. Les nouvelles modifications sont notifiées uniquement aux agents concernés.</p></div></div><div class="monthly-publication-stats"><span><strong>${publishedRows.length}</strong> vacations visibles</span><span><strong>${agents.size}</strong> agents concernés</span><span><strong>${confirmedCount}/${agents.size}</strong> confirmations</span></div><button class="btn" id="view-monthly-confirmations">Voir les confirmations</button>`;
+    document.querySelector('#view-monthly-confirmations')?.addEventListener('click',()=>showMonthlyPlanningConfirmations(month));
+    return;
+  }
+  box.innerHTML=`<div class="monthly-publication-copy"><span class="planning-publication-badge individual">Mode normal</span><div><strong>${safe(label)} n’est pas en préparation</strong><p>Une mission créée maintenant notifiera immédiatement l’agent. Active le brouillon pour construire tout le mois sans alerte.</p></div></div><div class="monthly-publication-stats"><span><strong>${monthMissions.length}</strong> vacations existantes</span><span><strong>${agents.size}</strong> agents concernés</span></div><button class="btn primary" id="start-monthly-planning">Préparer ce mois en brouillon</button>`;
+  document.querySelector('#start-monthly-planning')?.addEventListener('click',()=>startMonthlyPlanningDraft(month));
+}
+async function showMonthlyPlanningConfirmations(month){
+  const range=monthRange(month);
+  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  const missions=qgPlanningState.missions.filter(m=>planningMonthForValue(m.scheduledStart)===month&&m.monthlyPlanning===true&&m.status!=='cancelled'&&!missionIsDraft(m));
+  const agentIds=[...new Set(missions.map(m=>m.agentId).filter(Boolean))];
+  if(!agentIds.length) return toast('Aucun agent concerné sur ce mois.','warning');
+  const rows=await Promise.all(agentIds.map(async agentId=>{
+    const agent=qgPlanningState.agents.find(a=>a.id===agentId)||{};
+    const agentMissions=missions.filter(m=>m.agentId===agentId);
+    const signature=monthlyPlanningSignature(agentMissions);
+    const snap=await getDoc(planningAcknowledgementRef(agentId,month)).catch(()=>null);
+    const ack=snap?.exists?.()?snap.data():null;
+    return {agentId,name:`${agent.prenom||''} ${agent.nom||''}`.trim()||agent.email||agentId,missionCount:agentMissions.length,confirmed:ack?.signature===signature,confirmedAt:ack?.confirmedAt};
+  }));
+  showModal(`Confirmations · ${label}`,`<div class="list">${rows.sort((a,b)=>Number(a.confirmed)-Number(b.confirmed)||a.name.localeCompare(b.name,'fr')).map(row=>`<div class="item"><div class="item-main"><div class="item-title">${safe(row.name)} <span class="pill ${row.confirmed?'green':'orange'}">${row.confirmed?'Confirmé':'En attente'}</span></div><div class="item-meta">${row.missionCount} mission${row.missionCount>1?'s':''}${row.confirmedAt?` · confirmation ${safe(dateText(row.confirmedAt))}`:''}</div></div></div>`).join('')}</div>`,'wide');
+}
+
+async function startMonthlyPlanningDraft(month){
+  const range=monthRange(month);
+  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  if(!confirm(`Préparer ${label} en brouillon ? Les vacations planifiées de ce mois seront temporairement masquées aux agents jusqu’à la publication.`)) return;
+  const rows=qgPlanningState.missions.filter(m=>planningMonthForValue(m.scheduledStart)===month&&['planned','assigned'].includes(m.status||'planned'));
+  try{
+    await setDoc(docRef('planningPublications',planningPublicationDocId(month)),{month,status:'draft',version:Math.max(1,Number((await getMonthlyPlanningPublication(month,{force:true}))?.version||0)+1),startedAt:serverTimestamp(),startedBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid},{merge:true});
+    await batchUpdateMissionDocuments(rows,row=>({publicationStatus:'draft',planningMonth:month,monthlyPlanning:true,planningRevision:missionRevision(row)+1,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,updatedAt:serverTimestamp(),updatedBy:currentUser.uid}));
+    qgPlanningState.publications.delete(month);
+    await addAudit('monthly_planning_draft_started',{month,missionCount:rows.length});
+    toast(`${label} est maintenant en brouillon. Aucune notification ne sera envoyée.`, 'success');
+    refreshMonthlyPublicationPanel();
+  }catch(error){console.error(error);toast(userFriendlyError(error,'Impossible d’activer le brouillon mensuel.'),'error');}
+}
+async function publishMonthlyPlanning(month){
+  const range=monthRange(month);
+  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  const rows=qgPlanningState.missions.filter(m=>planningMonthForValue(m.scheduledStart)===month&&missionIsDraft(m)&&m.status!=='cancelled');
+  if(!rows.length) return toast('Aucune vacation brouillon à publier.','warning');
+  const agentIds=[...new Set(rows.map(m=>m.agentId).filter(Boolean))];
+  if(!confirm(`Publier le planning de ${label} ? ${agentIds.length} agent${agentIds.length>1?'s':''} recevra${agentIds.length>1?'ont':''} une seule notification.`)) return;
+  try{
+    const publication=await getMonthlyPlanningPublication(month,{force:true});
+    const version=Math.max(1,Number(publication?.version||1));
+    await batchUpdateMissionDocuments(rows,row=>({publicationStatus:'published',planningMonth:month,monthlyPlanning:true,planningPublicationVersion:version,publishedAt:serverTimestamp(),publishedBy:currentUser.uid,planningRevision:missionRevision(row),acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,updatedAt:serverTimestamp(),updatedBy:currentUser.uid}));
+    await setDoc(docRef('planningPublications',planningPublicationDocId(month)),{month,status:'published',version,missionCount:rows.length,agentCount:agentIds.length,publishedAt:serverTimestamp(),publishedBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid},{merge:true});
+    const pushResult=await spNotifyMonthlyPlanningPublished({agentIds,monthValue:month,missionCount:rows.length});
+    await addAudit('monthly_planning_published',{month,missionCount:rows.length,agentCount:agentIds.length,pushStatus:pushResult?.ok?'sent':pushResult?.reason||pushResult?.error||'skipped'});
+    qgPlanningState.publications.delete(month);
+    toast(`Planning de ${label} publié. Une notification unique a été envoyée aux agents concernés.`, 'success');
+    if(!pushResult?.ok) toast(`Planning publié, mais notification non envoyée : ${pushResult?.reason||pushResult?.error||'aucun appareil abonné'}.`,'warning');
+    refreshMonthlyPublicationPanel();
+  }catch(error){console.error(error);toast(userFriendlyError(error,'Publication mensuelle impossible.'),'error');}
+}
+
 function bindCollaboratorPlanningControls(){
   document.querySelector('#collaborator-planning-agent')?.addEventListener('change',e=>{qgPlanningState.collaboratorAgentId=e.target.value||'';renderCollaboratorPlanning();});
-  document.querySelector('#collaborator-planning-month')?.addEventListener('change',e=>{qgPlanningState.collaboratorMonth=e.target.value||localMonthValue();renderCollaboratorPlanning();});
+  document.querySelector('#collaborator-planning-month')?.addEventListener('change',e=>{qgPlanningState.collaboratorMonth=e.target.value||localMonthValue();renderCollaboratorPlanning();refreshMonthlyPublicationPanel();});
   document.querySelector('#collaborator-planning-add')?.addEventListener('click',()=>{
     if(!qgPlanningState.collaboratorAgentId) return toast('Choisis d’abord un collaborateur.','warning');
     const range=monthRange(qgPlanningState.collaboratorMonth||localMonthValue());
@@ -1970,7 +2128,7 @@ function collaboratorCellHtml(site,day,missions,agent){
   const segments=missions.filter(m=>m.siteId===site.id&&missionOverlapsRange(m,dayStart,dayEnd)).flatMap(m=>missionSegmentsByDay(m,dayStart,dayEnd));
   const chips=segments.map(seg=>{
     const m=seg.mission; const ack=missionIsAcknowledged(m);
-    return `<button class="collaborator-shift ${m.status==='cancelled'?'cancelled':''}" data-mission-open="${safe(m.id)}" title="${safe(m.siteNom||site.name)} · ${safe(m.agentNom||'')}" style="--mission-color:${normalizeHexColor(m.siteColor)||planningColorForSite(site.id)}"><strong>${safe(timeOnlyText(seg.start))}</strong><span>${safe(timeOnlyText(seg.end))}${seg.end.getDate()!==seg.start.getDate()?' +1':''}</span>${!ack&&m.status!=='cancelled'?'<i title="Non confirmée"></i>':''}</button>`;
+    return `<button class="collaborator-shift ${m.status==='cancelled'?'cancelled':''} ${missionIsDraft(m)?'planning-draft':''}" data-mission-open="${safe(m.id)}" title="${safe(m.siteNom||site.name)} · ${safe(m.agentNom||'')}" style="--mission-color:${normalizeHexColor(m.siteColor)||planningColorForSite(site.id)}"><strong>${safe(timeOnlyText(seg.start))}</strong><span>${safe(timeOnlyText(seg.end))}${seg.end.getDate()!==seg.start.getDate()?' +1':''}</span>${!ack&&m.status!=='cancelled'?'<i title="Non confirmée"></i>':''}</button>`;
   }).join('');
   return `<div class="collaborator-cell ${isToday(date)?'today':''}"><button class="collaborator-cell-add" data-collab-cell="1" data-agent-id="${safe(agent.id)}" data-site-id="${safe(site.id)}" data-date="${date.toISOString().slice(0,10)}" title="Ajouter une vacation">+</button>${chips}</div>`;
 }
@@ -2041,36 +2199,36 @@ async function createMissionFromForm(fd, options={}){
   const proposed = Array.from({length:repeatCount},(_,i)=>({start:addDays(scheduledStart.toDate(),i*interval),end:addDays(scheduledEnd.toDate(),i*interval)}));
   const conflicts = proposed.flatMap(period=>missionConflicts(agent.id,period.start,period.end));
   if (conflicts.length && !confirm(`${conflicts.length} conflit(s) de planning détecté(s) pour cet agent. Enregistrer quand même ?`)) return { ok:false };
-  const created = [];
+  const created = [], publishedCreated=[];
+  const publicationByMonth=new Map();
   for (let i=0; i<repeatCount; i++){
     const startDate = addDays(scheduledStart.toDate(), i * interval);
     const endDate = addDays(scheduledEnd.toDate(), i * interval);
+    const month=localMonthValue(startDate);
+    if(!publicationByMonth.has(month)) publicationByMonth.set(month,await getMonthlyPlanningPublication(month));
+    const isDraft=publicationByMonth.get(month)?.status==='draft';
     const docPayload = {
-      agentId: agent.id,
-      agentNom:`${agent.prenom||''} ${agent.nom||''}`.trim(),
-      siteId: site.id,
-      siteNom:site.name,
-      siteColor: normalizeHexColor(site.planningColor) || planningColorForSite(site.id),
-      hourlyRate: Number(site.hourlyRate || 0),
-      scheduledStart: Timestamp.fromDate(startDate),
-      scheduledEnd: Timestamp.fromDate(endDate),
-      type:fd.get('type') || 'Surveillance',
-      instructions:fd.get('instructions') || '',
-      status:'planned',
-      planningRevision:1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0,
-      seriesId,
-      repeatMode: repeatMode === 'none' ? null : repeatMode,
+      agentId: agent.id, agentNom:`${agent.prenom||''} ${agent.nom||''}`.trim(), siteId: site.id, siteNom:site.name,
+      siteColor: normalizeHexColor(site.planningColor) || planningColorForSite(site.id), hourlyRate: Number(site.hourlyRate || 0),
+      scheduledStart: Timestamp.fromDate(startDate), scheduledEnd: Timestamp.fromDate(endDate), type:fd.get('type') || 'Surveillance', instructions:fd.get('instructions') || '', status:'planned',
+      planningRevision:1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, seriesId, repeatMode: repeatMode === 'none' ? null : repeatMode,
+      planningMonth:month, publicationStatus:isDraft?'draft':'published', monthlyPlanning:isDraft,
       createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
     };
-    created.push(await addDoc(collectionRef('missions'), docPayload));
+    const ref=await addDoc(collectionRef('missions'), docPayload);
+    created.push(ref); if(!isDraft) publishedCreated.push({ref,start:docPayload.scheduledStart,end:docPayload.scheduledEnd});
   }
-  const finalStart = Timestamp.fromDate(addDays(scheduledStart.toDate(), (repeatCount - 1) * interval));
-  const finalEnd = Timestamp.fromDate(addDays(scheduledEnd.toDate(), (repeatCount - 1) * interval));
-  const planningPush = await spNotifyMissionCreated({ agentId:agent.id, siteName:site.name, start:scheduledStart, end:repeatCount > 1 ? finalEnd : scheduledEnd, count:repeatCount, missionId:created[0]?.id || '' });
-  await addAudit(repeatCount > 1 ? 'missions_series_created' : 'mission_created', { siteId:site.id, agentId:agent.id, count:repeatCount, repeatMode, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
-  toast(repeatCount > 1 ? `${repeatCount} missions planifiées` : 'Mission planifiée', 'success');
-  if (!planningPush?.ok) toast(`Planning enregistré, mais notification non envoyée : ${planningPush?.reason || planningPush?.error || 'aucun appareil abonné'}.`, 'warning');
-  return { ok:true, created, push:planningPush };
+  let planningPush={ok:false,skipped:true,reason:'Missions conservées en brouillon mensuel'};
+  if(publishedCreated.length){
+    planningPush = await spNotifyMissionCreated({ agentId:agent.id, siteName:site.name, start:publishedCreated[0].start, end:publishedCreated.at(-1).end, count:publishedCreated.length, missionId:publishedCreated[0].ref.id });
+  }
+  const draftCount=created.length-publishedCreated.length;
+  await addAudit(repeatCount > 1 ? 'missions_series_created' : 'mission_created', { siteId:site.id, agentId:agent.id, count:repeatCount, draftCount, repeatMode, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
+  if(draftCount===created.length) toast(repeatCount>1?`${repeatCount} missions ajoutées au brouillon mensuel`:'Mission ajoutée au brouillon mensuel','success');
+  else toast(repeatCount > 1 ? `${repeatCount} missions planifiées` : 'Mission planifiée', 'success');
+  if(publishedCreated.length&&!planningPush?.ok) toast(`Planning enregistré, mais notification non envoyée : ${planningPush?.reason || planningPush?.error || 'aucun appareil abonné'}.`, 'warning');
+  refreshMonthlyPublicationPanel();
+  return { ok:true, created, push:planningPush, draftCount };
 }
 function openPlanningQuickMissionModal({ resourceId='', date=null, forceMode='', siteId='' }={}){
   const mode = forceMode || qgPlanningState.mode || 'sites';
@@ -2127,7 +2285,7 @@ function openPlanningMissionModal(missionId){
   document.querySelector('#mission-detail-cancel')?.addEventListener('click', async () => {
     if (!confirm('Annuler cette mission ?')) return;
     await updateDoc(docRef('missions', m.id), { status:'cancelled', planningRevision:missionRevision(m)+1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
-    const cancelPush = await spNotifyMissionCancelled(m);
+    const cancelPush = missionIsDraft(m) ? {ok:false,skipped:true,reason:'Mission en brouillon'} : await spNotifyMissionCancelled(m);
     await addAudit('mission_cancelled', { missionId:m.id, pushStatus:cancelPush?.ok?'sent':cancelPush?.reason||cancelPush?.error||'skipped' });
     closeModal(); toast('Mission annulée', 'warning');
   });
@@ -2145,12 +2303,12 @@ function openPlanningMissionEditModal(m){
   const types=['Surveillance','Ronde','Gardiennage','Événementiel','Levée de doute','Astreinte intervention'];
   const statuses=[['planned','Planifiée'],['active','En cours'],['completed','Terminée'],['cancelled','Annulée']];
   showModal('Modifier la vacation',`<form id="planning-edit-form">
-    <div class="setup-box">Toute modification réinitialise la prise de connaissance et envoie une notification à l’agent concerné.</div>
+    <div class="setup-box">En brouillon mensuel, la modification reste silencieuse. Après publication, seul l’agent concerné est notifié.</div>
     <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" required>${agentOptions}</select></div><div class="field"><label>Site</label><select class="select" name="siteId" required>${siteOptions}</select></div></div>
     <div class="form-grid"><div class="field"><label>Début prévu</label><input class="input" type="datetime-local" name="scheduledStart" value="${toLocalInputValue(m.scheduledStart)}" required></div><div class="field"><label>Fin prévue</label><input class="input" type="datetime-local" name="scheduledEnd" value="${toLocalInputValue(m.scheduledEnd)}" required></div></div>
     <div class="form-grid"><div class="field"><label>Type</label><select class="select" name="type">${types.map(t=>`<option ${t===(m.type||'Surveillance')?'selected':''}>${safe(t)}</option>`).join('')}</select></div><div class="field"><label>Statut</label><select class="select" name="status">${statuses.map(([v,l])=>`<option value="${v}" ${v===(m.status||'planned')?'selected':''}>${l}</option>`).join('')}</select></div></div>
     <div class="field"><label>Consignes</label><textarea class="textarea" name="instructions">${safe(m.instructions||'')}</textarea></div>
-    <button class="btn primary full" type="submit">Enregistrer et notifier l’agent</button>
+    <button class="btn primary full" type="submit">Enregistrer la vacation</button>
   </form>`,'wide');
   document.querySelector('#planning-edit-form')?.addEventListener('submit',async e=>{
     e.preventDefault();
@@ -2166,15 +2324,21 @@ function openPlanningMissionEditModal(m){
     try{
       const oldAgentId=m.agentId;
       const revision=missionRevision(m)+1;
-      const payload={agentId:agent.id,agentNom:`${agent.prenom||''} ${agent.nom||''}`.trim(),siteId:site.id,siteNom:site.name,siteColor:normalizeHexColor(site.planningColor)||planningColorForSite(site.id),hourlyRate:Number(site.hourlyRate||0),scheduledStart:start,scheduledEnd:end,type:fd.get('type')||'Surveillance',status:fd.get('status')||'planned',instructions:fd.get('instructions')||'',planningRevision:revision,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,updatedAt:serverTimestamp(),updatedBy:currentUser.uid};
+      const targetMonth=planningMonthForValue(start);
+      const publication=await getMonthlyPlanningPublication(targetMonth);
+      const isDraft=publication?.status==='draft';
+      const payload={agentId:agent.id,agentNom:`${agent.prenom||''} ${agent.nom||''}`.trim(),siteId:site.id,siteNom:site.name,siteColor:normalizeHexColor(site.planningColor)||planningColorForSite(site.id),hourlyRate:Number(site.hourlyRate||0),scheduledStart:start,scheduledEnd:end,type:fd.get('type')||'Surveillance',status:fd.get('status')||'planned',instructions:fd.get('instructions')||'',planningMonth:targetMonth,publicationStatus:isDraft?'draft':'published',monthlyPlanning:isDraft||(m.monthlyPlanning===true&&planningMonthForValue(m.scheduledStart)===targetMonth),planningRevision:revision,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,updatedAt:serverTimestamp(),updatedBy:currentUser.uid};
       await updateDoc(docRef('missions',m.id),payload);
-      let pushResult;
-      if(oldAgentId&&oldAgentId!==agent.id){
-        await spNotifyMissionCancelled({...m,agentId:oldAgentId});
-        pushResult=await spNotifyMissionCreated({agentId:agent.id,siteName:site.name,start,end,count:1,missionId:m.id});
-      }else pushResult=await spNotifyMissionUpdated({...m,...payload,id:m.id});
-      await addAudit('mission_updated',{missionId:m.id,oldAgentId,newAgentId:agent.id,revision,pushStatus:pushResult?.ok?'sent':pushResult?.reason||pushResult?.error||'skipped'});
-      closeModal();toast('Vacation modifiée et agent notifié.','success');
+      let pushResult={ok:false,skipped:true,reason:'Modification conservée en brouillon mensuel'};
+      if(!isDraft){
+        if(oldAgentId&&oldAgentId!==agent.id){
+          if(!missionIsDraft(m)) await spNotifyMissionCancelled({...m,agentId:oldAgentId});
+          pushResult=await spNotifyMissionCreated({agentId:agent.id,siteName:site.name,start,end,count:1,missionId:m.id});
+        }else pushResult=await spNotifyMissionUpdated({...m,...payload,id:m.id});
+      }
+      await addAudit('mission_updated',{missionId:m.id,oldAgentId,newAgentId:agent.id,revision,draft:isDraft,pushStatus:pushResult?.ok?'sent':pushResult?.reason||pushResult?.error||'skipped'});
+      closeModal();toast(isDraft?'Vacation modifiée dans le brouillon mensuel.':'Vacation modifiée et agent notifié.','success');
+      refreshMonthlyPublicationPanel();
     }catch(error){console.error(error);toast(userFriendlyError(error,'Modification impossible.'),'error');btn.disabled=false;}
   });
 }
@@ -2182,22 +2346,24 @@ function openPlanningMissionEditModal(m){
 async function duplicateMissionWithOffset(m, days=7){
   const start = m.scheduledStart?.toDate ? addDays(m.scheduledStart.toDate(), days) : addDays(new Date(), days);
   const end = m.scheduledEnd?.toDate ? addDays(m.scheduledEnd.toDate(), days) : addDays(start, 0);
+  const month=localMonthValue(start),publication=await getMonthlyPlanningPublication(month),isDraft=publication?.status==='draft';
   const duplicatedRef = await addDoc(collectionRef('missions'), {
     agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, siteColor:m.siteColor || planningColorForSite(m.siteId), hourlyRate:Number(m.hourlyRate || 0), type:m.type || 'Surveillance', instructions:m.instructions || '',
     scheduledStart:Timestamp.fromDate(start), scheduledEnd:Timestamp.fromDate(end), status:'planned', planningRevision:1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, copiedFrom:m.id,
+    planningMonth:month,publicationStatus:isDraft?'draft':'published',monthlyPlanning:isDraft,
     createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
   });
-  const planningPush = await spNotifyMissionCreated({ agentId:m.agentId, siteName:m.siteNom, start:Timestamp.fromDate(start), end:Timestamp.fromDate(end), count:1, missionId:duplicatedRef.id });
-  await addAudit('mission_duplicated', { missionId:m.id, offsetDays:days, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
-  closeModal(); toast('Mission dupliquée', 'success');
+  const planningPush=isDraft?{ok:false,skipped:true,reason:'Mission en brouillon mensuel'}:await spNotifyMissionCreated({ agentId:m.agentId, siteName:m.siteNom, start:Timestamp.fromDate(start), end:Timestamp.fromDate(end), count:1, missionId:duplicatedRef.id });
+  await addAudit('mission_duplicated', { missionId:m.id, offsetDays:days, draft:isDraft, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
+  closeModal(); toast(isDraft?'Mission dupliquée dans le brouillon mensuel.':'Mission dupliquée', 'success'); refreshMonthlyPublicationPanel();
 }
-
 function listenPlanningBoard(){
   const q = query(collectionRef('missions'), orderBy('scheduledStart','asc'), limit(1200));
   unsubscribeList.push(onSnapshot(q, snap => {
     qgPlanningState.missions = snap.docs.map(d=>({id:d.id,...d.data()}));
     renderPlanningBoard();
     renderCollaboratorPlanning();
+    refreshMonthlyPublicationPanel();
   }, () => {
     const box = document.querySelector('#planning-board');
     if (box) box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les règles ou index Firebase.</div>`;
@@ -2307,7 +2473,7 @@ function planningMissionBar(item, mode){
   const textColor = contrastColor(siteColor);
   const late = missionIsLate(m);
   const status = late ? 'Retard' : missionStatusLabel(m.status);
-  return `<button type="button" class="planning-mission planning-mission-bar site-color status-${safe(m.status || 'planned')} ${late?'late':''}" style="grid-column:${item.colStart} / span ${item.span};grid-row:${item.track+1};--site-color:${siteColor};--site-text:${textColor}" data-mission-open="${safe(m.id)}" title="${safe(label)} · ${safe(m.type || 'Mission')}"><strong>${safe(time)}-${safe(fin)}</strong><span>${safe(label)}</span><small>${safe(status)}${days>1?` · ${days}j`:''}</small></button>`;
+  return `<button type="button" class="planning-mission planning-mission-bar site-color status-${safe(m.status || 'planned')} ${late?'late':''} ${missionIsDraft(m)?'planning-draft':''}" style="grid-column:${item.colStart} / span ${item.span};grid-row:${item.track+1};--site-color:${siteColor};--site-text:${textColor}" data-mission-open="${safe(m.id)}" title="${safe(label)} · ${safe(m.type || 'Mission')}"><strong>${safe(time)}-${safe(fin)}</strong><span>${safe(label)}</span><small>${missionIsDraft(m)?'Brouillon · ':''}${safe(status)}${days>1?` · ${days}j`:''}</small></button>`;
 }
 function bindPlanningBoardActions(){
   const root = document.querySelector('#planning-board');
@@ -2344,6 +2510,7 @@ function listenMissionsList(selector){
     const today = startOfDay(new Date()).getTime();
     const tomorrow = endOfDay(new Date()).getTime();
     const priorityRows = rows.filter(m => {
+      if(missionIsDraft(m)) return false;
       const start = missionStartMs(m) || 0;
       return m.status === 'active' || missionIsLate(m) || (start >= today && start <= tomorrow && !['completed','cancelled'].includes(m.status));
     }).slice(0, 8);
@@ -2352,7 +2519,7 @@ function listenMissionsList(selector){
       if (!confirm('Annuler cette mission ?')) return;
       const cancelledMission = rows.find(m => m.id === btn.dataset.missionCancel);
       await updateDoc(docRef('missions', btn.dataset.missionCancel), { status:'cancelled', updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
-      const cancelPush = await spNotifyMissionCancelled(cancelledMission);
+      const cancelPush = missionIsDraft(cancelledMission) ? {ok:false,skipped:true,reason:'Mission en brouillon'} : await spNotifyMissionCancelled(cancelledMission);
       await addAudit('mission_cancelled', { missionId:btn.dataset.missionCancel, pushStatus:cancelPush?.ok?'sent':cancelPush?.reason||cancelPush?.error||'skipped' });
       toast('Mission annulée', 'warning');
     }));
@@ -2370,21 +2537,22 @@ async function duplicateMissionFlow(m){
     const fd = new FormData(e.currentTarget);
     const scheduledStart = fromLocalInputValue(fd.get('scheduledStart'));
     const scheduledEnd = fromLocalInputValue(fd.get('scheduledEnd'));
+    const month=planningMonthForValue(scheduledStart),publication=await getMonthlyPlanningPublication(month),isDraft=publication?.status==='draft';
     const duplicatedRef = await addDoc(collectionRef('missions'), {
       agentId:m.agentId, agentNom:m.agentNom, siteId:m.siteId, siteNom:m.siteNom, siteColor:m.siteColor || planningColorForSite(m.siteId), hourlyRate:Number(m.hourlyRate || 0), type:m.type || 'Surveillance', instructions:m.instructions || '',
-      scheduledStart, scheduledEnd, status:'planned', planningRevision:1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, copiedFrom:m.id, createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+      scheduledStart, scheduledEnd, status:'planned', planningRevision:1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, copiedFrom:m.id, planningMonth:month,publicationStatus:isDraft?'draft':'published',monthlyPlanning:isDraft, createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
     });
-    const planningPush = await spNotifyMissionCreated({ agentId:m.agentId, siteName:m.siteNom, start:scheduledStart, end:scheduledEnd, count:1, missionId:duplicatedRef.id });
-    await addAudit('mission_duplicated', { missionId:m.id, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
+    const planningPush = isDraft?{ok:false,skipped:true,reason:'Mission en brouillon mensuel'}:await spNotifyMissionCreated({ agentId:m.agentId, siteName:m.siteNom, start:scheduledStart, end:scheduledEnd, count:1, missionId:duplicatedRef.id });
+    await addAudit('mission_duplicated', { missionId:m.id, draft:isDraft, pushStatus:planningPush?.ok?'sent':planningPush?.reason||planningPush?.error||'skipped' });
     closeModal();
-    toast('Mission dupliquée', 'success');
+    toast(isDraft?'Mission dupliquée dans le brouillon mensuel.':'Mission dupliquée', 'success'); refreshMonthlyPublicationPanel();
   });
 }
 function missionItem(m){
   const late = missionIsLate(m);
-  const color = late ? 'red' : missionStatusColor(m.status);
+  const color = missionIsDraft(m) ? 'blue' : (late ? 'red' : missionStatusColor(m.status));
   const delay = m.actualStart && m.scheduledStart ? Math.round(((m.actualStart.toDate?.()?.getTime()||0) - (m.scheduledStart.toDate?.()?.getTime()||0))/60000) : null;
-  return `<div class="item mission-row ${late?'late':''}"><div class="item-main"><div class="item-title">${safe(m.siteNom)} · ${safe(m.agentNom)} <span class="pill ${color}">${late?'Retard':missionStatusLabel(m.status)}</span></div><div class="item-meta">Prévu : ${dateText(m.scheduledStart)} → ${dateText(m.scheduledEnd)}<br>Type : ${safe(m.type || 'Mission')} ${delay!==null ? `<br>Pointage : ${delay>0?`+${delay} min`:`${delay} min`}`:''}${typeof m.conformityScore==='number'?`<br>Conformité : ${m.conformityScore}%`:''}</div></div><div class="item-actions"><button class="btn small" data-mission-pdf="${safe(m.id)}">Rapport PDF</button><button class="btn small ghost" data-mission-duplicate="${safe(m.id)}">Dupliquer</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn small ghost" data-mission-cancel="${safe(m.id)}">Annuler</button>`:''}</div></div>`;
+  return `<div class="item mission-row ${late?'late':''}"><div class="item-main"><div class="item-title">${safe(m.siteNom)} · ${safe(m.agentNom)} <span class="pill ${color}">${missionIsDraft(m)?'Brouillon':(late?'Retard':missionStatusLabel(m.status))}</span></div><div class="item-meta">Prévu : ${dateText(m.scheduledStart)} → ${dateText(m.scheduledEnd)}<br>Type : ${safe(m.type || 'Mission')} ${delay!==null ? `<br>Pointage : ${delay>0?`+${delay} min`:`${delay} min`}`:''}${typeof m.conformityScore==='number'?`<br>Conformité : ${m.conformityScore}%`:''}</div></div><div class="item-actions"><button class="btn small" data-mission-pdf="${safe(m.id)}">Rapport PDF</button><button class="btn small ghost" data-mission-duplicate="${safe(m.id)}">Dupliquer</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn small ghost" data-mission-cancel="${safe(m.id)}">Annuler</button>`:''}</div></div>`;
 }
 function renderQGNotifications(){
   currentRoute = 'notifications';
@@ -2408,7 +2576,7 @@ function buildQGNotifications(state){
   const now = Date.now();
   const rows = [];
   state.alerts.filter(a => ['active','taken'].includes(a.statut)).forEach(a => rows.push({level:'red', title:`SOS/PTI actif · ${a.agentNom || 'Agent'}`, meta:`${a.siteActuelNom || 'Site'} · ${dateText(a.createdAt || a.heure)}`, body:a.message || 'Alerte critique en cours'}));
-  state.missions.forEach(m => {
+  state.missions.filter(m=>!missionIsDraft(m)).forEach(m => {
     const start = m.scheduledStart?.toDate?.()?.getTime(); const end = m.scheduledEnd?.toDate?.()?.getTime();
     if (start && now > start + 10*60000 && !['active','completed','cancelled'].includes(m.status)) rows.push({level:'red', title:`Prise de poste en retard · ${m.agentNom}`, meta:`${m.siteNom} · prévu ${dateText(m.scheduledStart)}`, body:'Mission non démarrée dans le délai prévu.'});
     if (end && now > end + 15*60000 && m.status === 'active') rows.push({level:'orange', title:`Mission non clôturée · ${m.agentNom}`, meta:`${m.siteNom} · fin prévue ${dateText(m.scheduledEnd)}`, body:'La mission dépasse son horaire de fin sans clôture.'});
@@ -3998,6 +4166,17 @@ async function spNotifyMissionCreated({ agentId, siteName, start, end, count=1, 
   }).catch(error => ({ ok:false, error:String(error.message || error) }));
 }
 
+async function spNotifyMonthlyPlanningPublished({agentIds=[],monthValue='',missionCount=0}={}){
+  if(!agentIds.length) return {ok:false,skipped:true,reason:'Aucun agent concerné'};
+  const range=monthRange(monthValue);
+  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  return spSendOperationalPush({
+    title:`Planning ${label} disponible`,
+    message:`Ton planning mensuel est finalisé. Consulte « Mon planning » et confirme la prise de connaissance du mois.`,
+    category:'planning',priority:'Important',userIds:agentIds,route:'planning',data:{month:monthValue,status:'published',missionCount}
+  }).catch(error=>({ok:false,error:String(error.message||error)}));
+}
+
 async function spNotifyMissionCancelled(mission){
   if (!mission?.agentId) return { ok:false, skipped:true };
   return spSendOperationalPush({
@@ -4644,7 +4823,7 @@ async function downloadCollaboratorPlanningPdf(agentId,monthValue,{agentView=fal
     const sites=siteSnap.docs.map(d=>({id:d.id,...d.data()}));
     const siteMap=new Map(sites.map(x=>[x.id,x]));
     const range=monthRange(monthValue||localMonthValue());
-    const missions=missionSnap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>missionOverlapsRange(m,range.start,range.end)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+    const missions=missionSnap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>(!agentView||!missionIsDraft(m))&&missionOverlapsRange(m,range.start,range.end)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
     const segments=missions.filter(m=>m.status!=='cancelled').flatMap(m=>missionSegmentsByDay(m,range.start,range.end));
     const jsPDF=getJsPDF(); if(!jsPDF) throw new Error('Bibliothèque PDF indisponible.');
     const doc=new jsPDF({unit:'mm',format:'a4',orientation:'landscape'});

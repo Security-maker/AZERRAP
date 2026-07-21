@@ -50,6 +50,16 @@ service cloud.firestore {
       allow update: if isAdmin() || (isAgent() && resource.data.agentId == request.auth.uid && request.resource.data.agentId == resource.data.agentId);
     }
 
+    match /planningPublications/{monthId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /planningAcknowledgements/{agentId}/months/{monthId} {
+      allow read: if isAdmin() || (isAgent() && agentId == request.auth.uid);
+      allow create, update: if isAdmin() || (isAgent() && agentId == request.auth.uid && request.resource.data.agentId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
     match /shifts/{shiftId} {
       allow read: if isAdmin() || (signedIn() && resource.data.agentId == request.auth.uid) || (isAgent() && resource.data.status == 'completed' && resource.data.siteId == userDoc(request.auth.uid).siteActuel);
       allow create: if isAgent() && request.resource.data.agentId == request.auth.uid;

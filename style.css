@@ -880,3 +880,45 @@ body.modal-open{
     padding-bottom:max(4px,var(--safe-bottom));
   }
 }
+
+/* V5.7.5 — Brouillon et publication du planning mensuel */
+.monthly-publication-panel{
+  margin:16px 0;
+  padding:18px;
+  display:flex;
+  align-items:center;
+  gap:16px;
+  flex-wrap:wrap;
+  border:1px solid rgba(100,208,255,.22);
+  border-radius:18px;
+  background:linear-gradient(135deg,rgba(8,22,38,.96),rgba(6,15,28,.92));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+}
+.monthly-publication-copy{display:flex;align-items:flex-start;gap:12px;flex:1 1 360px;min-width:0}
+.monthly-publication-copy strong{display:block;color:#f5f9ff;font-size:15px;margin-bottom:4px}
+.monthly-publication-copy p{margin:0;color:#9cb1c5;font-size:12px;line-height:1.55}
+.planning-publication-badge{display:inline-flex;align-items:center;justify-content:center;min-width:86px;padding:8px 10px;border-radius:999px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.planning-publication-badge.draft{color:#ffbf69;background:rgba(255,159,28,.14);border:1px solid rgba(255,159,28,.42)}
+.planning-publication-badge.published{color:#65e7ac;background:rgba(0,208,132,.13);border:1px solid rgba(0,208,132,.38)}
+.planning-publication-badge.individual{color:#79d8ff;background:rgba(0,156,255,.13);border:1px solid rgba(0,156,255,.38)}
+.monthly-publication-stats{display:flex;gap:8px;flex-wrap:wrap}
+.monthly-publication-stats span{display:flex;flex-direction:column;min-width:92px;padding:9px 11px;border-radius:12px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.07);color:#8fa6bb;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.monthly-publication-stats strong{color:#f4f8fc;font-size:16px;line-height:1.1}
+.planning-mission.planning-draft{opacity:.72;border-style:dashed!important;filter:saturate(.7)}
+.planning-mission.planning-draft::after{content:'BROUILLON';position:absolute;right:6px;top:5px;font-size:7px;font-weight:900;letter-spacing:.08em;color:#ffbf69;background:rgba(4,12,22,.82);border:1px solid rgba(255,159,28,.45);border-radius:999px;padding:2px 5px}
+.collaborator-shift.planning-draft{opacity:.72;border-style:dashed}
+@media(max-width:760px){
+  .monthly-publication-panel{align-items:stretch;padding:14px}
+  .monthly-publication-copy{flex-basis:100%}
+  .planning-publication-badge{min-width:78px;font-size:9px}
+  .monthly-publication-stats{width:100%}
+  .monthly-publication-stats span{flex:1}
+  .monthly-publication-panel>.btn{width:100%}
+}
+.agent-monthly-ack{margin:14px 0}
+.agent-monthly-ack:empty{display:none}
+.agent-monthly-ack{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:14px 16px;border-radius:16px;border:1px solid rgba(100,208,255,.18);background:rgba(6,18,32,.72)}
+.agent-monthly-ack-copy{display:flex;align-items:flex-start;gap:10px;flex:1;min-width:240px}
+.agent-monthly-ack-copy strong{display:block;color:#f4f8fc;font-size:14px;margin-bottom:3px}
+.agent-monthly-ack-copy p{margin:0;color:#91a8bd;font-size:11px;line-height:1.5}
+@media(max-width:680px){.agent-monthly-ack>.btn{width:100%}}
