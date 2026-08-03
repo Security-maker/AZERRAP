@@ -949,13 +949,28 @@ body.modal-open{
 /* V5.8.2 — Planning QG compact par journée, sans modification des données */
 .planning-row-summary{--tracks:1}
 .planning-resource-summary{min-height:72px!important;padding-top:11px!important}
-.planning-lane-summary{grid-template-rows:56px!important;min-height:72px!important;gap:6px}
-.planning-summary-empty{height:56px;min-height:56px;box-sizing:border-box}
+.planning-lane-summary{
+  grid-template-rows:56px!important;
+  min-height:72px!important;
+  column-gap:0!important;
+  row-gap:0!important;
+  padding:8px 0!important;
+}
+.planning-summary-empty{
+  width:calc(100% - 8px);
+  max-width:calc(100% - 8px);
+  height:56px;
+  min-height:56px;
+  justify-self:center;
+  box-sizing:border-box;
+}
 .planning-day-summary{
   position:relative;
   z-index:3;
-  width:100%;
+  width:calc(100% - 8px);
+  max-width:calc(100% - 8px);
   min-width:0;
+  justify-self:center;
   height:56px;
   min-height:56px;
   box-sizing:border-box;
@@ -1014,10 +1029,13 @@ body.modal-open{
 .planning-day-modal-item{width:100%;cursor:pointer;text-align:left;color:inherit}
 @media(max-width:760px){
   .planning-resource-summary{min-height:62px!important}
-  .planning-lane-summary{grid-template-rows:48px!important;min-height:62px!important;padding:6px!important}
-  .planning-summary-empty,.planning-day-summary{height:48px;min-height:48px;border-radius:10px}
+  .planning-lane-summary{grid-template-rows:48px!important;min-height:62px!important;padding:6px 0!important;column-gap:0!important;row-gap:0!important}
+  .planning-summary-empty,.planning-day-summary{width:calc(100% - 6px);max-width:calc(100% - 6px);height:48px;min-height:48px;border-radius:10px}
   .planning-day-summary strong{font-size:16px}
   .planning-day-summary span{font-size:8px}
   .planning-hover-card{display:none!important}
 }
 @media print{.planning-hover-card{display:none!important}}
+
+
+/* V5.8.3 — alignement strict des cases du planning et vue Mois au 1er du mois courant */

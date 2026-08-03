@@ -1978,7 +1978,18 @@ function bindPlanningControls(){
     document.querySelectorAll('[data-planning-mode]').forEach(b => b.classList.toggle('active', b === btn));
     renderPlanningBoard();
   }));
-  document.querySelector('#planning-days')?.addEventListener('change', e => { qgPlanningState.days = Number(e.target.value || 14); renderPlanningBoard(); });
+  document.querySelector('#planning-days')?.addEventListener('change', e => {
+    const selectedDays = Number(e.target.value || 14);
+    qgPlanningState.days = selectedDays;
+    if (selectedDays === 31) {
+      const today = new Date();
+      const monthStart = startOfDay(new Date(today.getFullYear(), today.getMonth(), 1));
+      qgPlanningState.startDate = monthStart;
+      const input = document.querySelector('#planning-date');
+      if (input) input.value = `${monthStart.getFullYear()}-${String(monthStart.getMonth()+1).padStart(2,'0')}-01`;
+    }
+    renderPlanningBoard();
+  });
   document.querySelector('#planning-status')?.addEventListener('change', e => { qgPlanningState.status = e.target.value || ''; renderPlanningBoard(); });
   document.querySelector('#planning-search')?.addEventListener('input', renderPlanningBoard);
   document.querySelector('#planning-date')?.addEventListener('change', e => { qgPlanningState.startDate = startOfDay(new Date(e.target.value)); renderPlanningBoard(); });
