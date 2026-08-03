@@ -30,8 +30,27 @@ service cloud.firestore {
       allow delete: if isStrictAdmin();
     }
 
+    match /qgNotificationStates/{userId} {
+      allow read, create, update: if isAdmin() && request.auth.uid == userId;
+      allow delete: if isStrictAdmin() && request.auth.uid == userId;
+    }
+
     match /generatedDocuments/{documentId} {
-      allow read, create, update: if isAdmin();
+      allow read: if isAdmin() || (isAgent() && resource.data.createdBy == request.auth.uid && resource.data.type == 'mission');
+      allow create: if isAdmin() || (
+        isAgent()
+        && request.resource.data.type == 'mission'
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.payload.shift.agentId == request.auth.uid
+      );
+      allow update: if isAdmin() || (
+        isAgent()
+        && resource.data.createdBy == request.auth.uid
+        && resource.data.type == 'mission'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'deliveryStatus','deliveryError','deliveryAttemptAt','deliveredAt','supabaseDocumentId','supabaseStoragePath'
+        ])
+      );
       allow delete: if isStrictAdmin();
     }
 

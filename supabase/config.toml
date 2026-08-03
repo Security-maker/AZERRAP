@@ -1,0 +1,8 @@
+project_id = "REMPLACE_MOI_PAR_REFERENCE_SUPABASE"
+
+[auth.third_party.firebase]
+enabled = true
+project_id = "azzerap-7b440"
+
+[functions.send-main-courante]
+verify_jwt = true

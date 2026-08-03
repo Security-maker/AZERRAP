@@ -9,7 +9,7 @@ function corsHeaders(request, env) {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-sentinelle-push-secret',
+    'Access-Control-Allow-Headers': 'Content-Type, x-sentinelle-push-secret, Authorization',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin'
   };
@@ -42,7 +42,62 @@ function buildTarget(payload) {
   if (target === 'working') {
     return { filters:[tagFilter('role','agent'), { operator:'AND' }, tagFilter('statut','en_poste')] };
   }
+  if (target === 'qg') {
+    return { filters:[tagFilter('role','admin'), { operator:'OR' }, tagFilter('role','superviseur')] };
+  }
   return { filters:[tagFilter('role','agent')] };
+}
+
+
+let firebaseJwksCache = { expiresAt:0, keys:{} };
+function base64UrlToBytes(value) {
+  const normalized = String(value || '').replace(/-/g,'+').replace(/_/g,'/');
+  const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, ch => ch.charCodeAt(0));
+}
+function decodeJwtPart(value) {
+  return JSON.parse(new TextDecoder().decode(base64UrlToBytes(value)));
+}
+async function firebaseJwks() {
+  if (firebaseJwksCache.expiresAt > Date.now() && Object.keys(firebaseJwksCache.keys).length) return firebaseJwksCache.keys;
+  const response = await fetch('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com');
+  if (!response.ok) throw new Error('Clés Firebase indisponibles');
+  const payload = await response.json();
+  const cacheControl = response.headers.get('Cache-Control') || '';
+  const maxAge = Number(cacheControl.match(/max-age=(\d+)/)?.[1] || 3600);
+  const keys = {};
+  for (const jwk of payload.keys || []) keys[jwk.kid] = jwk;
+  firebaseJwksCache = { keys, expiresAt:Date.now() + Math.max(300, maxAge - 60) * 1000 };
+  return keys;
+}
+async function verifyFirebaseIdToken(token, projectId) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) throw new Error('Jeton Firebase invalide');
+  const header = decodeJwtPart(parts[0]);
+  const claims = decodeJwtPart(parts[1]);
+  if (header.alg !== 'RS256' || !header.kid) throw new Error('Signature Firebase invalide');
+  const now = Math.floor(Date.now() / 1000);
+  if (claims.aud !== projectId || claims.iss !== `https://securetoken.google.com/${projectId}` || !claims.sub || claims.exp <= now || claims.iat > now + 60) {
+    throw new Error('Jeton Firebase refusé');
+  }
+  const keys = await firebaseJwks();
+  const jwk = keys[header.kid];
+  if (!jwk) throw new Error('Clé Firebase inconnue');
+  const key = await crypto.subtle.importKey('jwk', jwk, { name:'RSASSA-PKCS1-v1_5', hash:'SHA-256' }, false, ['verify']);
+  const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+  const signature = base64UrlToBytes(parts[2]);
+  const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, data);
+  if (!valid) throw new Error('Signature Firebase incorrecte');
+  return claims;
+}
+async function stableUuid(value) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value || 'sentinelle'))));
+  const bytes = digest.slice(0,16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map(v => v.toString(16).padStart(2,'0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
 export default {
@@ -56,6 +111,7 @@ export default {
         appConfigured:Boolean(env.ONESIGNAL_APP_ID),
         apiKeyConfigured:Boolean(env.ONESIGNAL_REST_API_KEY),
         secretConfigured:Boolean(env.SENTINELLE_PUSH_SECRET),
+        firebaseProjectConfigured:Boolean(env.FIREBASE_PROJECT_ID),
         allowedOrigin:String(env.ALLOWED_ORIGIN || '*')
       });
     }
@@ -63,8 +119,13 @@ export default {
     if (request.method !== 'POST') return jsonResponse(request, env, { ok:false, error:'Méthode non autorisée' }, 405);
 
     const secret = request.headers.get('x-sentinelle-push-secret') || '';
-    if (!env.SENTINELLE_PUSH_SECRET || secret !== env.SENTINELLE_PUSH_SECRET) {
-      return jsonResponse(request, env, { ok:false, error:'Clé push incorrecte' }, 401);
+    const secretAuthorized = Boolean(env.SENTINELLE_PUSH_SECRET && secret === env.SENTINELLE_PUSH_SECRET);
+    let firebaseClaims = null;
+    if (!secretAuthorized) {
+      const bearer = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i,'').trim();
+      if (!bearer || !env.FIREBASE_PROJECT_ID) return jsonResponse(request, env, { ok:false, error:'Authentification push absente' }, 401);
+      try { firebaseClaims = await verifyFirebaseIdToken(bearer, String(env.FIREBASE_PROJECT_ID)); }
+      catch (error) { return jsonResponse(request, env, { ok:false, error:error.message || 'Jeton Firebase invalide' }, 401); }
     }
     if (!env.ONESIGNAL_APP_ID || !env.ONESIGNAL_REST_API_KEY) {
       return jsonResponse(request, env, { ok:false, error:'Variables OneSignal absentes dans Cloudflare' }, 500);
@@ -73,6 +134,11 @@ export default {
     let payload;
     try { payload = await request.json(); }
     catch { return jsonResponse(request, env, { ok:false, error:'Corps JSON invalide' }, 400); }
+
+    if (firebaseClaims) {
+      const allowed = payload.notificationType === 'shift_start' && payload.target === 'qg' && String(payload?.data?.agentId || '') === String(firebaseClaims.sub || '');
+      if (!allowed) return jsonResponse(request, env, { ok:false, error:'Action push non autorisée pour ce compte' }, 403);
+    }
 
     const title = String(payload.title || 'Sentinelle Pro').slice(0, 100);
     const message = String(payload.message || 'Nouvelle information opérationnelle').slice(0, 480);
@@ -88,6 +154,7 @@ export default {
       headings:{ en:title, fr:title },
       contents:{ en:message, fr:message },
       name:`Sentinelle Pro ${notificationType} ${notificationId}`.slice(0, 128),
+      idempotency_key:await stableUuid(`${notificationType}:${notificationId}`),
       priority:priority === 'Critique' || priority === 'Urgent' ? 10 : 5,
       ios_interruption_level:priority === 'Critique' || priority === 'Urgent' ? 'time_sensitive' : 'active',
       web_url:url,

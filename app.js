@@ -1,4 +1,5 @@
 import { firebaseConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './firebase-config.js';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js';
 import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
 import {
   getAuth,
@@ -62,6 +63,7 @@ let activeShiftCache = null;
 let lastSitesCache = [];
 let qgReportMissionGroups = [];
 let qgNotificationsCache = [];
+let qgNotificationClearedAt = 0;
 let qgMissionsCache = [];
 let qgAllSitesCache = [];
 let qgAllAgentsCache = [];
@@ -379,6 +381,7 @@ function boot(){
     if (currentUser && currentProfile && rolePortal(currentProfile.role) === 'agent') {
       primeAgentOfflineData().catch(error => console.warn('Synchronisation hors ligne impossible', error));
     }
+    retryPendingSupabaseDeliveries().catch(error => console.warn('Relance Supabase impossible', error));
   });
   window.addEventListener('offline', () => toast('Mode hors ligne — données locales actives, PTI non transmis en temps réel', 'warning'));
 
@@ -433,6 +436,7 @@ async function loadProfile(user){
     if (navigator.onLine) {
       syncOneSignalIdentity().catch(() => {});
       primeAgentOfflineData().catch(error => console.warn('Préparation hors ligne incomplète', error));
+      retryPendingSupabaseDeliveries().catch(error => console.warn('Livraisons Supabase en attente', error));
     }
     startFlashListener();
   } catch (error) {
@@ -983,29 +987,25 @@ async function renderAgentHome(){
       <div class="card stat blue"><div class="stat-label">Mission / site</div><div class="stat-value" style="font-size:22px">${safe(shift?.siteNom || 'Aucune')}</div><div class="muted">${isWorking ? 'Mission active' : 'Mission à sélectionner'}</div></div>
       <div class="card stat ${navigator.onLine?'green':'orange'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'OK':'OFF'}</div><div class="muted">${navigator.onLine?'Synchronisation active':'Données locales actives'}</div></div>
     </section>
+    <section class="card quick-actions-card" style="margin-top:16px">
+      <div class="card-title"><div><h2>Actions rapides</h2><p>Les fonctions terrain essentielles, accessibles sans défilement</p></div></div>
+      <div class="quick-action-bubbles">
+        <button class="quick-action-bubble primary" data-route="planning"><span class="quick-action-icon">◷</span><strong>Planning</strong><small>Mes missions</small></button>
+        <button class="quick-action-bubble" data-route="mci"><span class="quick-action-icon">▤</span><strong>Main courante</strong><small>Déclarer un événement</small></button>
+        <button class="quick-action-bubble" data-route="round"><span class="quick-action-icon">◎</span><strong>Ronde</strong><small>Scanner un point</small></button>
+        <button class="quick-action-bubble" data-route="docs"><span class="quick-action-icon">▣</span><strong>Documents</strong><small>Consignes du site</small></button>
+        <button class="quick-action-bubble warning" data-route="flash"><span class="quick-action-icon">⚡</span><strong>Flash QG</strong><small>Messages prioritaires</small></button>
+        <button class="quick-action-bubble" id="whatsapp-qg"><span class="quick-action-icon">◉</span><strong>WhatsApp QG</strong><small>Canal non critique</small></button>
+      </div>
+      <div class="quick-actions-footer"><button class="btn full" id="enable-push">Activer les notifications écran verrouillé</button><p class="muted">En urgence, utiliser le bouton SOS/PTI.</p></div>
+    </section>
     <section class="card offline-ready-card ${navigator.onLine?'':'offline-active'}" style="margin-top:16px">
       <div class="card-title"><div><h2>Mode hors ligne</h2><p id="offline-ready-status">${safe(offlineReadyText())}</p></div>${navigator.onLine?'<button class="btn small" id="offline-sync-now">Synchroniser maintenant</button>':'<span class="pill orange">Hors ligne</span>'}</div>
-      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">${navigator.onLine?'Le profil, le planning, les consignes, les documents et les points de ronde sont conservés sur cet appareil pour les prochaines coupures réseau.':'Les actions Firestore sont mises en attente et se synchroniseront au retour du réseau. Une alerte PTI hors ligne ne peut pas prévenir le QG immédiatement : appelle le QG ou le 112.'}</div>
+      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">${navigator.onLine?'Le profil, le planning, les consignes, les documents et les points de ronde sont conservés sur cet appareil pour les prochaines coupures réseau.':'Les actions Firebase sont mises en attente et se synchroniseront au retour du réseau. Une alerte PTI hors ligne ne peut pas prévenir le QG immédiatement : appelle le QG ou le 112.'}</div>
     </section>
-    <section class="grid cols-2" style="margin-top:16px">
-      <div class="card">
-        <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
-        ${isWorking ? shiftSummary(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer ma mission</button>` : takeShiftForm()}
-      </div>
-      <div class="card">
-        <div class="card-title"><div><h2>Actions rapides</h2><p>Terrain, main courante et ronde</p></div></div>
-        <div class="grid cols-2">
-          <button class="btn primary full" data-route="planning">Mon planning</button>
-          <button class="btn full" data-route="mci">Main courante</button>
-          <button class="btn full" data-route="round">Ronde</button>
-          <button class="btn full" data-route="docs">Documentation</button>
-          <button class="btn warning full" data-route="flash">Messages Flash</button>
-        </div>
-        <div class="divider"></div>
-        <button class="btn full" id="whatsapp-qg">Contacter le QG WhatsApp</button>
-        <button class="btn full" id="enable-push">Activer notifications écran verrouillé</button>
-        <p class="muted" style="font-size:12px;margin-top:12px">Canal non critique. En urgence, utiliser SOS/PTI.</p>
-      </div>
+    <section class="card" style="margin-top:16px">
+      <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
+      ${isWorking ? shiftSummary(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer ma mission</button>` : takeShiftForm()}
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-title"><div><h2>Derniers rapports envoyés</h2><p>Flux personnel</p></div></div>
@@ -1196,6 +1196,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
     syncOneSignalIdentity().catch(() => {});
     await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
+    spNotifyQGShiftStarted({shiftId:shiftDoc.id,agentId:currentUser.uid,agentNom,siteId:site.id,siteName:site.name,missionId:mission?.id||'',startedAt:new Date()}).then(result=>addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:result?.ok?'sent':result?.reason||result?.error||'skipped'}).catch(()=>{})).catch(()=>{});
     toast('Prise de poste confirmée', 'success');
     renderAgentHome();
   } catch(error){
@@ -1271,7 +1272,15 @@ async function endShift(shift){
       currentProfile = { ...currentProfile, statut:'hors_poste', siteActuel:null, siteActuelNom:null };
       syncOneSignalIdentity().catch(() => {});
       await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps });
-      closeModal(); toast('Fin de poste confirmée', 'success'); renderAgentHome();
+      const [finalReportsSnap, finalShiftSnap, finalMissionSnap] = await Promise.all([
+        getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id))).catch(()=>({docs:[]})),
+        getDoc(docRef('shifts', shift.id)).catch(()=>null),
+        shift.missionId ? getDoc(docRef('missions', shift.missionId)).catch(()=>null) : Promise.resolve(null)
+      ]);
+      const finalShift = finalShiftSnap?.exists?.() ? {id:finalShiftSnap.id,...finalShiftSnap.data()} : {...shift, status:'completed', handoverNote:fd.get('handoverNote')||'RAS', signatureName:fd.get('signatureName'), completedAt:new Date(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score};
+      const finalMission = finalMissionSnap?.exists?.() ? {id:finalMissionSnap.id,...finalMissionSnap.data()} : {id:shift.missionId||shift.id, ...shift, status:'completed'};
+      archiveMissionReportSilently({ mission:finalMission, shift:finalShift, reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()})) }).catch(()=>{});
+      closeModal(); toast(supabaseBridgeEnabled() ? 'Fin de poste confirmée · PDF en cours d’archivage et d’envoi' : 'Fin de poste confirmée · PDF archivé', 'success'); renderAgentHome();
     });
   } catch(error){ console.error(error); toast('Erreur fin de poste.', 'error'); }
 }
@@ -1576,12 +1585,12 @@ async function renderQGHome(){
       <div id="map-empty-help" class="map-empty-help hidden">Renseigne une adresse complète dans Gestion Sites : la position sera calculée automatiquement.</div>
     </section>
     <section class="grid cols-2" style="margin-top:16px">
-      <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, inactivité, SOS, critiques</p></div><button class="btn small" data-route="notifications">Voir tout</button></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
+      <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, prises de poste, inactivité, SOS et critiques</p></div><div class="btn-row"><button class="btn small ghost" id="qg-clear-notifications-preview" type="button">Effacer</button><button class="btn small" data-route="notifications">Voir tout</button></div></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
       <div class="card"><div class="card-title"><div><h2>Alertes prioritaires</h2><p>SOS/PTI actifs</p></div></div><div id="qg-alerts-feed" class="list"><div class="empty">Chargement...</div></div></div>
     </section>
     <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Temps réel, sans pollution planning</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
   render(page('Dashboard QG', 'Centre de commandement temps réel', body));
-  listenQGStats(); bindQGDashboardDetails(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5);
+  listenQGStats(); bindQGDashboardDetails(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5); bindQGNotificationClearButton('#qg-clear-notifications-preview');
 }
 
 function bindQGDashboardDetails(){
@@ -1775,7 +1784,10 @@ function setText(sel, value){ const el=document.querySelector(sel); if(el) el.te
 function listenQGReportsFeed(){
   const box = document.querySelector('#qg-reports-feed'); if(!box) return;
   const q = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(12));
-  unsubscribeList.push(onSnapshot(q, snap => box.innerHTML = snap.empty ? `<div class="empty">Aucun rapport.</div>` : snap.docs.map(d=>reportTimeline(d.data())).join('')));
+  unsubscribeList.push(onSnapshot(q, snap => {
+    const rows = snap.docs.slice(0,3);
+    box.innerHTML = rows.length ? rows.map(d=>reportTimeline(d.data())).join('') : `<div class="empty">Aucun rapport.</div>`;
+  }));
 }
 function listenQGAlertsFeed(){
   const box = document.querySelector('#qg-alerts-feed'); if(!box) return;
@@ -2276,11 +2288,11 @@ function openPlanningMissionModal(missionId){
     <div class="mission-detail-head"><div><h3>${safe(m.siteNom || 'Site')}</h3><p>${safe(m.agentNom || 'Agent')} · ${safe(m.type || 'Mission')}</p></div><span class="pill ${missionStatusColor(m.status)}">${missionStatusLabel(m.status)}</span></div>
     <div class="mission-detail-grid"><div><strong>Début</strong><span>${dateText(m.scheduledStart)}</span></div><div><strong>Fin</strong><span>${dateText(m.scheduledEnd)}</span></div><div><strong>Durée</strong><span>${durationDays > 1 ? `${durationDays} jours` : hoursText(missionDurationMinutes(m))}</span></div><div><strong>Lecture agent</strong><span>${acknowledged?`Confirmée ${dateText(m.acknowledgedAt)}`:'À confirmer'}</span></div></div>
     <div class="setup-box"><strong>Consignes :</strong><br>${safe(m.instructions || 'Aucune consigne spécifique.').replace(/\n/g,'<br>')}</div>
-    <div class="grid cols-2"><button class="btn primary" id="mission-detail-edit">Modifier la vacation</button><button class="btn" id="mission-detail-pdf">Rapport PDF</button><button class="btn" id="mission-detail-duplicate-week">Dupliquer +7 jours</button><button class="btn" id="mission-detail-duplicate-day">Dupliquer demain</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn danger" id="mission-detail-cancel">Annuler mission</button>`:''}${isStrictAdmin()?`<button class="btn ghost" id="mission-detail-delete">Supprimer définitivement</button>`:''}</div>
+    <div class="grid cols-2"><button class="btn primary" id="mission-detail-edit">Modifier la vacation</button><button class="btn" id="mission-detail-pdf">Rapport PDF</button><button class="btn" id="mission-detail-duplicate-month">Dupliquer sur le mois</button><button class="btn" id="mission-detail-duplicate-day">Dupliquer demain</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn danger" id="mission-detail-cancel">Annuler mission</button>`:''}${isStrictAdmin()?`<button class="btn ghost" id="mission-detail-delete">Supprimer définitivement</button>`:''}</div>
   </div>`, 'wide');
   document.querySelector('#mission-detail-edit')?.addEventListener('click', () => openPlanningMissionEditModal(m));
   document.querySelector('#mission-detail-pdf')?.addEventListener('click', () => printMissionById(m.id));
-  document.querySelector('#mission-detail-duplicate-week')?.addEventListener('click', () => duplicateMissionWithOffset(m, 7));
+  document.querySelector('#mission-detail-duplicate-month')?.addEventListener('click', () => duplicateMissionAcrossMonth(m));
   document.querySelector('#mission-detail-duplicate-day')?.addEventListener('click', () => duplicateMissionWithOffset(m, 1));
   document.querySelector('#mission-detail-cancel')?.addEventListener('click', async () => {
     if (!confirm('Annuler cette mission ?')) return;
@@ -2340,6 +2352,73 @@ function openPlanningMissionEditModal(m){
       closeModal();toast(isDraft?'Vacation modifiée dans le brouillon mensuel.':'Vacation modifiée et agent notifié.','success');
       refreshMonthlyPublicationPanel();
     }catch(error){console.error(error);toast(userFriendlyError(error,'Modification impossible.'),'error');btn.disabled=false;}
+  });
+}
+
+async function duplicateMissionAcrossMonth(m){
+  const originalStart=timestampToDate(m?.scheduledStart), originalEnd=timestampToDate(m?.scheduledEnd);
+  if(!originalStart||!originalEnd||originalEnd<=originalStart) return toast('Horaire de mission invalide.','error');
+  const defaultMonth=localMonthValue(originalStart);
+  showModal('Dupliquer sur le mois', `<form id="duplicate-month-form">
+    <div class="setup-box"><strong>Répétition hebdomadaire</strong><br>La vacation sera reproduite chaque semaine, le même jour et aux mêmes horaires, sur le mois choisi. Les conflits seront contrôlés avant la création.</div>
+    <div class="field"><label>Mois cible</label><input class="input" type="month" name="month" value="${safe(defaultMonth)}" required></div>
+    <div class="setup-box warning-copy">Le mois sera préparé en brouillon pour éviter toute notification pendant la construction du planning. Les agents seront avertis une seule fois lors de la publication mensuelle.</div>
+    <button class="btn primary full" type="submit">Créer les duplications du mois</button>
+  </form>`);
+  document.querySelector('#duplicate-month-form')?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const form=event.currentTarget;
+    const button=form.querySelector('button[type="submit"]');
+    const month=String(new FormData(form).get('month')||'');
+    if(!/^\d{4}-\d{2}$/.test(month)) return toast('Choisis un mois valide.','warning');
+    const range=monthRange(month);
+    const durationMs=originalEnd.getTime()-originalStart.getTime();
+    const weekday=originalStart.getDay();
+    const periods=[];
+    for(let day=new Date(range.start);day<range.end;day=addDays(day,1)){
+      if(day.getDay()!==weekday) continue;
+      const start=new Date(day.getFullYear(),day.getMonth(),day.getDate(),originalStart.getHours(),originalStart.getMinutes(),originalStart.getSeconds(),0);
+      const end=new Date(start.getTime()+durationMs);
+      const isOriginalDay=start.getTime()===originalStart.getTime();
+      if(isOriginalDay) continue;
+      periods.push({start,end});
+    }
+    if(!periods.length) return toast('Aucune nouvelle occurrence à créer sur ce mois.','warning');
+    const conflicts=periods.flatMap(period=>missionConflicts(m.agentId,period.start,period.end));
+    const conflictIds=[...new Set(conflicts.map(row=>row.id).filter(Boolean))];
+    const conflictMessage=conflictIds.length?` ${conflictIds.length} vacation(s) existante(s) se chevauchent. Elles ne seront pas supprimées.`:'';
+    if(!confirm(`Créer ${periods.length} vacation(s) hebdomadaire(s) en brouillon pour ${range.label} ?${conflictMessage}`)) return;
+    if(button){button.disabled=true;button.textContent='Duplication en cours...';}
+    try{
+      const publication=await getMonthlyPlanningPublication(month,{force:true});
+      const monthRows=qgPlanningState.missions.filter(row=>planningMonthForValue(row.scheduledStart)===month&&['planned','assigned'].includes(row.status||'planned'));
+      if(publication?.status!=='draft'){
+        await setDoc(docRef('planningPublications',planningPublicationDocId(month)),{
+          month,status:'draft',version:Math.max(1,Number(publication?.version||0)+1),startedAt:serverTimestamp(),startedBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+        },{merge:true});
+        await batchUpdateMissionDocuments(monthRows,row=>({publicationStatus:'draft',planningMonth:month,monthlyPlanning:true,planningRevision:missionRevision(row)+1,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,updatedAt:serverTimestamp(),updatedBy:currentUser.uid}));
+      }
+      const batch=writeBatch(db);
+      const seriesId=`serie_mois_${id()}`;
+      periods.forEach(period=>{
+        const ref=doc(collectionRef('missions'));
+        batch.set(ref,{
+          agentId:m.agentId,agentNom:m.agentNom,siteId:m.siteId,siteNom:m.siteNom,siteColor:m.siteColor||planningColorForSite(m.siteId),hourlyRate:Number(m.hourlyRate||0),type:m.type||'Surveillance',instructions:m.instructions||'',
+          scheduledStart:Timestamp.fromDate(period.start),scheduledEnd:Timestamp.fromDate(period.end),status:'planned',planningRevision:1,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,
+          copiedFrom:m.id,seriesId,repeatMode:'weekly_month',planningMonth:month,publicationStatus:'draft',monthlyPlanning:true,createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+        });
+      });
+      await batch.commit();
+      qgPlanningState.publications.delete(month);
+      await addAudit('missions_month_duplicated',{sourceMissionId:m.id,month,count:periods.length,conflictCount:conflictIds.length,draft:true});
+      closeModal();
+      toast(`${periods.length} vacation(s) ajoutée(s) au brouillon de ${range.label}.`,'success');
+      refreshMonthlyPublicationPanel();
+    }catch(error){
+      console.error(error);
+      toast(userFriendlyError(error,'Duplication mensuelle impossible.'),'error');
+      if(button){button.disabled=false;button.textContent='Créer les duplications du mois';}
+    }
   });
 }
 
@@ -2513,7 +2592,7 @@ function listenMissionsList(selector){
       if(missionIsDraft(m)) return false;
       const start = missionStartMs(m) || 0;
       return m.status === 'active' || missionIsLate(m) || (start >= today && start <= tomorrow && !['completed','cancelled'].includes(m.status));
-    }).slice(0, 8);
+    }).slice(0, 3);
     box.innerHTML = priorityRows.length ? priorityRows.map(missionItem).join('') : `<div class="empty">Aucune mission prioritaire. Le planning complet reste visible en dessous.</div>`;
     document.querySelectorAll('[data-mission-cancel]').forEach(btn => btn.addEventListener('click', async () => {
       if (!confirm('Annuler cette mission ?')) return;
@@ -2556,14 +2635,38 @@ function missionItem(m){
 }
 function renderQGNotifications(){
   currentRoute = 'notifications';
-  const body = `<section class="card"><div class="card-title"><div><h2>Centre de notifications QG</h2><p>Alertes d’exploitation calculées en temps réel</p></div></div><div id="notifications-list" class="list"><div class="empty">Chargement...</div></div></section>`;
-  render(page('Notifications QG', 'Retards, inactivité, SOS et non-conformités', body));
+  const body = `<section class="card"><div class="card-title"><div><h2>Centre de notifications QG</h2><p>Prises de poste, retards, inactivité, SOS et non-conformités</p></div><button class="btn small ghost" id="qg-clear-notifications" type="button">Effacer les notifications</button></div><div class="setup-box">Ce bouton vide uniquement le centre de notifications. Il ne supprime aucune mission, main courante, alerte SOS ni donnée opérationnelle.</div><div id="notifications-list" class="list"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Notifications QG', 'Suivi opérationnel calculé en temps réel', body));
   listenQGNotifications('#notifications-list', 100);
+  bindQGNotificationClearButton('#qg-clear-notifications');
+}
+function qgNotificationEventMs(value){
+  return timestampToDate(value)?.getTime?.() || 0;
+}
+function bindQGNotificationClearButton(selector){
+  document.querySelector(selector)?.addEventListener('click',clearQGNotifications);
+}
+async function clearQGNotifications(){
+  if(!currentUser||!roleAllowedAdmin()) return;
+  if(!confirm('Effacer les notifications actuellement visibles ? Les missions, rapports et alertes ne seront pas supprimés.')) return;
+  try{
+    qgNotificationClearedAt=Date.now();
+    await setDoc(docRef('qgNotificationStates',currentUser.uid),{userId:currentUser.uid,clearedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:currentUser.uid},{merge:true});
+    await addAudit('qg_notifications_cleared',{clearedAt:new Date().toISOString()});
+    toast('Centre de notifications vidé. Les nouveaux événements apparaîtront automatiquement.','success');
+  }catch(error){
+    console.error(error);
+    toast(userFriendlyError(error,'Impossible d’effacer les notifications.'),'error');
+  }
 }
 function listenQGNotifications(selector, max=10){
   const box = document.querySelector(selector); if (!box) return;
-  const state = { missions:[], shifts:[], users:[], alerts:[], reports:[], flash:[] };
-  const redraw = () => { const rows = buildQGNotifications(state).slice(0,max); qgNotificationsCache = rows; box.innerHTML = rows.length ? rows.map(notificationItem).join('') : `<div class="empty">Aucune notification opérationnelle.</div>`; };
+  const state = { missions:[], shifts:[], users:[], alerts:[], reports:[], flash:[], clearedAt:qgNotificationClearedAt };
+  const redraw = () => {
+    const rows = buildQGNotifications(state).slice(0,max);
+    qgNotificationsCache = rows;
+    box.innerHTML = rows.length ? rows.map(notificationItem).join('') : `<div class="empty">Aucune nouvelle notification opérationnelle.</div>`;
+  };
   const bind = (name, q) => unsubscribeList.push(onSnapshot(q, snap => { state[name] = snap.docs.map(d=>({id:d.id,...d.data()})); redraw(); }, redraw));
   bind('missions', query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(200)));
   bind('shifts', query(collectionRef('shifts'), orderBy('createdAt','desc'), limit(200)));
@@ -2571,30 +2674,147 @@ function listenQGNotifications(selector, max=10){
   bind('alerts', query(collectionRef('alerts'), orderBy('createdAt','desc'), limit(100)));
   bind('reports', query(collectionRef('reports'), orderBy('createdAt','desc'), limit(100)));
   bind('flash', query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(30)));
+  const stateRef=docRef('qgNotificationStates',currentUser.uid);
+  unsubscribeList.push(onSnapshot(stateRef,snap=>{
+    const clearMs=snap.exists()?qgNotificationEventMs(snap.data().clearedAt):0;
+    qgNotificationClearedAt=Math.max(qgNotificationClearedAt,clearMs);
+    state.clearedAt=qgNotificationClearedAt;
+    redraw();
+  },redraw));
 }
 function buildQGNotifications(state){
   const now = Date.now();
   const rows = [];
-  state.alerts.filter(a => ['active','taken'].includes(a.statut)).forEach(a => rows.push({level:'red', title:`SOS/PTI actif · ${a.agentNom || 'Agent'}`, meta:`${a.siteActuelNom || 'Site'} · ${dateText(a.createdAt || a.heure)}`, body:a.message || 'Alerte critique en cours'}));
+  state.shifts.forEach(shift=>{
+    const startedAt=qgNotificationEventMs(shift.startTime||shift.createdAt);
+    if(startedAt&&now-startedAt<=48*60*60*1000) rows.push({
+      id:`shift_start_${shift.id}`,level:'blue',eventAt:startedAt,
+      title:`Prise de poste · ${shift.agentNom||'Agent'}`,
+      meta:`${shift.siteNom||'Site'} · ${dateText(shift.startTime||shift.createdAt)}`,
+      body:shift.missionTitle?`Mission : ${shift.missionTitle}`:'Prise de poste libre enregistrée.'
+    });
+  });
+  state.alerts.filter(a => ['active','taken'].includes(a.statut)).forEach(a => rows.push({id:`alert_${a.id}`,level:'red',eventAt:qgNotificationEventMs(a.createdAt||a.heure),title:`SOS/PTI actif · ${a.agentNom || 'Agent'}`, meta:`${a.siteActuelNom || 'Site'} · ${dateText(a.createdAt || a.heure)}`, body:a.message || 'Alerte critique en cours'}));
   state.missions.filter(m=>!missionIsDraft(m)).forEach(m => {
-    const start = m.scheduledStart?.toDate?.()?.getTime(); const end = m.scheduledEnd?.toDate?.()?.getTime();
-    if (start && now > start + 10*60000 && !['active','completed','cancelled'].includes(m.status)) rows.push({level:'red', title:`Prise de poste en retard · ${m.agentNom}`, meta:`${m.siteNom} · prévu ${dateText(m.scheduledStart)}`, body:'Mission non démarrée dans le délai prévu.'});
-    if (end && now > end + 15*60000 && m.status === 'active') rows.push({level:'orange', title:`Mission non clôturée · ${m.agentNom}`, meta:`${m.siteNom} · fin prévue ${dateText(m.scheduledEnd)}`, body:'La mission dépasse son horaire de fin sans clôture.'});
+    const start = qgNotificationEventMs(m.scheduledStart); const end = qgNotificationEventMs(m.scheduledEnd);
+    if (start && now > start + 10*60000 && !['active','completed','cancelled'].includes(m.status)) rows.push({id:`mission_late_${m.id}`,level:'red',eventAt:start,title:`Prise de poste en retard · ${m.agentNom}`, meta:`${m.siteNom} · prévu ${dateText(m.scheduledStart)}`, body:'Mission non démarrée dans le délai prévu.'});
+    if (end && now > end + 15*60000 && m.status === 'active') rows.push({id:`mission_open_${m.id}`,level:'orange',eventAt:end,title:`Mission non clôturée · ${m.agentNom}`, meta:`${m.siteNom} · fin prévue ${dateText(m.scheduledEnd)}`, body:'La mission dépasse son horaire de fin sans clôture.'});
   });
   state.users.filter(u => u.statut === 'en_poste').forEach(u => {
-    const last = u.lastSeen?.toDate?.()?.getTime();
-    if (last && now - last > 45*60000) rows.push({level:'orange', title:`Agent sans activité récente · ${u.prenom || ''} ${u.nom || ''}`, meta:`${u.siteActuelNom || 'Site inconnu'} · dernière activité ${dateText(u.lastSeen)}`, body:'Contrôle recommandé par le QG.'});
+    const last = qgNotificationEventMs(u.lastSeen);
+    if (last && now - last > 45*60000) rows.push({id:`inactive_${u.id}`,level:'orange',eventAt:last,title:`Agent sans activité récente · ${u.prenom || ''} ${u.nom || ''}`, meta:`${u.siteActuelNom || 'Site inconnu'} · dernière activité ${dateText(u.lastSeen)}`, body:'Contrôle recommandé par le QG.'});
   });
-  state.reports.filter(r => r.severity === 'Critique' && r.status !== 'treated').forEach(r => rows.push({level:'red', title:`Rapport critique non traité · ${r.agentNom}`, meta:`${r.siteNom} · ${dateText(r.createdAt)}`, body:r.message || 'Rapport critique'}));
+  state.reports.filter(r => r.severity === 'Critique' && r.status !== 'treated').forEach(r => rows.push({id:`report_${r.id}`,level:'red',eventAt:qgNotificationEventMs(r.createdAt),title:`Rapport critique non traité · ${r.agentNom}`, meta:`${r.siteNom} · ${dateText(r.createdAt)}`, body:r.message || 'Rapport critique'}));
   state.flash.filter(f => f.priority === 'Critique').forEach(f => {
-    const sent = f.sentAt?.toDate?.()?.getTime();
-    if (sent && now - sent > 10*60000 && Object.keys(f.readBy || {}).length === 0) rows.push({level:'orange', title:`Flash critique non lu`, meta:`Envoyé ${dateText(f.sentAt)}`, body:f.title || f.message || 'Message sans lecture confirmée'});
+    const sent = qgNotificationEventMs(f.sentAt);
+    if (sent && now - sent > 10*60000 && Object.keys(f.readBy || {}).length === 0) rows.push({id:`flash_${f.id}`,level:'orange',eventAt:sent,title:`Flash critique non lu`, meta:`Envoyé ${dateText(f.sentAt)}`, body:f.title || f.message || 'Message sans lecture confirmée'});
   });
-  return rows.sort((a,b)=>(a.level==='red'?-1:0) - (b.level==='red'?-1:0));
+  const clearedAt=Number(state.clearedAt||0);
+  const levelWeight={red:3,orange:2,blue:1};
+  return rows.filter(row=>Number(row.eventAt||0)>clearedAt).sort((a,b)=>(levelWeight[b.level]||0)-(levelWeight[a.level]||0)||Number(b.eventAt||0)-Number(a.eventAt||0)||String(a.id||'').localeCompare(String(b.id||''),'fr'));
 }
 function notificationItem(n){
   return `<div class="item notification ${n.level}"><div class="item-main"><div class="item-title">${safe(n.title)}</div><div class="item-meta">${safe(n.meta)}</div><div style="margin-top:6px">${safe(n.body)}</div></div></div>`;
 }
+
+function missionEventMs(value){
+  const date = timestampToDate(value);
+  return date ? date.getTime() : 0;
+}
+function missionTimelinePriority(row){
+  const type = String(row?.eventType || row?.category || '').toLowerCase();
+  if (type.includes('shift_start') || type.includes('prise de service') || type.includes('prise de poste')) return 0;
+  if (type.includes('shift_end') || type.includes('fin de service') || type.includes('fin de poste')) return 100;
+  return 50;
+}
+function buildMissionTimeline({ mission={}, shift={}, reports=[] }={}){
+  const rows = (reports || []).map((report, index) => ({
+    ...report,
+    createdAt: report.occurredAt || report.createdAt || report.photoCapturedAt || null,
+    timelineSource: report.timelineSource || 'report',
+    timelineIndex: index
+  }));
+  const hasStart = rows.some(row => missionTimelinePriority(row) === 0);
+  const hasEnd = rows.some(row => missionTimelinePriority(row) === 100);
+  if (!hasStart && shift.startTime) rows.push({
+    id:`shift-start-${shift.id || mission.id || 'mission'}`,
+    createdAt:shift.startTime,
+    agentId:shift.agentId || mission.agentId || '',
+    agentNom:shift.agentNom || mission.agentNom || '',
+    siteId:shift.siteId || mission.siteId || '',
+    siteNom:shift.siteNom || mission.siteNom || '',
+    missionId:mission.id || shift.missionId || '',
+    shiftId:shift.id || '',
+    category:'Prise de poste',
+    severity:'Normal',
+    message:`Prise de poste enregistrée${shift.checkInPhotoAvailable ? ' avec preuve photographique' : ''}.`,
+    eventType:'shift_start',
+    systemGenerated:true,
+    timelineSource:'shift'
+  });
+  if (!hasEnd && shift.completedAt) rows.push({
+    id:`shift-end-${shift.id || mission.id || 'mission'}`,
+    createdAt:shift.completedAt,
+    agentId:shift.agentId || mission.agentId || '',
+    agentNom:shift.agentNom || mission.agentNom || '',
+    siteId:shift.siteId || mission.siteId || '',
+    siteNom:shift.siteNom || mission.siteNom || '',
+    missionId:mission.id || shift.missionId || '',
+    shiftId:shift.id || '',
+    category:'Fin de poste',
+    severity:'Normal',
+    message:`Fin de poste confirmée. Relève : ${shift.handoverNote || 'RAS'}.`,
+    eventType:'shift_end',
+    systemGenerated:true,
+    timelineSource:'shift'
+  });
+  return rows.sort((a,b) => {
+    const aPriority = missionTimelinePriority(a);
+    const bPriority = missionTimelinePriority(b);
+    if (aPriority === 0 && bPriority !== 0) return -1;
+    if (bPriority === 0 && aPriority !== 0) return 1;
+    if (aPriority === 100 && bPriority !== 100) return 1;
+    if (bPriority === 100 && aPriority !== 100) return -1;
+    const time = missionEventMs(a.createdAt) - missionEventMs(b.createdAt);
+    if (time) return time;
+    const priority = aPriority - bPriority;
+    if (priority) return priority;
+    return String(a.id || a.timelineIndex || '').localeCompare(String(b.id || b.timelineIndex || ''), 'fr');
+  });
+}
+function missionPdfData({ mission={}, shift={}, reports=[] }={}){
+  const compactRows = reports.map(r => r.createdAt || r.message ? compactReport(r) : r);
+  const compactM = compactMission(mission);
+  const compactS = compactShift(shift);
+  const timelineRows = buildMissionTimeline({ mission:compactM, shift:compactS, reports:compactRows });
+  return {
+    type:'mission',
+    title:`Rapport mission — ${mission.siteNom || shift.siteNom || 'Site'} — ${mission.agentNom || shift.agentNom || 'Agent'}`,
+    siteId:mission.siteId || shift.siteId || null,
+    siteNom:mission.siteNom || shift.siteNom || null,
+    missionId:mission.id || null,
+    clientId:mission.clientId || shift.clientId || null,
+    rowCount:timelineRows.length,
+    payload:{ mission:compactM, shift:compactS, rows:compactRows, timelineRows }
+  };
+}
+async function archiveMissionReportSilently({ mission={}, shift={}, reports=[] }={}){
+  try {
+    const data = missionPdfData({ mission, shift, reports });
+    const stableSource = String(data.missionId || shift.id || mission.id || 'mission').replace(/[^a-zA-Z0-9_-]/g,'-');
+    const documentId = `mission-${stableSource}`.slice(0,120);
+    const existing = await getDoc(docRef('generatedDocuments', documentId)).catch(()=>null);
+    if (existing?.exists?.()) return { id:existing.id, ...existing.data() };
+    const archived = await archivePdfDocument(data, { silent:true, documentId });
+    await addAudit('mission_pdf_auto_archived', { missionId:data.missionId || null, documentId:archived.id, rowCount:data.rowCount });
+    return archived;
+  } catch(error) {
+    console.error('Archivage automatique du rapport impossible', error);
+    await addAudit('mission_pdf_auto_failed', { missionId:mission.id || null, error:String(error?.message || error) }).catch(()=>{});
+    return null;
+  }
+}
+
 async function printMissionGroup(group){
   const reports = group?.reports || [];
   const first = reports[0] || {};
@@ -2617,16 +2837,7 @@ async function printMissionById(missionId){
   printMissionReport({ mission:{id:missionId,...mission}, shift, reports });
 }
 async function printMissionReport({ mission, shift={}, reports=[] }){
-  const compactRows = reports.map(r => r.createdAt || r.message ? compactReport(r) : r);
-  const data = {
-    type:'mission',
-    title:`Rapport mission — ${mission.siteNom || shift.siteNom || 'Site'} — ${mission.agentNom || shift.agentNom || 'Agent'}`,
-    siteId:mission.siteId || shift.siteId || null,
-    siteNom:mission.siteNom || shift.siteNom || null,
-    missionId:mission.id || null,
-    rowCount:compactRows.length,
-    payload:{ mission:compactMission(mission), shift:compactShift(shift), rows:compactRows }
-  };
+  const data = missionPdfData({ mission, shift, reports });
   try {
     const archived = await archivePdfDocument(data, { silent:true });
     downloadGeneratedPdf(archived, { silent:true });
@@ -3471,8 +3682,9 @@ function addPdfWrappedText(doc, text, x, y, maxWidth=180, lineHeight=5){
 }
 function generatedDocumentRows(d){
   const p = d?.payload || {};
-  if (d.type === 'mission') return p.rows || [];
+  if (d.type === 'mission') return p.timelineRows || buildMissionTimeline({ mission:p.mission||{}, shift:p.shift||{}, reports:p.rows||[] });
   if (d.type === 'invoice') return p.invoice?.lines || p.lines || [];
+  if (d.type === 'mci') return (p.rows || []).slice().sort((a,b)=>missionEventMs(a.createdAt)-missionEventMs(b.createdAt)||String(a.id||'').localeCompare(String(b.id||''),'fr'));
   return p.rows || [];
 }
 function generatedDocumentMeta(d){
@@ -3504,12 +3716,50 @@ function downloadGeneratedPdf(d, { silent=false }={}){
     toast(userFriendlyError(error, 'PDF indisponible. Utilise Imprimer / PDF.'), 'error');
   }
 }
-async function archivePdfDocument(data, { silent=false }={}){
-  const payload = { ...data, fileType:'pdf', status:'active', createdAt:serverTimestamp(), createdBy:currentUser.uid, createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() };
-  const ref = await addDoc(collectionRef('generatedDocuments'), payload);
+async function deliverGeneratedDocumentToSupabase(archived){
+  if (!supabaseBridgeEnabled() || !navigator.onLine || !archived?.id) return { skipped:true };
+  try {
+    const pdfBlob = createGeneratedDocumentPdf(archived).output('blob');
+    const result = await mirrorGeneratedDocument({ firebaseUser:currentUser, profile:currentProfile, document:archived, pdfBlob });
+    await updateDoc(docRef('generatedDocuments', archived.id), {
+      deliveryStatus:result?.emailQueued ? 'email_queued' : 'supabase_archived',
+      supabaseDocumentId:result?.documentId || null,
+      supabaseStoragePath:result?.storagePath || null,
+      deliveryError:null,
+      deliveredAt:serverTimestamp()
+    }).catch(()=>{});
+    return result;
+  } catch(error) {
+    console.error('Passerelle Supabase/Brevo indisponible', error);
+    await updateDoc(docRef('generatedDocuments', archived.id), {
+      deliveryStatus:'bridge_failed', deliveryError:String(error?.message || error), deliveryAttemptAt:serverTimestamp()
+    }).catch(()=>{});
+    throw error;
+  }
+}
+async function retryPendingSupabaseDeliveries(){
+  if (!supabaseBridgeEnabled() || !navigator.onLine || !currentUser || !currentProfile) return;
+  const isAgentPortal = rolePortal(currentProfile.role) === 'agent';
+  const source = isAgentPortal
+    ? query(collectionRef('generatedDocuments'), where('createdBy','==',currentUser.uid), where('type','==','mission'), limit(25))
+    : query(collectionRef('generatedDocuments'), orderBy('createdAt','desc'), limit(50));
+  const snap = await getDocs(source).catch(()=>null);
+  if (!snap) return;
+  const pending = snap.docs.map(d=>({id:d.id,...d.data()})).filter(d=>['pending','bridge_failed'].includes(d.deliveryStatus));
+  for (const document of pending) {
+    await deliverGeneratedDocumentToSupabase(document).catch(()=>{});
+  }
+}
+
+async function archivePdfDocument(data, { silent=false, documentId=null }={}){
+  const payload = { ...data, fileType:'pdf', status:'active', deliveryStatus:supabaseBridgeEnabled() ? 'pending' : 'firebase_only', createdAt:serverTimestamp(), createdBy:currentUser.uid, createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() };
+  const ref = documentId ? docRef('generatedDocuments', documentId) : doc(collectionRef('generatedDocuments'));
+  await setDoc(ref, payload);
+  const archived = { id:ref.id, ...payload, createdAt:new Date() };
   await addAudit('generated_pdf_archived', { type:data.type, title:data.title || '', documentId:ref.id, missionId:data.missionId || null, rowCount:data.rowCount || 0 });
+  if (supabaseBridgeEnabled()) deliverGeneratedDocumentToSupabase(archived).catch(()=>{});
   if (!silent) toast('PDF archivé dans Documents.', 'success');
-  return { id:ref.id, ...payload, createdAt:new Date() };
+  return archived;
 }
 async function renderQGDocuments(){
   currentRoute = 'documents';
@@ -4056,7 +4306,7 @@ function exportReportHtml(rows, filename, innerOnly=false){
 
 
 // -------------------- V5.6 — NOTIFICATIONS OPÉRATIONNELLES --------------------
-const SP_PUSH_PREF_DEFAULTS = Object.freeze({ flash:true, planning:true, instructions:true, documents:true });
+const SP_PUSH_PREF_DEFAULTS = Object.freeze({ flash:true, planning:true, instructions:true, documents:true, operations:true });
 
 function spLoadPushPreferences(){
   try {
@@ -4156,6 +4406,31 @@ function spMissionNotificationMessage({ siteName, start, end, count=1, status='c
   if (status === 'cancelled') return `${siteName || 'Mission'} · ${period} · mission annulée par le QG.`;
   if (count > 1) return `${count} nouvelles missions planifiées sur ${siteName || 'un site'} à partir du ${dateText(start)}.`;
   return `${siteName || 'Nouvelle mission'} · ${period}. Consulte le planning et les consignes.`;
+}
+
+async function spNotifyQGShiftStarted({shiftId='',agentId='',agentNom='',siteId='',siteName='',missionId='',startedAt=new Date()}={}){
+  if(!pushIsConfigured()||!pushWorkerIsConfigured()) return {ok:false,skipped:true,reason:'Push non configuré'};
+  if(!currentUser||!shiftId) return {ok:false,skipped:true,reason:'Prise de poste incomplète'};
+  try{
+    const idToken=await currentUser.getIdToken(false);
+    const response=await fetch(pushConfig.pushWorkerUrl,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
+      body:JSON.stringify({
+        title:'Agent en poste',
+        message:`${agentNom||'Un agent'} a pris son poste sur ${siteName||'un site'} à ${timestampToDate(startedAt)?.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})||'l’instant'}.`,
+        priority:'Important',target:'qg',notificationType:'shift_start',notificationId:`shift_start_${shiftId}`,
+        url:new URL('./index.html?route=home',location.href).href,
+        data:{shiftId,agentId,siteId,missionId,route:'home'}
+      })
+    });
+    const result=await response.json().catch(()=>({}));
+    if(!response.ok||!result.id) return {ok:false,error:result.error||result.message||'Notification QG non livrée'};
+    return {...result,ok:true};
+  }catch(error){
+    console.warn('Notification QG de prise de poste indisponible',error);
+    return {ok:false,error:String(error?.message||error)};
+  }
 }
 
 async function spNotifyMissionCreated({ agentId, siteName, start, end, count=1, missionId='' }){
@@ -4260,6 +4535,7 @@ function renderPushSetup(){
       <div class="card-title"><div><h2>Notifications à recevoir</h2><p>Choisis les événements opérationnels envoyés sur cet appareil.</p></div></div>
       ${(() => { const prefs = spLoadPushPreferences(); return `
       <div class="list">
+        ${rolePortal(currentProfile?.role) === 'qg' ? `<label class="item"><div class="item-main"><div class="item-title">Prises de poste agents</div><div class="item-meta">Notification QG dès qu’un agent démarre sa mission.</div></div><input type="checkbox" data-push-pref="operations" ${prefs.operations?'checked':''}></label>` : ''}
         <label class="item"><div class="item-main"><div class="item-title">Planning et missions</div><div class="item-meta">Nouvelle mission, duplication, annulation et changement de planning.</div></div><input type="checkbox" data-push-pref="planning" ${prefs.planning?'checked':''}></label>
         <label class="item"><div class="item-main"><div class="item-title">Messages Flash QG</div><div class="item-meta">Informations, urgences et messages prioritaires.</div></div><input type="checkbox" data-push-pref="flash" ${prefs.flash?'checked':''}></label>
         <label class="item"><div class="item-main"><div class="item-title">Consignes opérationnelles</div><div class="item-meta">Modification des consignes d’un site ou d’une mission.</div></div><input type="checkbox" data-push-pref="instructions" ${prefs.instructions?'checked':''}></label>
@@ -5107,7 +5383,7 @@ function pdfDrawPhotoAnnexes(doc, reports){
   });
 }
 function pdfDocumentTitle(d){ return pdfTextValue(d.title || documentTypeLabel(d.type)); }
-function pdfMissionPayload(d){ const p=d?.payload||{}; return { mission:p.mission||{}, shift:p.shift||{}, rows:p.rows||[] }; }
+function pdfMissionPayload(d){ const p=d?.payload||{}; const rows=p.rows||[]; return { mission:p.mission||{}, shift:p.shift||{}, rows, timelineRows:p.timelineRows||buildMissionTimeline({mission:p.mission||{},shift:p.shift||{},reports:rows}) }; }
 function createGeneratedDocumentPdf(d){
   const jsPDF = getJsPDF();
   if(!jsPDF) throw new Error('Bibliothèque PDF indisponible. Vérifie ta connexion ou réessaie.');
@@ -5145,7 +5421,7 @@ function createGeneratedDocumentPdf(d){
   y = pdfInfoPanel(doc, metaItems, y);
 
   if(d.type === 'mission'){
-    const {mission, shift, rows:missionRows} = pdfMissionPayload(d);
+    const {mission, shift, rows:missionRows, timelineRows} = pdfMissionPayload(d);
     y = pdfMetricCards(doc, [
       {label:'Rapports', value:missionRows.length},
       {label:'Rondes', value:shift.roundsCount || mission.roundsCount || 0},
@@ -5157,7 +5433,7 @@ function createGeneratedDocumentPdf(d){
     metaLines.forEach(line => { y = pdfWrapped(doc, line, 18, y, 174, 4.8); });
     y += 3;
     y = pdfSectionTitle(doc, 'Main courante de mission', y);
-    y = pdfDrawTable(doc, ['Heure','Agent','Catégorie','Gravité','Photo','Message'], missionRows, [27,29,25,21,20,60], y, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message]);
+    y = pdfDrawTable(doc, ['Heure','Agent','Événement','Gravité','Photo','Observation'], timelineRows, [27,29,25,21,20,60], y, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message]);
     y = pdfSectionTitle(doc, 'Relève et signature', y);
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...C.grey);
     y = pdfWrapped(doc, `Signature agent : ${shift.signatureName || '—'}`, 18, y, 174, 5);
@@ -5242,19 +5518,20 @@ function photoAnnexesHtml(reports=[]){
   if(!photos.length) return '';
   return `<section class="azza-photo-annexes"><h3>Annexes photographiques</h3>${photos.map((r,i)=>`<article class="azza-photo-proof"><img src="${safe(r.photoUrl)}" alt="Photo du rapport ${i+1}"><div><strong>Photo ${i+1} · Rapport ${safe(r.id||'—')}</strong><p>${safe(dateText(r.photoCapturedAt||r.createdAt))} · ${safe(r.agentNom||'—')} · ${safe(r.siteNom||'—')}<br>${safe(r.category||'—')} · ${safe(r.severity||'—')}<br>${safe(r.message||'')}</p></div></article>`).join('')}</section>`;
 }
-function missionReportHtml({ mission, shift={}, reports=[] }){
+function missionReportHtml({ mission, shift={}, reports=[], timelineRows=null }){
   const logo = new URL('./assets/logo.png', location.href).href;
+  const orderedRows = timelineRows || buildMissionTimeline({ mission, shift, reports });
   const metrics = [
     ['Rapports', reports.length],
     ['Rondes', shift.roundsCount || mission.roundsCount || 0],
     ['Événements', shift.incidentsCount || mission.incidentsCount || 0],
     ['Conformité', (shift.conformityScore ?? mission.conformityScore ?? '—') + '%']
   ];
-  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Mission</span><strong>${safe(mission.id || '—')}</strong></div></section><section class="azza-text"><p><strong>Prévu :</strong> ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br><strong>Réalisé :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Catégorie','Gravité','Photo','Message'], reports, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message])}</section>${photoAnnexesHtml(reports)}<section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Mission</span><strong>${safe(mission.id || '—')}</strong></div></section><section class="azza-text"><p><strong>Prévu :</strong> ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br><strong>Réalisé :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Événement','Gravité','Photo','Observation'], orderedRows, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message])}</section>${photoAnnexesHtml(reports)}<section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
 }
 function generatedDocumentHtml(d){
   const p=d?.payload||{};
-  if(d.type==='mission') return missionReportHtml({mission:p.mission||{},shift:p.shift||{},reports:p.rows||[]});
+  if(d.type==='mission') return missionReportHtml({mission:p.mission||{},shift:p.shift||{},reports:p.rows||[],timelineRows:p.timelineRows||null});
   if(d.type==='invoice') return invoiceHtml(p.invoice||p||{}, p.profile||{});
   const logo=new URL('./assets/logo.png',location.href).href;
   const rows=generatedDocumentRows(d);

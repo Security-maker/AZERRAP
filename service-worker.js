@@ -1,10 +1,15 @@
-const CACHE_NAME = 'sentinelle-pro-v5-7-5-monthly-planning';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-7-5';
+const CACHE_NAME = 'sentinelle-pro-v5-8-1-consolidated';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-8-1';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=575',
-  './app.js?v=575',
+  './style.css?v=581',
+  './app.js?v=581',
+  './supabase-config.js',
+  './supabase-bridge.js',
+  './client.html',
+  './client-style.css?v=581',
+  './client-app.js?v=581',
   './push-init.js?v=565',
   './firebase-config.js',
   './manifest.json',
@@ -18,13 +23,19 @@ const TRUSTED_OFFLINE_CDN = new Set([
   'www.gstatic.com',
   'unpkg.com',
   'cdnjs.cloudflare.com',
+  'cdn.jsdelivr.net',
   'fonts.googleapis.com',
   'fonts.gstatic.com'
 ]);
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
-  self.skipWaiting();
+  // Ne pas appeler skipWaiting ici : une mission en cours ne doit jamais être
+  // interrompue par l'activation forcée d'une nouvelle version.
+});
+
+self.addEventListener('message', event => {
+  if (event.data?.type === 'ACTIVATE_UPDATE') self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
@@ -64,19 +75,12 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-
-  // OneSignal reste totalement séparé du cache principal de la PWA.
-  if (url.pathname.endsWith('/push/onesignal/OneSignalSDKWorker.js') || url.hostname === 'cdn.onesignal.com') {
-    return;
-  }
-
+  if (url.pathname.endsWith('/push/onesignal/OneSignalSDKWorker.js') || url.hostname === 'cdn.onesignal.com') return;
   if (TRUSTED_OFFLINE_CDN.has(url.hostname)) {
     event.respondWith(staleWhileRevalidate(request));
     return;
   }
-
   if (url.origin !== self.location.origin) return;
-
   if (request.mode === 'navigate') {
     event.respondWith(networkFirst(request, CACHE_NAME, './index.html').then(async response => {
       if (response && response.type !== 'error') return response;
@@ -84,6 +88,5 @@ self.addEventListener('fetch', event => {
     }));
     return;
   }
-
   event.respondWith(networkFirst(request, CACHE_NAME));
 });
