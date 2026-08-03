@@ -1,6 +1,6 @@
-// Sentinelle Pro V5.6 — Cloudflare Worker notifications opérationnelles
+// Sentinelle Pro V5.8.1 — Cloudflare Worker notifications opérationnelles
 // Secrets/variables Cloudflare requis :
-// ONESIGNAL_APP_ID, ONESIGNAL_REST_API_KEY, SENTINELLE_PUSH_SECRET, ALLOWED_ORIGIN
+// ONESIGNAL_APP_ID, ONESIGNAL_REST_API_KEY, SENTINELLE_PUSH_SECRET, ALLOWED_ORIGIN, FIREBASE_PROJECT_ID
 
 function corsHeaders(request, env) {
   const requestOrigin = request.headers.get('Origin') || '';
@@ -78,7 +78,7 @@ async function verifyFirebaseIdToken(token, projectId) {
   const claims = decodeJwtPart(parts[1]);
   if (header.alg !== 'RS256' || !header.kid) throw new Error('Signature Firebase invalide');
   const now = Math.floor(Date.now() / 1000);
-  if (claims.aud !== projectId || claims.iss !== `https://securetoken.google.com/${projectId}` || !claims.sub || claims.exp <= now || claims.iat > now + 60) {
+  if (claims.aud !== projectId || claims.iss !== `https://securetoken.google.com/${projectId}` || !claims.sub || claims.exp <= now || claims.iat > now + 60 || !claims.auth_time || claims.auth_time > now + 60) {
     throw new Error('Jeton Firebase refusé');
   }
   const keys = await firebaseJwks();
@@ -98,6 +98,32 @@ async function stableUuid(value) {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = [...bytes].map(v => v.toString(16).padStart(2,'0')).join('');
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+function firestoreString(fields, key) {
+  const value = fields?.[key];
+  if (!value || typeof value !== 'object') return '';
+  return String(value.stringValue ?? value.referenceValue ?? '');
+}
+async function verifyShiftDocument({ projectId, shiftId, token, uid }) {
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents/shifts/${encodeURIComponent(shiftId)}`;
+  const response = await fetch(url, {
+    headers:{ 'Authorization':`Bearer ${token}`, 'Accept':'application/json' }
+  });
+  if (!response.ok) throw new Error('Prise de poste introuvable ou non autorisée');
+  const document = await response.json();
+  const fields = document?.fields || {};
+  const agentId = firestoreString(fields, 'agentId');
+  const status = firestoreString(fields, 'status');
+  if (!agentId || agentId !== String(uid || '')) throw new Error('Cette prise de poste ne correspond pas au compte connecté');
+  if (status !== 'active') throw new Error('La prise de poste n’est pas active');
+  return {
+    agentId,
+    agentNom:firestoreString(fields, 'agentNom'),
+    siteId:firestoreString(fields, 'siteId'),
+    siteNom:firestoreString(fields, 'siteNom'),
+    missionId:firestoreString(fields, 'missionId')
+  };
 }
 
 export default {
@@ -121,10 +147,11 @@ export default {
     const secret = request.headers.get('x-sentinelle-push-secret') || '';
     const secretAuthorized = Boolean(env.SENTINELLE_PUSH_SECRET && secret === env.SENTINELLE_PUSH_SECRET);
     let firebaseClaims = null;
+    let firebaseBearer = '';
     if (!secretAuthorized) {
-      const bearer = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i,'').trim();
-      if (!bearer || !env.FIREBASE_PROJECT_ID) return jsonResponse(request, env, { ok:false, error:'Authentification push absente' }, 401);
-      try { firebaseClaims = await verifyFirebaseIdToken(bearer, String(env.FIREBASE_PROJECT_ID)); }
+      firebaseBearer = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i,'').trim();
+      if (!firebaseBearer || !env.FIREBASE_PROJECT_ID) return jsonResponse(request, env, { ok:false, error:'Authentification push absente' }, 401);
+      try { firebaseClaims = await verifyFirebaseIdToken(firebaseBearer, String(env.FIREBASE_PROJECT_ID)); }
       catch (error) { return jsonResponse(request, env, { ok:false, error:error.message || 'Jeton Firebase invalide' }, 401); }
     }
     if (!env.ONESIGNAL_APP_ID || !env.ONESIGNAL_REST_API_KEY) {
@@ -135,13 +162,35 @@ export default {
     try { payload = await request.json(); }
     catch { return jsonResponse(request, env, { ok:false, error:'Corps JSON invalide' }, 400); }
 
+    let verifiedShift = null;
     if (firebaseClaims) {
-      const allowed = payload.notificationType === 'shift_start' && payload.target === 'qg' && String(payload?.data?.agentId || '') === String(firebaseClaims.sub || '');
+      const shiftId = String(payload?.data?.shiftId || '').trim();
+      const allowed = payload.notificationType === 'shift_start' && payload.target === 'qg' && shiftId && String(payload?.data?.agentId || '') === String(firebaseClaims.sub || '');
       if (!allowed) return jsonResponse(request, env, { ok:false, error:'Action push non autorisée pour ce compte' }, 403);
+      try {
+        verifiedShift = await verifyShiftDocument({
+          projectId:String(env.FIREBASE_PROJECT_ID),
+          shiftId,
+          token:firebaseBearer,
+          uid:firebaseClaims.sub
+        });
+      } catch (error) {
+        return jsonResponse(request, env, { ok:false, error:error.message || 'Prise de poste non vérifiable' }, 403);
+      }
+      payload.data = {
+        ...(payload.data && typeof payload.data === 'object' ? payload.data : {}),
+        shiftId,
+        agentId:verifiedShift.agentId,
+        siteId:verifiedShift.siteId,
+        missionId:verifiedShift.missionId,
+        route:'home'
+      };
     }
 
-    const title = String(payload.title || 'Sentinelle Pro').slice(0, 100);
-    const message = String(payload.message || 'Nouvelle information opérationnelle').slice(0, 480);
+    const title = firebaseClaims ? 'Agent en poste' : String(payload.title || 'Sentinelle Pro').slice(0, 100);
+    const message = firebaseClaims
+      ? `${verifiedShift?.agentNom || 'Un agent'} vient de confirmer sa prise de poste${verifiedShift?.siteNom ? ` sur ${verifiedShift.siteNom}` : ''}. Ouvrez Sentinelle Pro pour consulter les détails.`
+      : String(payload.message || 'Nouvelle information opérationnelle').slice(0, 480);
     const priority = String(payload.priority || 'Information');
     const notificationType = String(payload.notificationType || 'flash').slice(0, 40);
     const notificationId = String(payload.notificationId || payload.flashId || Date.now()).slice(0, 120);

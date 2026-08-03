@@ -1783,9 +1783,9 @@ function listenQGStats(){
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
 function listenQGReportsFeed(){
   const box = document.querySelector('#qg-reports-feed'); if(!box) return;
-  const q = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(12));
+  const q = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(3));
   unsubscribeList.push(onSnapshot(q, snap => {
-    const rows = snap.docs.slice(0,3);
+    const rows = snap.docs;
     box.innerHTML = rows.length ? rows.map(d=>reportTimeline(d.data())).join('') : `<div class="empty">Aucun rapport.</div>`;
   }));
 }
@@ -1924,7 +1924,7 @@ async function renderQGMissions(){
       <div class="field compact-field"><label>Recherche</label><input class="input" id="planning-search" placeholder="Site, agent, client..."></div>
       <button class="btn primary" id="planning-quick-create" type="button">+ Mission rapide</button>
     </div>
-    <div class="planning-helpbar"><span>Astuce PC : clique sur une case vide pour créer une mission sur ce jour. Une mission de plusieurs jours s’étale automatiquement sur toute la période.</span></div>
+    <div class="planning-helpbar"><span>Lecture compacte : chaque case colorée indique le nombre d’agents prévus sur la journée. Survole-la pour voir leurs noms et horaires, ou clique dessus pour ouvrir le détail. Clique sur une case vide pour créer une mission.</span></div>
     <div id="planning-site-legend" class="planning-site-legend"></div>
     <div id="planning-board" class="planning-board"><div class="empty">Chargement du planning...</div></div>
   </section>
@@ -2355,64 +2355,86 @@ function openPlanningMissionEditModal(m){
   });
 }
 
+function monthlyMissionOccurrences(m, monthValue){
+  const originalStart=timestampToDate(m?.scheduledStart), originalEnd=timestampToDate(m?.scheduledEnd);
+  if(!originalStart||!originalEnd||originalEnd<=originalStart||!/^[0-9]{4}-[0-9]{2}$/.test(String(monthValue||''))) return [];
+  const range=monthRange(monthValue);
+  const durationMs=originalEnd.getTime()-originalStart.getTime();
+  const weekday=originalStart.getDay();
+  const sameMonth=localMonthValue(originalStart)===monthValue;
+  const periods=[];
+  for(let day=new Date(range.start);day<range.end;day=addDays(day,1)){
+    if(day.getDay()!==weekday) continue;
+    const start=new Date(day.getFullYear(),day.getMonth(),day.getDate(),originalStart.getHours(),originalStart.getMinutes(),originalStart.getSeconds(),0);
+    const end=new Date(start.getTime()+durationMs);
+    if(sameMonth&&start.getTime()<=originalStart.getTime()) continue;
+    const exactDuplicate=qgPlanningState.missions.some(row=>
+      row.id!==m.id&&row.status!=='cancelled'&&row.agentId===m.agentId&&row.siteId===m.siteId&&
+      Math.abs((missionStartMs(row)||0)-start.getTime())<60000&&Math.abs((missionEndMs(row)||0)-end.getTime())<60000
+    );
+    if(!exactDuplicate) periods.push({start,end});
+  }
+  return periods;
+}
+
 async function duplicateMissionAcrossMonth(m){
   const originalStart=timestampToDate(m?.scheduledStart), originalEnd=timestampToDate(m?.scheduledEnd);
   if(!originalStart||!originalEnd||originalEnd<=originalStart) return toast('Horaire de mission invalide.','error');
   const defaultMonth=localMonthValue(originalStart);
   showModal('Dupliquer sur le mois', `<form id="duplicate-month-form">
-    <div class="setup-box"><strong>Répétition hebdomadaire</strong><br>La vacation sera reproduite chaque semaine, le même jour et aux mêmes horaires, sur le mois choisi. Les conflits seront contrôlés avant la création.</div>
+    <div class="setup-box"><strong>Répétition hebdomadaire</strong><br>La vacation sera reproduite chaque semaine, le même jour et aux mêmes horaires. La mission d’origine et les vacations déjà existantes ne seront jamais modifiées.</div>
     <div class="field"><label>Mois cible</label><input class="input" type="month" name="month" value="${safe(defaultMonth)}" required></div>
-    <div class="setup-box warning-copy">Le mois sera préparé en brouillon pour éviter toute notification pendant la construction du planning. Les agents seront avertis une seule fois lors de la publication mensuelle.</div>
+    <div class="setup-box" id="duplicate-month-preview">Calcul des occurrences…</div>
     <button class="btn primary full" type="submit">Créer les duplications du mois</button>
   </form>`);
-  document.querySelector('#duplicate-month-form')?.addEventListener('submit',async event=>{
+  const form=document.querySelector('#duplicate-month-form');
+  const monthInput=form?.querySelector('[name="month"]');
+  const preview=document.querySelector('#duplicate-month-preview');
+  const refreshPreview=async()=>{
+    const month=String(monthInput?.value||defaultMonth);
+    const periods=monthlyMissionOccurrences(m,month);
+    const publication=await getMonthlyPlanningPublication(month).catch(()=>null);
+    const mode=publication?.status==='draft'?'Brouillon mensuel : aucune notification ne sera envoyée.':'Mois publié ou hors brouillon : une seule notification sera envoyée à l’agent pour toute la série.';
+    if(preview) preview.innerHTML=periods.length
+      ? `<strong>${periods.length} vacation${periods.length>1?'s':''} à créer</strong><br>${periods.map(period=>dateText(period.start)).join(' · ')}<br><br>${safe(mode)}`
+      : '<strong>Aucune nouvelle vacation à créer.</strong><br>Les occurrences identiques déjà présentes sont ignorées.';
+  };
+  monthInput?.addEventListener('change',()=>refreshPreview());
+  refreshPreview();
+  form?.addEventListener('submit',async event=>{
     event.preventDefault();
-    const form=event.currentTarget;
     const button=form.querySelector('button[type="submit"]');
     const month=String(new FormData(form).get('month')||'');
-    if(!/^\d{4}-\d{2}$/.test(month)) return toast('Choisis un mois valide.','warning');
-    const range=monthRange(month);
-    const durationMs=originalEnd.getTime()-originalStart.getTime();
-    const weekday=originalStart.getDay();
-    const periods=[];
-    for(let day=new Date(range.start);day<range.end;day=addDays(day,1)){
-      if(day.getDay()!==weekday) continue;
-      const start=new Date(day.getFullYear(),day.getMonth(),day.getDate(),originalStart.getHours(),originalStart.getMinutes(),originalStart.getSeconds(),0);
-      const end=new Date(start.getTime()+durationMs);
-      const isOriginalDay=start.getTime()===originalStart.getTime();
-      if(isOriginalDay) continue;
-      periods.push({start,end});
-    }
+    const periods=monthlyMissionOccurrences(m,month);
     if(!periods.length) return toast('Aucune nouvelle occurrence à créer sur ce mois.','warning');
     const conflicts=periods.flatMap(period=>missionConflicts(m.agentId,period.start,period.end));
     const conflictIds=[...new Set(conflicts.map(row=>row.id).filter(Boolean))];
-    const conflictMessage=conflictIds.length?` ${conflictIds.length} vacation(s) existante(s) se chevauchent. Elles ne seront pas supprimées.`:'';
-    if(!confirm(`Créer ${periods.length} vacation(s) hebdomadaire(s) en brouillon pour ${range.label} ?${conflictMessage}`)) return;
+    if(conflictIds.length&&!confirm(`${conflictIds.length} vacation(s) existante(s) se chevauchent. Créer quand même les nouvelles vacations ?`)) return;
     if(button){button.disabled=true;button.textContent='Duplication en cours...';}
     try{
       const publication=await getMonthlyPlanningPublication(month,{force:true});
-      const monthRows=qgPlanningState.missions.filter(row=>planningMonthForValue(row.scheduledStart)===month&&['planned','assigned'].includes(row.status||'planned'));
-      if(publication?.status!=='draft'){
-        await setDoc(docRef('planningPublications',planningPublicationDocId(month)),{
-          month,status:'draft',version:Math.max(1,Number(publication?.version||0)+1),startedAt:serverTimestamp(),startedBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
-        },{merge:true});
-        await batchUpdateMissionDocuments(monthRows,row=>({publicationStatus:'draft',planningMonth:month,monthlyPlanning:true,planningRevision:missionRevision(row)+1,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,updatedAt:serverTimestamp(),updatedBy:currentUser.uid}));
-      }
+      const isDraft=publication?.status==='draft';
       const batch=writeBatch(db);
       const seriesId=`serie_mois_${id()}`;
+      const createdIds=[];
       periods.forEach(period=>{
         const ref=doc(collectionRef('missions'));
+        createdIds.push(ref.id);
         batch.set(ref,{
           agentId:m.agentId,agentNom:m.agentNom,siteId:m.siteId,siteNom:m.siteNom,siteColor:m.siteColor||planningColorForSite(m.siteId),hourlyRate:Number(m.hourlyRate||0),type:m.type||'Surveillance',instructions:m.instructions||'',
           scheduledStart:Timestamp.fromDate(period.start),scheduledEnd:Timestamp.fromDate(period.end),status:'planned',planningRevision:1,acknowledgedAt:null,acknowledgedBy:null,acknowledgedRevision:0,
-          copiedFrom:m.id,seriesId,repeatMode:'weekly_month',planningMonth:month,publicationStatus:'draft',monthlyPlanning:true,createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+          copiedFrom:m.id,seriesId,repeatMode:'weekly_month',planningMonth:month,publicationStatus:isDraft?'draft':'published',monthlyPlanning:isDraft,
+          createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
         });
       });
       await batch.commit();
-      qgPlanningState.publications.delete(month);
-      await addAudit('missions_month_duplicated',{sourceMissionId:m.id,month,count:periods.length,conflictCount:conflictIds.length,draft:true});
+      let pushResult={ok:false,skipped:true,reason:'Vacations conservées dans le brouillon mensuel'};
+      if(!isDraft){
+        pushResult=await spNotifyMissionCreated({agentId:m.agentId,siteName:m.siteNom,start:Timestamp.fromDate(periods[0].start),end:Timestamp.fromDate(periods.at(-1).end),count:periods.length,missionId:createdIds[0]||''});
+      }
+      await addAudit('missions_month_duplicated',{sourceMissionId:m.id,month,count:periods.length,createdIds,conflictCount:conflictIds.length,draft:isDraft,pushStatus:pushResult?.ok?'sent':pushResult?.reason||pushResult?.error||'skipped'});
       closeModal();
-      toast(`${periods.length} vacation(s) ajoutée(s) au brouillon de ${range.label}.`,'success');
+      toast(isDraft?`${periods.length} vacation(s) ajoutée(s) au brouillon mensuel.`:`${periods.length} vacation(s) créée(s). Une notification unique a été envoyée à l’agent.`,'success');
       refreshMonthlyPublicationPanel();
     }catch(error){
       console.error(error);
@@ -2501,13 +2523,109 @@ function planningResourceRow({ res, mode, dates, start, end, days, rangeMissions
   const missions = rangeMissions
     .filter(m => (mode === 'agents' && m.agentId === res.id) || (mode === 'sites' && m.siteId === res.id))
     .sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+  if (mode === 'sites') return planningSiteSummaryRow({ res, dates, days, missions });
   const items = missions.map(m => planningMissionSpan(m, start, days)).filter(Boolean);
   assignPlanningTracks(items);
   const tracks = Math.max(1, ...items.map(i=>i.track + 1));
   const cells = dates.map((d,i)=>`<button type="button" class="planning-bg-cell ${isToday(d)?'today':''}" style="grid-column:${i+1};grid-row:1 / span ${tracks}" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${d.toISOString().slice(0,10)}" title="Créer une mission le ${planningDateLabel(d)}"><span>+</span></button>`).join('');
   const bars = items.map(item => planningMissionBar(item, mode)).join('');
-  const resourceColor = mode === 'sites' ? planningColorForSite(res.id) : null;
-  return `<div class="planning-row-v46" style="--days:${days};--tracks:${tracks}"><div class="planning-resource planning-resource-v46" ${resourceColor?`style="--resource-color:${resourceColor}"`:''}>${resourceColor?`<i class="planning-resource-color" style="background:${resourceColor}"></i>`:''}<strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane" style="--days:${days};--tracks:${tracks}">${cells}${bars}</div></div>`;
+  return `<div class="planning-row-v46" style="--days:${days};--tracks:${tracks}"><div class="planning-resource planning-resource-v46"><strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane" style="--days:${days};--tracks:${tracks}">${cells}${bars}</div></div>`;
+}
+function planningSiteSummaryRow({ res, dates, days, missions }){
+  const siteColor = planningColorForSite(res.id);
+  const textColor = contrastColor(siteColor);
+  const cells = dates.map((date,index) => {
+    const dayMissions = planningMissionsForDay(missions, date);
+    if (!dayMissions.length) {
+      return `<button type="button" class="planning-bg-cell planning-summary-empty ${isToday(date)?'today':''}" style="grid-column:${index+1};grid-row:1" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${date.toISOString().slice(0,10)}" title="Créer une mission le ${planningDateLabel(date)}"><span>+</span></button>`;
+    }
+    const agentKeys = new Set(dayMissions.map(m => String(m.agentId || m.agentNom || m.id || '')).filter(Boolean));
+    const agentCount = Math.max(1, agentKeys.size);
+    const missionIds = dayMissions.map(m=>m.id).filter(Boolean).join(',');
+    const anyLate = dayMissions.some(m=>missionIsLate(m));
+    const anyDraft = dayMissions.some(m=>missionIsDraft(m));
+    const allCompleted = dayMissions.every(m=>m.status==='completed');
+    const accessible = `${agentCount} agent${agentCount>1?'s':''} prévu${agentCount>1?'s':''} le ${planningDateLabel(date)}. Survoler pour le détail.`;
+    return `<button type="button" class="planning-day-summary site-color ${isToday(date)?'today':''} ${anyLate?'late':''} ${anyDraft?'has-draft':''} ${allCompleted?'status-completed':''}" style="grid-column:${index+1};grid-row:1;--site-color:${siteColor};--site-text:${textColor}" data-planning-day-summary="1" data-resource-id="${safe(res.id)}" data-date="${date.toISOString().slice(0,10)}" data-mission-ids="${safe(missionIds)}" aria-label="${safe(accessible)}"><strong>${agentCount}</strong><span>agent${agentCount>1?'s':''}</span></button>`;
+  }).join('');
+  const totalAgents = new Set(missions.map(m=>String(m.agentId || m.agentNom || '')).filter(Boolean)).size;
+  return `<div class="planning-row-v46 planning-row-summary" style="--days:${days};--tracks:1"><div class="planning-resource planning-resource-v46 planning-resource-summary" style="--resource-color:${siteColor}"><i class="planning-resource-color" style="background:${siteColor}"></i><strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${totalAgents} agent${totalAgents>1?'s':''} · ${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane planning-lane-summary" style="--days:${days};--tracks:1">${cells}</div></div>`;
+}
+function planningMissionsForDay(missions, date){
+  const dayStart = startOfDay(date).getTime();
+  const nextDayStart = addDays(startOfDay(date),1).getTime();
+  return missions.filter(m => {
+    const start = missionStartMs(m), end = missionEndMs(m);
+    return start && end && start < nextDayStart && end > dayStart;
+  }).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+}
+function planningMissionTimeLabel(m){
+  const start = m.scheduledStart?.toDate?.();
+  const end = m.scheduledEnd?.toDate?.();
+  if (!start) return 'Horaire indisponible';
+  const startText = start.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+  const endText = end ? end.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}) : '--:--';
+  const extraDays = end ? Math.max(0, Math.round((startOfDay(end).getTime()-startOfDay(start).getTime())/86400000)) : 0;
+  return `${startText} – ${endText}${extraDays?` (+${extraDays}j)`:''}`;
+}
+function planningMissionIdsFromButton(button){
+  return String(button?.dataset?.missionIds || '').split(',').map(id=>id.trim()).filter(Boolean);
+}
+function planningMissionsFromSummaryButton(button){
+  const ids = new Set(planningMissionIdsFromButton(button));
+  return qgPlanningState.missions.filter(m=>ids.has(String(m.id))).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+}
+function ensurePlanningHoverCard(){
+  let card = document.querySelector('#planning-hover-card');
+  if (card) return card;
+  card = document.createElement('div');
+  card.id = 'planning-hover-card';
+  card.className = 'planning-hover-card';
+  card.setAttribute('role','tooltip');
+  document.body.appendChild(card);
+  return card;
+}
+function positionPlanningHoverCard(card, button, pointer=null){
+  if (!card || !button) return;
+  const margin = 12;
+  const rect = button.getBoundingClientRect();
+  const width = Math.min(340, Math.max(250, card.offsetWidth || 290));
+  let left = pointer?.clientX != null ? pointer.clientX + 14 : rect.left + rect.width/2 - width/2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+  let top = pointer?.clientY != null ? pointer.clientY + 16 : rect.bottom + 10;
+  const height = card.offsetHeight || 160;
+  if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 10);
+  card.style.left = `${Math.round(left)}px`;
+  card.style.top = `${Math.round(top)}px`;
+}
+function showPlanningHoverCard(button, pointer=null){
+  const missions = planningMissionsFromSummaryButton(button);
+  if (!missions.length) return;
+  const card = ensurePlanningHoverCard();
+  const site = qgPlanningState.sites.find(s=>s.id===button.dataset.resourceId);
+  const date = new Date(`${button.dataset.date}T12:00:00`);
+  const rows = missions.map(m=>`<div class="planning-hover-row"><div><strong>${safe(m.agentNom || 'Agent')}</strong><span>${safe(m.type || 'Mission')} · ${safe(missionStatusLabel(m.status))}${missionIsDraft(m)?' · Brouillon':''}</span></div><time>${safe(planningMissionTimeLabel(m))}</time></div>`).join('');
+  card.innerHTML = `<div class="planning-hover-head"><div><strong>${safe(site?.name || site?.siteNom || 'Site')}</strong><span>${safe(planningDateLabel(date))} · ${missions.length} mission${missions.length>1?'s':''}</span></div></div><div class="planning-hover-list">${rows}</div><small>Clique pour ouvrir le détail de la journée.</small>`;
+  card.classList.add('visible');
+  card.setAttribute('aria-hidden','false');
+  requestAnimationFrame(()=>positionPlanningHoverCard(card,button,pointer));
+}
+function hidePlanningHoverCard(){
+  const card = document.querySelector('#planning-hover-card');
+  if (!card) return;
+  card.classList.remove('visible');
+  card.setAttribute('aria-hidden','true');
+}
+function openPlanningDaySummaryModal(button){
+  const missions = planningMissionsFromSummaryButton(button);
+  if (!missions.length) return;
+  if (missions.length === 1) return openPlanningMissionModal(missions[0].id);
+  const site = qgPlanningState.sites.find(s=>s.id===button.dataset.resourceId);
+  const date = new Date(`${button.dataset.date}T12:00:00`);
+  const rows = missions.map(m=>`<button type="button" class="item planning-day-modal-item" data-day-mission-open="${safe(m.id)}"><div class="item-main"><div class="item-title">${safe(m.agentNom || 'Agent')} <span class="pill ${missionStatusColor(m.status)}">${safe(missionStatusLabel(m.status))}</span></div><div class="item-meta">${safe(planningMissionTimeLabel(m))}<br>${safe(m.type || 'Mission')}</div></div><span aria-hidden="true">›</span></button>`).join('');
+  showModal(`Planning du ${planningDateLabel(date)}`, `<div class="setup-box"><strong>${safe(site?.name || site?.siteNom || 'Site')}</strong><br>${missions.length} mission${missions.length>1?'s':''} sur cette journée.</div><div class="list planning-day-modal-list">${rows}</div><button type="button" class="btn primary full" id="planning-day-add-mission">+ Ajouter une mission sur ce jour</button>`);
+  document.querySelectorAll('[data-day-mission-open]').forEach(row=>row.addEventListener('click',()=>openPlanningMissionModal(row.dataset.dayMissionOpen)));
+  document.querySelector('#planning-day-add-mission')?.addEventListener('click',()=>openPlanningQuickMissionModal({resourceId:button.dataset.resourceId,date:button.dataset.date}));
 }
 function missionStartMs(m){ return m.scheduledStart?.toDate?.()?.getTime() || null; }
 function missionEndMs(m){
@@ -2557,10 +2675,23 @@ function planningMissionBar(item, mode){
 function bindPlanningBoardActions(){
   const root = document.querySelector('#planning-board');
   if (!root) return;
+  hidePlanningHoverCard();
   root.querySelectorAll('[data-mission-open]').forEach(btn => btn.addEventListener('click', e => {
     e.stopPropagation();
     openPlanningMissionModal(btn.dataset.missionOpen);
   }));
+  root.querySelectorAll('[data-planning-day-summary]').forEach(btn => {
+    btn.addEventListener('mouseenter', e=>showPlanningHoverCard(btn,e));
+    btn.addEventListener('mousemove', e=>positionPlanningHoverCard(document.querySelector('#planning-hover-card'),btn,e));
+    btn.addEventListener('mouseleave', hidePlanningHoverCard);
+    btn.addEventListener('focus', ()=>showPlanningHoverCard(btn));
+    btn.addEventListener('blur', hidePlanningHoverCard);
+    btn.addEventListener('click', e=>{
+      e.stopPropagation();
+      hidePlanningHoverCard();
+      openPlanningDaySummaryModal(btn);
+    });
+  });
   root.querySelectorAll('[data-planning-cell]').forEach(btn => btn.addEventListener('click', e => {
     e.stopPropagation();
     openPlanningQuickMissionModal({ resourceId:btn.dataset.resourceId, date:btn.dataset.date });
@@ -2603,7 +2734,7 @@ function listenMissionsList(selector){
       toast('Mission annulée', 'warning');
     }));
     document.querySelectorAll('[data-mission-pdf]').forEach(btn => btn.addEventListener('click', () => printMissionById(btn.dataset.missionPdf)));
-    document.querySelectorAll('[data-mission-duplicate]').forEach(btn => btn.addEventListener('click', () => duplicateMissionFlow(rows.find(m=>m.id===btn.dataset.missionDuplicate))));
+    document.querySelectorAll('[data-mission-duplicate]').forEach(btn => btn.addEventListener('click', () => duplicateMissionAcrossMonth(rows.find(m=>m.id===btn.dataset.missionDuplicate))));
   }, () => box.innerHTML = `<div class="empty">Missions indisponibles. Un index Firestore peut être requis.</div>`));
 }
 async function duplicateMissionFlow(m){
@@ -2631,7 +2762,7 @@ function missionItem(m){
   const late = missionIsLate(m);
   const color = missionIsDraft(m) ? 'blue' : (late ? 'red' : missionStatusColor(m.status));
   const delay = m.actualStart && m.scheduledStart ? Math.round(((m.actualStart.toDate?.()?.getTime()||0) - (m.scheduledStart.toDate?.()?.getTime()||0))/60000) : null;
-  return `<div class="item mission-row ${late?'late':''}"><div class="item-main"><div class="item-title">${safe(m.siteNom)} · ${safe(m.agentNom)} <span class="pill ${color}">${missionIsDraft(m)?'Brouillon':(late?'Retard':missionStatusLabel(m.status))}</span></div><div class="item-meta">Prévu : ${dateText(m.scheduledStart)} → ${dateText(m.scheduledEnd)}<br>Type : ${safe(m.type || 'Mission')} ${delay!==null ? `<br>Pointage : ${delay>0?`+${delay} min`:`${delay} min`}`:''}${typeof m.conformityScore==='number'?`<br>Conformité : ${m.conformityScore}%`:''}</div></div><div class="item-actions"><button class="btn small" data-mission-pdf="${safe(m.id)}">Rapport PDF</button><button class="btn small ghost" data-mission-duplicate="${safe(m.id)}">Dupliquer</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn small ghost" data-mission-cancel="${safe(m.id)}">Annuler</button>`:''}</div></div>`;
+  return `<div class="item mission-row ${late?'late':''}"><div class="item-main"><div class="item-title">${safe(m.siteNom)} · ${safe(m.agentNom)} <span class="pill ${color}">${missionIsDraft(m)?'Brouillon':(late?'Retard':missionStatusLabel(m.status))}</span></div><div class="item-meta">Prévu : ${dateText(m.scheduledStart)} → ${dateText(m.scheduledEnd)}<br>Type : ${safe(m.type || 'Mission')} ${delay!==null ? `<br>Pointage : ${delay>0?`+${delay} min`:`${delay} min`}`:''}${typeof m.conformityScore==='number'?`<br>Conformité : ${m.conformityScore}%`:''}</div></div><div class="item-actions"><button class="btn small" data-mission-pdf="${safe(m.id)}">Rapport PDF</button><button class="btn small ghost" data-mission-duplicate="${safe(m.id)}">Dupliquer sur le mois</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn small ghost" data-mission-cancel="${safe(m.id)}">Annuler</button>`:''}</div></div>`;
 }
 function renderQGNotifications(){
   currentRoute = 'notifications';

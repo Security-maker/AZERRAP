@@ -1,10 +1,10 @@
-const CACHE_NAME = 'sentinelle-pro-v5-8-1-consolidated';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-8-1';
+const CACHE_NAME = 'sentinelle-pro-v5-8-2-planning-compact';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-8-2';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=581',
-  './app.js?v=581',
+  './style.css?v=582',
+  './app.js?v=582',
   './supabase-config.js',
   './supabase-bridge.js',
   './client.html',

@@ -944,3 +944,80 @@ body.modal-open{
 .card-title .btn-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .notification.blue{border-color:rgba(0,156,255,.42);background:rgba(0,156,255,.07)}
 @media(max-width:560px){.card-title .btn-row{width:100%;justify-content:stretch}.card-title .btn-row .btn{flex:1}}
+
+
+/* V5.8.2 — Planning QG compact par journée, sans modification des données */
+.planning-row-summary{--tracks:1}
+.planning-resource-summary{min-height:72px!important;padding-top:11px!important}
+.planning-lane-summary{grid-template-rows:56px!important;min-height:72px!important;gap:6px}
+.planning-summary-empty{height:56px;min-height:56px;box-sizing:border-box}
+.planning-day-summary{
+  position:relative;
+  z-index:3;
+  width:100%;
+  min-width:0;
+  height:56px;
+  min-height:56px;
+  box-sizing:border-box;
+  border:1px solid color-mix(in srgb,var(--site-color),white 28%);
+  border-radius:12px;
+  background:var(--site-color);
+  color:var(--site-text);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:1px;
+  padding:5px 4px;
+  cursor:pointer;
+  text-align:center;
+  overflow:hidden;
+  box-shadow:0 0 0 1px rgba(255,255,255,.10) inset,0 7px 16px color-mix(in srgb,var(--site-color),transparent 76%);
+  transition:filter .14s ease,transform .14s ease,outline-color .14s ease;
+}
+.planning-day-summary:hover,.planning-day-summary:focus-visible{filter:brightness(1.12) saturate(1.06);transform:translateY(-1px);outline:2px solid color-mix(in srgb,var(--site-color),white 48%);outline-offset:-2px}
+.planning-day-summary strong{font-size:18px;line-height:1;font-weight:1000;color:inherit}
+.planning-day-summary span{font-size:9px;line-height:1.15;font-weight:1000;text-transform:uppercase;letter-spacing:.045em;color:inherit;opacity:.96;white-space:nowrap}
+.planning-day-summary.today{box-shadow:0 0 0 3px rgba(255,255,255,.34) inset,0 7px 16px color-mix(in srgb,var(--site-color),transparent 70%)}
+.planning-day-summary.late{outline:3px solid rgba(255,46,46,.78);outline-offset:-3px}
+.planning-day-summary.has-draft{border-style:dashed;opacity:.78}
+.planning-day-summary.status-completed{filter:saturate(.70) brightness(.88)}
+.planning-hover-card{
+  position:fixed;
+  z-index:10020;
+  display:none;
+  width:min(340px,calc(100vw - 24px));
+  max-height:min(420px,calc(100vh - 24px));
+  overflow:auto;
+  padding:12px;
+  border:1px solid rgba(100,208,255,.28);
+  border-radius:16px;
+  background:rgba(5,14,27,.985);
+  color:var(--cold);
+  box-shadow:0 18px 48px rgba(0,0,0,.58),inset 0 1px 0 rgba(255,255,255,.05);
+  pointer-events:none;
+  backdrop-filter:blur(16px);
+}
+.planning-hover-card.visible{display:block}
+.planning-hover-head{padding:2px 2px 10px;border-bottom:1px solid var(--border)}
+.planning-hover-head strong{display:block;font-size:14px;color:var(--cold)}
+.planning-hover-head span{display:block;margin-top:3px;font-size:10px;color:var(--azure);font-weight:900;text-transform:uppercase;letter-spacing:.04em}
+.planning-hover-list{display:grid;gap:0;margin:5px 0}
+.planning-hover-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;padding:9px 2px;border-bottom:1px solid rgba(244,248,251,.07)}
+.planning-hover-row:last-child{border-bottom:0}
+.planning-hover-row div{min-width:0}
+.planning-hover-row strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--cold)}
+.planning-hover-row span{display:block;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;color:var(--metal);font-weight:800}
+.planning-hover-row time{font-size:11px;color:var(--azure);font-weight:1000;white-space:nowrap}
+.planning-hover-card>small{display:block;padding-top:7px;border-top:1px solid var(--border);color:var(--metal);font-size:9px;font-weight:700}
+.planning-day-modal-list{margin:12px 0}
+.planning-day-modal-item{width:100%;cursor:pointer;text-align:left;color:inherit}
+@media(max-width:760px){
+  .planning-resource-summary{min-height:62px!important}
+  .planning-lane-summary{grid-template-rows:48px!important;min-height:62px!important;padding:6px!important}
+  .planning-summary-empty,.planning-day-summary{height:48px;min-height:48px;border-radius:10px}
+  .planning-day-summary strong{font-size:16px}
+  .planning-day-summary span{font-size:8px}
+  .planning-hover-card{display:none!important}
+}
+@media print{.planning-hover-card{display:none!important}}
