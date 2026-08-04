@@ -3797,8 +3797,23 @@ function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rap
 function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'', photoUrl:r.photoUrl||'', photoAvailable:Boolean(r.photoAvailable||r.photoUrl), photoBytes:Number(r.photoBytes||0), photoMimeType:r.photoMimeType||'', photoWidth:Number(r.photoWidth||0), photoHeight:Number(r.photoHeight||0), photoCapturedAt:isoDateValue(r.photoCapturedAt)||null, gps:r.gps||null }; }
 function compactRound(r){ return { id:r.id||'', scannedAt:isoDateValue(r.scannedAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', checkpointName:r.checkpointName||'', scanMethod:r.scanMethod||'', isValid:r.isValid !== false }; }
 function compactAlert(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt || r.heure), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteActuel||r.siteId||'', siteNom:r.siteActuelNom||r.siteNom||'', typeAlerte:r.typeAlerte||'SOS/PTI', statut:r.statut||'', niveau:r.niveau||'', message:r.message||'', closeReason:r.closeReason||r.closureReason||'' }; }
-function compactMission(m){ return { id:m.id||'', agentId:m.agentId||'', agentNom:m.agentNom||'', siteId:m.siteId||'', siteNom:m.siteNom||'', type:m.type||'', instructions:m.instructions||'', status:m.status||'', scheduledStart:isoDateValue(m.scheduledStart), scheduledEnd:isoDateValue(m.scheduledEnd), actualStart:isoDateValue(m.actualStart), actualEnd:isoDateValue(m.actualEnd), conformityScore:m.conformityScore ?? null, roundsCount:m.roundsCount||0, incidentsCount:m.incidentsCount||0 }; }
-function compactShift(s){ return { id:s.id||'', agentId:s.agentId||'', agentNom:s.agentNom||'', siteId:s.siteId||'', siteNom:s.siteNom||'', startTime:isoDateValue(s.startTime), completedAt:isoDateValue(s.completedAt), scheduledStart:isoDateValue(s.scheduledStart), scheduledEnd:isoDateValue(s.scheduledEnd), roundsCount:s.roundsCount||0, incidentsCount:s.incidentsCount||0, conformityScore:s.conformityScore ?? null, signatureName:s.signatureName||'', handoverNote:s.handoverNote||'' }; }
+function compactMission(m){ return { id:m.id||'', agentId:m.agentId||'', agentNom:m.agentNom||'', siteId:m.siteId||'', siteNom:m.siteNom||'', clientId:m.clientId||'', type:m.type||m.missionType||'', instructions:m.instructions||'', status:m.status||'', scheduledStart:isoDateValue(m.scheduledStart), scheduledEnd:isoDateValue(m.scheduledEnd), actualStart:isoDateValue(m.actualStart), actualEnd:isoDateValue(m.actualEnd), conformityScore:m.conformityScore ?? null, roundsCount:m.roundsCount||0, incidentsCount:m.incidentsCount||0 }; }
+function compactShift(s){ return { id:s.id||'', missionId:s.missionId||'', missionTitle:s.missionTitle||'', shiftType:s.shiftType||s.missionType||'', missionInstructions:s.missionInstructions||'', agentId:s.agentId||'', agentNom:s.agentNom||'', siteId:s.siteId||'', siteNom:s.siteNom||'', clientId:s.clientId||'', startTime:isoDateValue(s.startTime), completedAt:isoDateValue(s.completedAt), scheduledStart:isoDateValue(s.scheduledStart), scheduledEnd:isoDateValue(s.scheduledEnd), roundsCount:s.roundsCount||0, incidentsCount:s.incidentsCount||0, conformityScore:s.conformityScore ?? null, signatureName:s.signatureName||'', handoverNote:s.handoverNote||'' }; }
+function missionDisplayType(m={}, sh={}){
+  const explicit = String(m.type || m.missionType || sh.shiftType || sh.missionType || '').trim();
+  if (explicit) return explicit;
+  const freeShift = /libre/i.test(String(sh.missionTitle || '')) || (!m.id && !sh.missionId);
+  return freeShift ? 'Prise de poste libre' : 'Mission de sécurité';
+}
+function missionPlannedText(m={}, sh={}){
+  const start = m.scheduledStart || sh.scheduledStart || null;
+  const end = m.scheduledEnd || sh.scheduledEnd || null;
+  if (start && end) return `${dateText(start)} → ${dateText(end)}`;
+  if (start) return `${dateText(start)} → fin prévue non renseignée`;
+  if (end) return `Début prévu non renseigné → ${dateText(end)}`;
+  const freeShift = /libre/i.test(String(m.type || sh.shiftType || sh.missionTitle || '')) || (!m.id && !sh.missionId);
+  return freeShift ? 'Prise de poste libre — aucun horaire planifié' : 'Horaires prévus non renseignés';
+}
 function inPeriod(value, from, to){
   const d = value?.toDate ? value.toDate() : new Date(value || 0);
   if (Number.isNaN(d.getTime())) return false;
@@ -3836,9 +3851,9 @@ function generatedDocumentMeta(d){
     return [
       `Site : ${m.siteNom || sh.siteNom || d.siteNom || '—'}`,
       `Agent : ${m.agentNom || sh.agentNom || '—'}`,
-      `Mission : ${m.id || d.missionId || '—'}`,
-      `Prévu : ${dateText(m.scheduledStart || sh.scheduledStart)} → ${dateText(m.scheduledEnd || sh.scheduledEnd)}`,
-      `Réalisé : ${dateText(sh.startTime)} → ${dateText(sh.completedAt)}`,
+      `Type de mission : ${missionDisplayType(m, sh)}`,
+      `Horaires prévus : ${missionPlannedText(m, sh)}`,
+      `Horaires réalisés : ${dateText(sh.startTime)} → ${dateText(sh.completedAt)}`,
       `Conformité : ${sh.conformityScore ?? m.conformityScore ?? '—'}%`
     ];
   }
@@ -5669,7 +5684,7 @@ function missionReportHtml({ mission, shift={}, reports=[], timelineRows=null })
     ['Événements', shift.incidentsCount || mission.incidentsCount || 0],
     ['Conformité', (shift.conformityScore ?? mission.conformityScore ?? '—') + '%']
   ];
-  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Mission</span><strong>${safe(mission.id || '—')}</strong></div></section><section class="azza-text"><p><strong>Prévu :</strong> ${dateText(mission.scheduledStart || shift.scheduledStart)} → ${dateText(mission.scheduledEnd || shift.scheduledEnd)}<br><strong>Réalisé :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Événement','Gravité','Photo','Observation'], orderedRows, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message])}</section>${photoAnnexesHtml(reports)}<section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+  return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">RAPPORT DE MISSION<br><small>${new Date().toLocaleString('fr-FR')}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>Rapport opérationnel de sécurité</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Site</span><strong>${safe(mission.siteNom || shift.siteNom || '—')}</strong></div><div><span>Agent</span><strong>${safe(mission.agentNom || shift.agentNom || '—')}</strong></div><div><span>Type de mission</span><strong>${safe(missionDisplayType(mission, shift))}</strong></div></section><section class="azza-text"><p><strong>Horaires prévus :</strong> ${safe(missionPlannedText(mission, shift))}<br><strong>Horaires réalisés :</strong> ${dateText(shift.startTime)} → ${dateText(shift.completedAt)}</p></section><section class="report-grid azza-grid">${metrics.map(m=>`<div><strong>${safe(m[1])}</strong><span>${safe(m[0])}</span></div>`).join('')}</section><section><h3>Main courante de mission</h3>${azzeraDocHtmlTable(['Heure','Agent','Événement','Gravité','Photo','Observation'], orderedRows, r=>[dateText(r.createdAt), r.agentNom || mission.agentNom, r.category, r.severity, reportPhotoLabel(r), r.message])}</section>${photoAnnexesHtml(reports)}<section class="report-signature azza-signature"><strong>Signature agent :</strong> ${safe(shift.signatureName || '—')}<br><strong>Note de relève :</strong> ${safe(shift.handoverNote || 'RAS')}</section><footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
 }
 function generatedDocumentHtml(d){
   const p=d?.payload||{};
