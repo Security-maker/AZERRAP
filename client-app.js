@@ -23,7 +23,7 @@ function toast(text,type='error'){
 }
 async function registerClientPwa(){
   if(!('serviceWorker' in navigator))return;
-  try{await navigator.serviceWorker.register('./service-worker.js?v=596',{scope:'./',updateViaCache:'none'});}catch(error){console.warn('[Sentinelle Client] Service Worker',error);}
+  try{await navigator.serviceWorker.register('./service-worker.js?v=597',{scope:'./',updateViaCache:'none'});}catch(error){console.warn('[Sentinelle Client] Service Worker',error);}
 }
 async function getSupabase(){
   if(supabase)return supabase;
@@ -121,7 +121,7 @@ function renderPortal(){
     return type==='mission'||type==='mci'||title.includes('main courante');
   })||null;
   const last30=documents.filter(d=>{const dt=asDate(d.created_at);return dt&&Date.now()-dt.getTime()<=30*86400000;}).length;
-  const sitePills=sites.length?sites.map(s=>`<span class="site-pill"><strong>${safe(s.name)}</strong>${s.address?` · ${safe(s.address)}`:''}</span>`).join(''):'<span class="site-pill">Aucun site affiché</span>';
+  const sitePills=sites.length?sites.map(s=>`<span class="site-pill"><span class="site-pill-name">${safe(s.name)}</span>${s.address?`<span class="site-pill-address">${safe(s.address)}</span>`:''}</span>`).join(''):'<span class="site-pill site-pill-empty"><span class="site-pill-name">Aucun site affiché</span></span>';
   const siteOptions=sites.map(s=>`<option value="${safe(s.firebase_id||s.id)}">${safe(s.name)}</option>`).join('');
   const monthOptions=[...new Set(documents.map(d=>monthKey(d.created_at)).filter(Boolean))].slice(0,18).map(m=>{const [y,mo]=m.split('-');const label=new Date(Number(y),Number(mo)-1,1).toLocaleDateString('fr-FR',{month:'long',year:'numeric'});return `<option value="${m}">${safe(label)}</option>`;}).join('');
   root.innerHTML=`
