@@ -23,7 +23,7 @@ function toast(text,type='error'){
 }
 async function registerClientPwa(){
   if(!('serviceWorker' in navigator))return;
-  try{await navigator.serviceWorker.register('./service-worker.js?v=594',{scope:'./',updateViaCache:'none'});}catch(error){console.warn('[Sentinelle Client] Service Worker',error);}
+  try{await navigator.serviceWorker.register('./service-worker.js?v=596',{scope:'./',updateViaCache:'none'});}catch(error){console.warn('[Sentinelle Client] Service Worker',error);}
 }
 async function getSupabase(){
   if(supabase)return supabase;
