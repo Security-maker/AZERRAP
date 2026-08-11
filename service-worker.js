@@ -1,17 +1,14 @@
-const CACHE_NAME = 'sentinelle-pro-v5-8-4-pdf-mission-labels';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-8-4';
+const CACHE_NAME = 'sentinelle-pro-v5-9-0-web-push';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-0';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=583',
-  './app.js?v=584',
+  './style.css?v=590',
+  './app.js?v=590',
+  './sentinelle-config.js',
+  './supabase-compat.js?v=590',
   './supabase-config.js',
   './supabase-bridge.js',
-  './client.html',
-  './client-style.css?v=581',
-  './client-app.js?v=581',
-  './push-init.js?v=565',
-  './firebase-config.js',
   './manifest.json',
   './offline.html',
   './assets/logo.png',
@@ -29,9 +26,16 @@ const TRUSTED_OFFLINE_CDN = new Set([
 ]);
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
-  // Ne pas appeler skipWaiting ici : une mission en cours ne doit jamais être
-  // interrompue par l'activation forcée d'une nouvelle version.
+  // V5.8.8.6 : un asset secondaire manquant ne doit plus faire échouer
+  // l'installation complète du Service Worker sur iOS/GitHub Pages.
+  event.waitUntil((async()=>{
+    const cache = await caches.open(CACHE_NAME);
+    for (const asset of APP_SHELL) {
+      try { await cache.add(asset); }
+      catch (error) { console.warn('[Sentinelle SW] cache ignoré', asset, error); }
+    }
+  })());
+  // Pas de skipWaiting forcé : on évite de couper une mission déjà ouverte.
 });
 
 self.addEventListener('message', event => {
@@ -71,11 +75,49 @@ async function staleWhileRevalidate(request){
   return cached || await network || Response.error();
 }
 
+self.addEventListener('push', event => {
+  let payload = {};
+  try { payload = event.data ? event.data.json() : {}; }
+  catch (_) { payload = { body:event.data?.text?.() || 'Nouvelle information Sentinelle Pro' }; }
+  const title = String(payload.title || 'Sentinelle Pro');
+  const options = {
+    body:String(payload.body || payload.message || 'Nouvelle information opérationnelle'),
+    icon:payload.icon || './assets/icons/icon-192.png',
+    badge:payload.badge || './assets/icons/icon-192.png',
+    tag:String(payload.tag || payload.notificationId || `sentinelle-${Date.now()}`),
+    renotify:Boolean(payload.renotify),
+    requireInteraction:Boolean(payload.requireInteraction),
+    data:{ url:payload.url || './index.html', route:payload.route || 'home', ...(payload.data || {}) }
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const notificationData = event.notification?.data || {};
+  const fallback = `./index.html?route=${encodeURIComponent(notificationData.route || 'home')}`;
+  const targetUrl = new URL(notificationData.url || fallback, self.location.origin).href;
+  event.waitUntil((async () => {
+    const clientsList = await self.clients.matchAll({ type:'window', includeUncontrolled:true });
+    for (const client of clientsList) {
+      try {
+        const current = new URL(client.url);
+        const target = new URL(targetUrl);
+        if (current.origin === target.origin) {
+          await client.focus();
+          if ('navigate' in client) await client.navigate(targetUrl).catch(()=>{});
+          return;
+        }
+      } catch (_) {}
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(targetUrl);
+  })());
+});
+
 self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  if (url.pathname.endsWith('/push/onesignal/OneSignalSDKWorker.js') || url.hostname === 'cdn.onesignal.com') return;
   if (TRUSTED_OFFLINE_CDN.has(url.hostname)) {
     event.respondWith(staleWhileRevalidate(request));
     return;

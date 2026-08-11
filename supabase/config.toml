@@ -1,8 +1,13 @@
-project_id = "REMPLACE_MOI_PAR_REFERENCE_SUPABASE"
-
-[auth.third_party.firebase]
-enabled = true
-project_id = "azzerap-7b440"
+project_id = "ksoyqtsrhtsfbwmxipqz"
 
 [functions.send-main-courante]
+verify_jwt = true
+
+[functions.admin-manage-user]
+verify_jwt = true
+
+[functions.send-push]
+verify_jwt = true
+
+[functions.send-web-push]
 verify_jwt = true

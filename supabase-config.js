@@ -1,12 +1,13 @@
-// V5.8.0 — Passerelle de migration progressive Firebase -> Supabase.
-// La production reste sur Firebase tant que enabled=false ou mode='firebase'.
+// Sentinelle Pro V5.9.0 — Supabase natif PRODUCTION.
+// Storage PDF actif. Envoi e-mail automatique laissé désactivé pour le cutover initial.
+// Il pourra être activé après validation de la fonction send-main-courante en production.
 export const supabaseConfig = Object.freeze({
-  enabled: false,
-  mode: 'firebase', // firebase | dual | supabase
-  url: 'REMPLACE_MOI_PAR_URL_SUPABASE',
-  publishableKey: 'REMPLACE_MOI_PAR_CLE_PUBLIQUE_SUPABASE',
-  organizationId: 'REMPLACE_MOI_PAR_UUID_ORGANISATION',
+  enabled: true,
+  mode: 'supabase',
+  url: 'https://ksoyqtsrhtsfbwmxipqz.supabase.co',
+  publishableKey: 'sb_publishable_TaSZX6F0nsEecsHPxjZ8hg_c1cZtQuN',
+  organizationId: '43b09366-de36-5b44-97cc-d549eb0d4e53',
   reportBucket: 'main-courantes',
-  autoEmail: true,
+  autoEmail: false,
   emailFunction: 'send-main-courante'
 });

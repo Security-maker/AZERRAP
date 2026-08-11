@@ -1,37 +1,11 @@
-import { firebaseConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './firebase-config.js';
+import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
 import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js';
-import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
 import {
-  getAuth,
-  setPersistence,
-  browserLocalPersistence,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged
-} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
-import {
-  initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  addDoc,
-  setDoc,
-  updateDoc,
-  query,
-  where,
-  orderBy,
-  limit,
-  onSnapshot,
-  serverTimestamp,
-  Timestamp,
-  runTransaction,
-  deleteDoc,
-  writeBatch
-} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
+  initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
+  persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
+  orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient
+} from './supabase-compat.js?v=5886';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -42,7 +16,7 @@ window.__SENTINELLE_MODULE_LOADED__ = true;
 let fbApp = null;
 let auth = null;
 let db = null;
-let storage = null; // Version Spark: Firebase Storage désactivé
+let storage = null; // V5.8.7.1 : médias et PDF utilisent Supabase Storage via la couche compat.
 let currentUser = null;
 let currentProfile = null;
 let currentRoute = 'home';
@@ -60,6 +34,8 @@ let sosCountdownTimer = null;
 let sosArming = false;
 let sosTriggered = false;
 let activeShiftCache = null;
+let takeShiftSubmissionLock = false;
+const endShiftSubmissionLocks = new Set();
 let lastSitesCache = [];
 let qgReportMissionGroups = [];
 let qgNotificationsCache = [];
@@ -71,9 +47,6 @@ let qgInvoicesCache = [];
 let billingProfileCache = null;
 let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14, status: '', density: 'comfort', collaboratorAgentId: '', collaboratorMonth: '', publications: new Map() };
 let pendingMissionSelectionId = null;
-let oneSignalInitialized = false;
-let oneSignalInitPromise = null;
-let oneSignalSdkLoadPromise = null;
 
 const rolePortal = role => role === 'agent' ? 'agent' : 'qg';
 const nowText = () => new Date().toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
@@ -97,7 +70,7 @@ const contrastColor = hex => {
 };
 const safe = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const id = () => Math.random().toString(36).slice(2, 10);
-const isConfigured = () => firebaseConfig?.apiKey && !String(firebaseConfig.apiKey).includes('REMPLACE_MOI');
+const isConfigured = () => supabaseRuntimeConfigured();
 const isOnline = () => navigator.onLine;
 const OFFLINE_PROFILE_KEY = 'sentinelle_offline_profile_v1';
 const OFFLINE_READY_KEY = 'sentinelle_offline_ready_v1';
@@ -364,16 +337,10 @@ function sosButton(){
 
 function boot(){
   if ('serviceWorker' in navigator) {
-    // Nettoie l'ancien Worker OneSignal enregistré à la racine : il entre en conflit avec le Worker PWA.
-    navigator.serviceWorker.getRegistrations().then(registrations => {
-      registrations.forEach(registration => {
-        const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
-        if (/\/(OneSignalSDKWorker|OneSignalSDKUpdaterWorker)\.js(?:\?|$)/.test(scriptUrl) && !scriptUrl.includes('/push/onesignal/')) {
-          registration.unregister().catch(() => {});
-        }
-      });
-    }).catch(() => {}).finally(() => {
-      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    // V5.8.8.6 : enregistre explicitement le Worker Sentinelle et garde l'erreur pour le diagnostic.
+    ensureSentinelleServiceWorker({ cleanupLegacy:true, timeoutMs:8000 }).catch(error => {
+      window.__SENTINELLE_SW_LAST_ERROR__ = error?.message || String(error || 'Service Worker indisponible');
+      console.warn('Service Worker Sentinelle non prêt', error);
     });
   }
   window.addEventListener('online', () => {
@@ -383,20 +350,20 @@ function boot(){
     }
     retryPendingSupabaseDeliveries().catch(error => console.warn('Relance Supabase impossible', error));
   });
-  window.addEventListener('offline', () => toast('Mode hors ligne — données locales actives, PTI non transmis en temps réel', 'warning'));
+  window.addEventListener('offline', () => toast('Mode hors ligne V5.8.8.6 — les écritures Supabase sont suspendues jusqu’au retour du réseau', 'warning'));
 
   if (!isConfigured()) return renderSetupMissing();
   try {
-    fbApp = initializeApp(firebaseConfig);
+    fbApp = initializeApp();
     auth = getAuth(fbApp);
     setPersistence(auth, browserLocalPersistence).catch(error => console.warn('Persistance Auth indisponible', error));
     db = initializeFirestore(fbApp, {
       localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
     });
-    storage = null; // Storage volontairement désactivé pour rester compatible Spark
+    storage = getSupabaseClient().storage;
   } catch (error) {
     console.error(error);
-    return renderFatal('Configuration Firebase invalide', error.message);
+    return renderFatal('Configuration Supabase production invalide', error.message);
   }
 
   onAuthStateChanged(auth, async user => {
@@ -434,7 +401,7 @@ async function loadProfile(user){
     currentRoute = portal === 'agent' && allowedAgentRoutes.includes(requestedRoute) ? requestedRoute : portal === 'qg' && allowedQGRoutes.includes(requestedRoute) ? requestedRoute : 'home';
     navigate(currentRoute);
     if (navigator.onLine) {
-      syncOneSignalIdentity().catch(() => {});
+      syncNativePushIdentity().catch(() => {});
       primeAgentOfflineData().catch(error => console.warn('Préparation hors ligne incomplète', error));
       retryPendingSupabaseDeliveries().catch(error => console.warn('Livraisons Supabase en attente', error));
     }
@@ -442,7 +409,7 @@ async function loadProfile(user){
   } catch (error) {
     console.error(error);
     if (!navigator.onLine && currentUser) return renderOfflineDeviceNotPrepared(currentUser);
-    renderFatal('Accès refusé', 'Impossible de charger le profil utilisateur. Vérifie Firestore et les règles de sécurité.');
+    renderFatal('Accès refusé', 'Impossible de charger le profil utilisateur. Vérifie Supabase Auth, profiles et les RLS.');
   }
 }
 
@@ -487,9 +454,11 @@ function bindGlobalEvents(){
   document.querySelectorAll('[data-action="toggle-menu"]').forEach(btn => btn.addEventListener('click', openMenu));
   document.querySelectorAll('[data-action="close-menu"]').forEach(btn => btn.addEventListener('click', closeMenu));
   document.querySelectorAll('[data-route]').forEach(btn => btn.addEventListener('click', () => { closeMenu(); navigate(btn.dataset.route); }));
+  document.querySelectorAll('[data-action="diagnose-web-push"]').forEach(btn => btn.addEventListener('click', () => diagnosePushSetup(btn)));
   document.querySelectorAll('[data-action="logout"]').forEach(btn => btn.addEventListener('click', async () => {
     closeMenu();
     if (currentUser) await updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen: serverTimestamp() }).catch(()=>{});
+    await disableNativePushForCurrentDevice().catch(()=>{});
     await signOut(auth);
   }));
   document.onkeydown = e => { if (e.key === 'Escape') closeMenu(); };
@@ -515,10 +484,10 @@ function renderSetupMissing(){
       <p class="subtitle">Portail opérationnel sécurisé</p>
       <div class="setup-box">
         L’application est en mode production uniquement. Aucun mode démo n’est activé.<br><br>
-        Ouvre <strong>firebase-config.js</strong> et remplace les valeurs <strong>REMPLACE_MOI</strong> par celles de ton projet Firebase.
+        La configuration Supabase production est absente ou invalide dans <strong>sentinelle-config.js</strong>.
       </div>
       <div class="card compact">
-        <div class="item-meta">À faire : Firebase Console → Paramètres du projet → Général → Application Web → copier apiKey, authDomain, projectId, messagingSenderId, appId. Le storageBucket est optionnel et non utilisé en version Spark.</div>
+        <div class="item-meta">À faire : vérifier l’URL Supabase, la clé publique et l’UUID d’organisation du projet Supabase Sentinelle Pro.</div>
       </div>
     </section></div>`);
 }
@@ -539,9 +508,9 @@ function renderLogin(){
         <div class="field"><label>Email</label><input class="input" name="email" type="email" autocomplete="email" required placeholder="agent@agence.fr"></div>
         <div class="field"><label>Mot de passe</label><input class="input" name="password" type="password" autocomplete="current-password" required placeholder="••••••••"></div>
         <button class="btn primary full" type="submit" ${navigator.onLine?'':'disabled'}>${navigator.onLine?'Connexion sécurisée':'Connexion impossible sans réseau'}</button>
-        ${navigator.onLine?'':`<div class="setup-box warning-copy">Aucune session active n’est disponible sur cet appareil. La toute première connexion Firebase ne peut pas être vérifiée sans réseau. Connecte cet appareil une fois, puis conserve la session pour les futurs démarrages hors ligne.</div>`}
+        ${navigator.onLine?'':`<div class="setup-box warning-copy">Aucune session active n’est disponible sur cet appareil. La toute première connexion Supabase ne peut pas être vérifiée sans réseau. Connecte cet appareil une fois, puis conserve la session pour les futurs démarrages hors ligne.</div>`}
         <div class="divider"></div>
-        <p class="muted" style="font-size:12px;line-height:1.55">Les comptes se créent dans Firebase Authentication. Le rôle se règle dans Firestore collection <strong>users</strong>.</p>
+        <p class="muted" style="font-size:12px;line-height:1.55">Authentification native <strong>Supabase Auth</strong>. Les rôles métier sont lus dans <strong>public.profiles</strong>.</p>
       </form>
     </div>`);
   document.querySelector('#login-form').addEventListener('submit', async e => {
@@ -558,10 +527,10 @@ function renderLogin(){
 function renderMissingProfile(user){
   render(`
     <div class="login-page"><section class="login-card">
-      <img src="assets/logo.png" class="login-logo"><h1>Profil non configuré</h1><p class="subtitle">UID Firebase requis</p>
-      <div class="setup-box">Le compte existe dans Authentication, mais son profil rôle n’existe pas encore dans Firestore.</div>
-      <div class="field"><label>UID à copier</label><input class="input mono" readonly value="${safe(user.uid)}"></div>
-      <div class="card compact"><div class="item-meta">Crée un document dans <strong>users</strong> avec cet UID. Champs minimum : uid, nom, prenom, email, role: "admin" ou "agent", statut: "actif".</div></div>
+      <img src="assets/logo.png" class="login-logo"><h1>Profil non configuré</h1><p class="subtitle">Profil Supabase requis</p>
+      <div class="setup-box">Le compte existe dans Supabase Auth, mais aucun profil métier relié n’est visible dans public.profiles.</div>
+      <div class="field"><label>UUID Supabase Auth</label><input class="input mono" readonly value="${safe(user.uid)}"></div>
+      <div class="card compact"><div class="item-meta">Relie auth.users.id à public.profiles.auth_user_id puis conserve external_uid pendant la transition V5.8.7.</div></div>
       <div class="divider"></div><button class="btn full" data-action="logout">Déconnexion</button>
     </section></div>`);
 }
@@ -978,7 +947,10 @@ function dateOnlyKey(value){ const d=timestampToDate(value); return d?`${d.getFu
 
 async function renderAgentHome(){
   currentRoute = 'home';
-  const shift = await findActiveShift().catch(() => activeShiftCache || null);
+  const shift = await findActiveShift().catch(error => {
+    console.warn('Lecture du poste actif impossible', error);
+    return navigator.onLine ? null : (activeShiftCache || null);
+  });
   activeShiftCache = shift;
   const isWorking = !!shift;
   const body = `
@@ -1001,7 +973,7 @@ async function renderAgentHome(){
     </section>
     <section class="card offline-ready-card ${navigator.onLine?'':'offline-active'}" style="margin-top:16px">
       <div class="card-title"><div><h2>Mode hors ligne</h2><p id="offline-ready-status">${safe(offlineReadyText())}</p></div>${navigator.onLine?'<button class="btn small" id="offline-sync-now">Synchroniser maintenant</button>':'<span class="pill orange">Hors ligne</span>'}</div>
-      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">${navigator.onLine?'Le profil, le planning, les consignes, les documents et les points de ronde sont conservés sur cet appareil pour les prochaines coupures réseau.':'Les actions Firebase sont mises en attente et se synchroniseront au retour du réseau. Une alerte PTI hors ligne ne peut pas prévenir le QG immédiatement : appelle le QG ou le 112.'}</div>
+      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">${navigator.onLine?'Cache local de confort préparé. Le hors-ligne complet Supabase reste à valider avant la bascule production.':'Mode hors ligne : les écritures Supabase ne sont pas garanties sans réseau. Une alerte PTI hors ligne ne peut pas prévenir le QG immédiatement : appelle le QG ou le 112.'}</div>
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
@@ -1120,15 +1092,23 @@ async function bindAgentHome(shift){
     const form = document.querySelector('#take-shift-form');
     form?.addEventListener('submit', async e => {
       e.preventDefault();
+      // V5.8.8.6 : verrou local immédiat. Même si iOS/Safari rejoue le submit,
+      // un seul démarrage peut entrer dans le flux tant que le premier n'est pas terminé.
+      if (takeShiftSubmissionLock) return;
       if (!isOnline()) return toast('Réseau indisponible — prise de poste impossible.', 'error');
       const fd = new FormData(form);
       const mission = missions.find(m => m.id === fd.get('missionId')) || null;
       const site = sites.find(s => s.id === (mission?.siteId || fd.get('siteId')));
       if (!site) return toast('Sélectionne un site.', 'warning');
       if (!checkInPhoto || !photoConfirm?.checked) return toast('La photo de prise de poste est obligatoire.', 'warning');
+      takeShiftSubmissionLock = true;
       submitButton.disabled = true;
       submitButton.textContent = 'Prise de poste en cours...';
-      await takeShift(site, mission, checkInPhoto);
+      try {
+        await takeShift(site, mission, checkInPhoto);
+      } finally {
+        takeShiftSubmissionLock = false;
+      }
     });
   } else {
     const refreshElapsed = () => {
@@ -1158,6 +1138,11 @@ function renderTakeShiftInfo(site, mission){
     <section class="site-instructions"><span>CONSIGNES OPÉRATIONNELLES</span><p>${instructions}</p></section>
   </article>`;
 }
+function isDuplicateActiveShiftError(error){
+  const code = String(error?.code || '');
+  const text = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  return code === '23505' && (text.includes('uq_shifts_one_active_per_agent') || text.includes('one_active_per_agent') || text.includes('duplicate key'));
+}
 async function takeShift(site, mission=null, checkInPhoto=null){
   let shiftDoc = null;
   try {
@@ -1174,35 +1159,55 @@ async function takeShift(site, mission=null, checkInPhoto=null){
       checkInPhotoAvailable:true, checkInPhotoCapturedAt:checkInPhoto.capturedAt, checkInPhotoBytes:checkInPhoto.bytes,
       createdAt: serverTimestamp(), createdBy: currentUser.uid
     });
+    // V5.8.8.6 : la preuve de prise de poste est stockée dans le rapport automatique
+    // de prise de service. Le chemin reports -> Supabase Storage est le même que pour
+    // les photos MCI déjà validées et évite le point de panne compat shiftProofs.
+    let startReportDoc = null;
     try {
-      await setDoc(docRef('shiftProofs', shiftDoc.id), {
-        shiftId:shiftDoc.id, agentId:currentUser.uid, agentNom, siteId:site.id, siteNom:site.name,
-        imageDataUrl:checkInPhoto.dataUrl, mimeType:checkInPhoto.mimeType, bytes:checkInPhoto.bytes,
-        width:checkInPhoto.width, height:checkInPhoto.height, capturedAt:checkInPhoto.capturedAt,
+      startReportDoc = await addDoc(collectionRef('reports'), {
+        agentId:currentUser.uid, agentNom, siteId:site.id, siteNom:site.name, shiftId:shiftDoc.id, missionId:mission?.id || null,
+        category:'Prise de service', severity:'Normal', message:`Prise de poste confirmée sur ${site.name}. Photo de contrôle${gps ? ' et position GPS' : ''} enregistrée${gps ? 's' : ''}.`,
+        photoUrl:checkInPhoto.dataUrl, photoAvailable:true, photoProofAvailable:true,
+        photoBytes:Number(checkInPhoto.bytes||0), photoMimeType:checkInPhoto.mimeType||'image/jpeg',
+        photoWidth:Number(checkInPhoto.width||0), photoHeight:Number(checkInPhoto.height||0),
+        photoCapturedAt:checkInPhoto.capturedAt||new Date().toISOString(),
+        gps, status:'new', isLocked:true, systemGenerated:true, eventType:'shift_start',
         createdAt:serverTimestamp(), createdBy:currentUser.uid
       });
+      await updateDoc(docRef('shifts', shiftDoc.id), {
+        checkInPhotoAvailable:true, checkInPhotoSource:'report', checkInPhotoReportId:startReportDoc.id,
+        updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+      }).catch(()=>{});
     } catch(proofError) {
-      await deleteDoc(docRef('shifts', shiftDoc.id)).catch(()=>{});
-      throw new Error('La preuve photo n’a pas pu être enregistrée. Publie les règles Firestore V5.4 puis réessaie.');
+      console.error('Preuve photo prise de poste non enregistrée', proofError);
+      await updateDoc(docRef('shifts', shiftDoc.id), {
+        checkInPhotoAvailable:false, checkInPhotoSource:'failed', proofStorageError:String(proofError?.message||proofError||'Erreur Storage'),
+        updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+      }).catch(()=>{});
+      throw new Error(`La photo de prise de poste n’a pas pu être enregistrée : ${userFriendlyError(proofError, 'erreur Supabase Storage')}`);
     }
-    await addDoc(collectionRef('reports'), {
-      agentId:currentUser.uid, agentNom, siteId:site.id, siteNom:site.name, shiftId:shiftDoc.id, missionId:mission?.id || null,
-      category:'Prise de service', severity:'Normal', message:`Prise de poste confirmée sur ${site.name}. Photo de contrôle${gps ? ' et position GPS' : ''} enregistrée${gps ? 's' : ''}.`,
-      photoProofAvailable:true, gps, status:'new', isLocked:true, systemGenerated:true, eventType:'shift_start',
-      createdAt:serverTimestamp(), createdBy:currentUser.uid
-    }).catch(error => console.warn('Rapport automatique de prise de poste non créé', error));
     if (mission?.id) await updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
     await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() });
     currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
-    syncOneSignalIdentity().catch(() => {});
+    syncNativePushIdentity().catch(() => {});
     await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
-    spNotifyQGShiftStarted({shiftId:shiftDoc.id,agentId:currentUser.uid,agentNom,siteId:site.id,siteName:site.name,missionId:mission?.id||'',startedAt:new Date()}).then(result=>addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:result?.ok?'sent':result?.reason||result?.error||'skipped'}).catch(()=>{})).catch(()=>{});
-    toast('Prise de poste confirmée', 'success');
-    renderAgentHome();
+    const startPushResult = await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()});
+    await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed'}).catch(()=>{});
+    toast(startPushResult?.ok ? 'Prise de poste confirmée · QG notifié' : 'Prise de poste confirmée', 'success');
+    await renderAgentHome();
   } catch(error){
     console.error(error);
-    toast(error.message || 'Erreur prise de poste. Vérifie les droits Firebase.', 'error');
-    renderAgentHome();
+    // V5.8.8.6 : le garde-fou SQL est l'autorité finale contre les démarrages
+    // concurrents. Le second appel est absorbé sans créer de rapport ni de push.
+    if (isDuplicateActiveShiftError(error)) {
+      const existing = await findActiveShift().catch(()=>null);
+      activeShiftCache = existing || activeShiftCache;
+      toast('Prise de poste déjà enregistrée · aucun doublon créé', 'success');
+      await renderAgentHome();
+      return;
+    }
+    toast(error.message || 'Erreur prise de poste. Vérifie les RLS Supabase.', 'error');
+    await renderAgentHome();
   }
 }
 async function loadAgentHandoverCard(shift){
@@ -1246,41 +1251,98 @@ async function endShift(shift){
     endShiftModalRoot?.querySelector('.modal')?.classList.add('end-shift-modal');
     document.querySelector('#end-shift-form')?.addEventListener('submit', async e => {
       e.preventDefault();
+      const shiftKey = String(shift?.id || '');
+      if (!shiftKey) return toast('Mission introuvable.', 'error');
+      if (endShiftSubmissionLocks.has(shiftKey)) return;
+
       const form = e.currentTarget;
       const button = form.querySelector('button[type="submit"]');
-      button.disabled = true;
-      button.textContent = 'Clôture en cours...';
-      const fd = new FormData(form);
-      const endGps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
-      let finalReportsCount = reportsSnap.size;
+      const originalButtonText = button?.textContent || 'Confirmer la fin de poste';
+      endShiftSubmissionLocks.add(shiftKey);
+      if (button) { button.disabled = true; button.textContent = 'Clôture en cours...'; }
+
       try {
-        await addDoc(collectionRef('reports'), {
-          agentId:currentUser.uid, agentNom:agentName, siteId:shift.siteId, siteNom:shift.siteNom, shiftId:shift.id, missionId:shift.missionId || null,
-          category:'Fin de service', severity:'Normal', message:`Fin de poste confirmée. Relève : ${fd.get('handoverNote') || 'RAS'}.`,
-          gps:endGps, status:'new', isLocked:true, systemGenerated:true, eventType:'shift_end',
-          createdAt:serverTimestamp(), createdBy:currentUser.uid
+        // V5.8.8.6 : garde-fou idempotent. Si le premier clic a déjà terminé
+        // le poste, un second passage ne réécrit rien et n'envoie aucun push.
+        const latestShiftSnap = await getDoc(docRef('shifts', shiftKey)).catch(()=>null);
+        if (latestShiftSnap?.exists?.() && latestShiftSnap.data()?.status === 'completed') {
+          activeShiftCache = null;
+          closeModal();
+          toast('Mission déjà terminée.', 'success');
+          await renderAgentHome();
+          return;
+        }
+
+        const fd = new FormData(form);
+        const endGps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+        let finalReportsCount = reportsSnap.size;
+
+        try {
+          await addDoc(collectionRef('reports'), {
+            agentId:currentUser.uid, agentNom:agentName, siteId:shift.siteId, siteNom:shift.siteNom, shiftId:shift.id, missionId:shift.missionId || null,
+            category:'Fin de service', severity:'Normal', message:`Fin de poste confirmée. Relève : ${fd.get('handoverNote') || 'RAS'}.`,
+            gps:endGps, status:'new', isLocked:true, systemGenerated:true, eventType:'shift_end',
+            createdAt:serverTimestamp(), createdBy:currentUser.uid
+          });
+          finalReportsCount += 1;
+        } catch(reportError) {
+          console.warn('Rapport automatique de fin de poste non créé', reportError);
+        }
+
+        // La clôture du shift est l'écriture métier autoritaire.
+        await updateDoc(docRef('shifts', shift.id), {
+          completedAt: serverTimestamp(), endPositionGPS:endGps, status:'completed', reportsCount: finalReportsCount, roundsCount: roundsSnap.size, incidentsCount, conformityScore:score,
+          handoverNote: fd.get('handoverNote') || 'RAS', signatureName: fd.get('signatureName'), signatureStatement:true,
+          updatedAt: serverTimestamp(), updatedBy: currentUser.uid
         });
-        finalReportsCount += 1;
-      } catch(reportError) { console.warn('Rapport automatique de fin de poste non créé', reportError); }
-      await updateDoc(docRef('shifts', shift.id), {
-        completedAt: serverTimestamp(), endPositionGPS:endGps, status:'completed', reportsCount: finalReportsCount, roundsCount: roundsSnap.size, incidentsCount, conformityScore:score,
-        handoverNote: fd.get('handoverNote') || 'RAS', signatureName: fd.get('signatureName'), signatureStatement:true,
-        updatedAt: serverTimestamp(), updatedBy: currentUser.uid
-      });
-      if (shift.missionId) await updateDoc(docRef('missions', shift.missionId), { status:'completed', actualEnd:serverTimestamp(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, completedBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
-      await updateDoc(docRef('users', currentUser.uid), { statut:'hors_poste', siteActuel:null, siteActuelNom:null, lastSeen: serverTimestamp() });
-      currentProfile = { ...currentProfile, statut:'hors_poste', siteActuel:null, siteActuelNom:null };
-      syncOneSignalIdentity().catch(() => {});
-      await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps });
-      const [finalReportsSnap, finalShiftSnap, finalMissionSnap] = await Promise.all([
-        getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id))).catch(()=>({docs:[]})),
-        getDoc(docRef('shifts', shift.id)).catch(()=>null),
-        shift.missionId ? getDoc(docRef('missions', shift.missionId)).catch(()=>null) : Promise.resolve(null)
-      ]);
-      const finalShift = finalShiftSnap?.exists?.() ? {id:finalShiftSnap.id,...finalShiftSnap.data()} : {...shift, status:'completed', handoverNote:fd.get('handoverNote')||'RAS', signatureName:fd.get('signatureName'), completedAt:new Date(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score};
-      const finalMission = finalMissionSnap?.exists?.() ? {id:finalMissionSnap.id,...finalMissionSnap.data()} : {id:shift.missionId||shift.id, ...shift, status:'completed'};
-      archiveMissionReportSilently({ mission:finalMission, shift:finalShift, reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()})) }).catch(()=>{});
-      closeModal(); toast(supabaseBridgeEnabled() ? 'Fin de poste confirmée · PDF en cours d’archivage et d’envoi' : 'Fin de poste confirmée · PDF archivé', 'success'); renderAgentHome();
+
+        // Dès que le shift est clôturé, on invalide le cache local pour empêcher
+        // l'ancienne carte "poste actif" de réapparaître si une lecture réseau échoue.
+        activeShiftCache = null;
+
+        if (shift.missionId) {
+          await updateDoc(docRef('missions', shift.missionId), {
+            status:'completed', actualEnd:serverTimestamp(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, completedBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+          }).catch(error => console.warn('Mission liée non clôturée', error));
+        }
+
+        // Le push est exécuté une seule fois après confirmation du status=completed.
+        const endPushResult = await spNotifyQGShiftEnded({
+          shiftId:shift.id, siteName:shift.siteNom||'', reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount
+        });
+        await addAudit('qg_shift_end_notification',{
+          shiftId:shift.id,
+          pushStatus:endPushResult?.skipped?(endPushResult?.reason||'skipped'):endPushResult?.ok?'sent':endPushResult?.error||'failed'
+        }).catch(()=>{});
+
+        // Les opérations secondaires ne doivent plus maintenir artificiellement
+        // l'agent en mission si le shift a déjà été clôturé.
+        await updateDoc(docRef('users', currentUser.uid), {
+          statut:'hors_poste', siteActuel:null, siteActuelNom:null, lastSeen: serverTimestamp()
+        }).catch(error => console.warn('Profil agent non rafraîchi après clôture', error));
+        currentProfile = { ...currentProfile, statut:'hors_poste', siteActuel:null, siteActuelNom:null };
+        syncNativePushIdentity().catch(() => {});
+        await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps }).catch(()=>{});
+
+        const [finalReportsSnap, finalShiftSnap, finalMissionSnap] = await Promise.all([
+          getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id))).catch(()=>({docs:[]})),
+          getDoc(docRef('shifts', shift.id)).catch(()=>null),
+          shift.missionId ? getDoc(docRef('missions', shift.missionId)).catch(()=>null) : Promise.resolve(null)
+        ]);
+        const finalShift = finalShiftSnap?.exists?.() ? {id:finalShiftSnap.id,...finalShiftSnap.data()} : {...shift, status:'completed', handoverNote:fd.get('handoverNote')||'RAS', signatureName:fd.get('signatureName'), completedAt:new Date(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score};
+        const finalMission = finalMissionSnap?.exists?.() ? {id:finalMissionSnap.id,...finalMissionSnap.data()} : {id:shift.missionId||shift.id, ...shift, status:'completed'};
+        archiveMissionReportSilently({ mission:finalMission, shift:finalShift, reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()})) }).catch(()=>{});
+
+        closeModal();
+        toast(supabaseBridgeEnabled() ? 'Fin de poste confirmée · PDF en cours d’archivage et d’envoi' : 'Fin de poste confirmée · PDF archivé', 'success');
+        await renderAgentHome();
+      } catch(error) {
+        console.error('Erreur clôture mission', error);
+        toast(userFriendlyError(error, 'Erreur fin de poste.'), 'error');
+        if (button && button.isConnected) { button.disabled = false; button.textContent = originalButtonText; }
+      } finally {
+        endShiftSubmissionLocks.delete(shiftKey);
+      }
     });
   } catch(error){ console.error(error); toast('Erreur fin de poste.', 'error'); }
 }
@@ -1291,12 +1353,20 @@ function listenAgentRecentReports(){
   const unsub = onSnapshot(q, snap => {
     if (snap.empty) return box.innerHTML = `<div class="empty">Aucun rapport envoyé.</div>`;
     box.innerHTML = snap.docs.map(d => reportTimeline(d.data())).join('');
-  }, () => box.innerHTML = `<div class="empty">Flux indisponible. Vérifie les index Firestore.</div>`);
+  }, () => box.innerHTML = `<div class="empty">Flux indisponible. Vérifie les RLS Supabase.</div>`);
   unsubscribeList.push(unsub);
+}
+function reportPhotoPreviewHtml(report,{large=false}={}){
+  if (report?.photoUrl) {
+    const size = large ? 'max-width:100%;max-height:520px' : 'width:84px;height:64px';
+    return `<img src="${safe(report.photoUrl)}" alt="Photo jointe au rapport" loading="lazy" style="${size};object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,.12);display:block">`;
+  }
+  if (report?.photoStoragePath || report?.photoAvailable) return `<span class="pill blue">📷 Photo enregistrée</span>`;
+  return '<span class="muted">—</span>';
 }
 function reportTimeline(r){
   const sev = String(r.severity || 'normal').toLowerCase();
-  return `<div class="timeline-entry ${sev}"><div class="item-title">${safe(r.category || 'Rapport')} · ${safe(r.siteNom || '')}</div><div class="item-meta">${dateText(r.createdAt)} · Gravité ${safe(r.severity || 'Normal')}${r.photoUrl?' · 📷 Photo jointe':''}</div><div style="margin-top:6px">${safe(r.message || '')}</div></div>`;
+  return `<div class="timeline-entry ${sev}"><div class="item-title">${safe(r.category || 'Rapport')} · ${safe(r.siteNom || '')}</div><div class="item-meta">${dateText(r.createdAt)} · Gravité ${safe(r.severity || 'Normal')}${reportHasPhoto(r)?' · 📷 Photo jointe':''}</div><div style="margin-top:6px">${safe(r.message || '')}</div>${reportHasPhoto(r)?`<div style="margin-top:10px">${reportPhotoPreviewHtml(r)}</div>`:''}</div>`;
 }
 
 async function renderAgentMCI(){
@@ -1722,12 +1792,21 @@ async function showAgentOperationalDetails(shift, lat, lng){
   const content = document.getElementById(`${modalId}-content`);
   if (!content) return;
   try {
-    const [userSnap, proofSnap] = await Promise.all([
+    const [userSnap, proofSnap, startReportsSnap] = await Promise.all([
       shift.agentId ? getDoc(docRef('users', shift.agentId)).catch(()=>null) : Promise.resolve(null),
-      shift.checkInPhotoAvailable ? getDoc(docRef('shiftProofs', shift.id)).catch(()=>null) : Promise.resolve(null)
+      shift.checkInPhotoAvailable ? getDoc(docRef('shiftProofs', shift.id)).catch(()=>null) : Promise.resolve(null),
+      shift.checkInPhotoAvailable ? getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id), orderBy('createdAt','asc'), limit(20))).catch(()=>({docs:[]})) : Promise.resolve({docs:[]})
     ]);
     const user = userSnap?.exists?.() ? userSnap.data() : {};
-    const proof = proofSnap?.exists?.() ? proofSnap.data() : {};
+    const legacyProof = proofSnap?.exists?.() ? proofSnap.data() : {};
+    const startReports = (startReportsSnap?.docs || []).map(d => ({id:d.id, ...d.data()}));
+    const startReport = startReports.find(r => String(r.id||'')===String(shift.checkInPhotoReportId||''))
+      || startReports.find(r => r.eventType==='shift_start')
+      || startReports.find(r => r.category==='Prise de service');
+    const proof = legacyProof?.imageDataUrl ? legacyProof : {
+      imageDataUrl:startReport?.photoUrl || '',
+      capturedAt:startReport?.photoCapturedAt || startReport?.createdAt || shift.checkInPhotoCapturedAt || null
+    };
     const phone = user.telephone || user.phone || '';
     const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
     content.innerHTML = `<div class="agent-live-identity"><div class="agent-live-avatar">${safe(String(shift.agentNom || 'A').split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase())}</div><div><h3>${safe(shift.agentNom || 'Agent')}</h3><p>${safe(shift.siteNom || 'Site non renseigné')}</p></div></div>
@@ -1895,7 +1974,7 @@ function listenQGMissionsPreview(){
   unsubscribeList.push(onSnapshot(q, snap => {
     const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m => !missionIsDraft(m) && !['completed','cancelled'].includes(m.status));
     box.innerHTML = rows.length ? rows.slice(0,5).map(missionItem).join('') : `<div class="empty">Aucune mission à venir.</div>`;
-  }, () => box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les règles/index Firebase.</div>`));
+  }, () => box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les RLS Supabase.</div>`));
 }
 
 async function renderQGMissions(){
@@ -2478,7 +2557,7 @@ function listenPlanningBoard(){
     refreshMonthlyPublicationPanel();
   }, () => {
     const box = document.querySelector('#planning-board');
-    if (box) box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les règles ou index Firebase.</div>`;
+    if (box) box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les RLS Supabase.</div>`;
   }));
 }
 function startOfDay(d){
@@ -2746,7 +2825,7 @@ function listenMissionsList(selector){
     }));
     document.querySelectorAll('[data-mission-pdf]').forEach(btn => btn.addEventListener('click', () => printMissionById(btn.dataset.missionPdf)));
     document.querySelectorAll('[data-mission-duplicate]').forEach(btn => btn.addEventListener('click', () => duplicateMissionAcrossMonth(rows.find(m=>m.id===btn.dataset.missionDuplicate))));
-  }, () => box.innerHTML = `<div class="empty">Missions indisponibles. Un index Firestore peut être requis.</div>`));
+  }, () => box.innerHTML = `<div class="empty">Missions indisponibles. Vérifie les RLS Supabase.</div>`));
 }
 async function duplicateMissionFlow(m){
   if (!m) return;
@@ -2834,6 +2913,13 @@ function buildQGNotifications(state){
       title:`Prise de poste · ${shift.agentNom||'Agent'}`,
       meta:`${shift.siteNom||'Site'} · ${dateText(shift.startTime||shift.createdAt)}`,
       body:shift.missionTitle?`Mission : ${shift.missionTitle}`:'Prise de poste libre enregistrée.'
+    });
+    const completedAt=qgNotificationEventMs(shift.completedAt);
+    if(completedAt&&now-completedAt<=48*60*60*1000) rows.push({
+      id:`shift_end_${shift.id}`,level:'blue',eventAt:completedAt,
+      title:`Fin de poste · ${shift.agentNom||'Agent'}`,
+      meta:`${shift.siteNom||'Site'} · ${dateText(shift.completedAt)}`,
+      body:`Clôture confirmée · ${shift.reportsCount||0} rapport(s) · ${shift.roundsCount||0} ronde(s) · ${shift.incidentsCount||0} événement(s).`
     });
   });
   state.alerts.filter(a => ['active','taken'].includes(a.statut)).forEach(a => rows.push({id:`alert_${a.id}`,level:'red',eventAt:qgNotificationEventMs(a.createdAt||a.heure),title:`SOS/PTI actif · ${a.agentNom || 'Agent'}`, meta:`${a.siteActuelNom || 'Site'} · ${dateText(a.createdAt || a.heure)}`, body:a.message || 'Alerte critique en cours'}));
@@ -2982,7 +3068,7 @@ async function printMissionReport({ mission, shift={}, reports=[] }){
   const data = missionPdfData({ mission, shift, reports });
   try {
     const archived = await archivePdfDocument(data, { silent:true });
-    downloadGeneratedPdf(archived, { silent:true });
+    await downloadGeneratedPdf(archived, { silent:true });
     toast('Rapport PDF téléchargé et archivé dans Documents.', 'success');
   } catch(error) {
     console.error(error);
@@ -3147,7 +3233,7 @@ function renderReportsTable(rows){
   const mode = document.querySelector('#report-view-mode')?.value || 'missions';
   if (!filtered.length) return box.innerHTML = `<div class="empty">Aucun rapport trouvé.</div>`;
   if (mode === 'missions') return renderMissionView(box, groups);
-  box.innerHTML = `<table class="table"><thead><tr><th>Mission</th><th>Heure</th><th>Agent</th><th>Site</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Statut</th><th>Action</th></tr></thead><tbody>${filtered.map(r => `<tr><td><span class="mission-badge">${safe(shortMissionId(r))}</span></td><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${safe(r.status || 'new')}</td><td><div class="table-actions"><button class="btn small" data-report-detail="${safe(r.id)}">Détail</button>${isStrictAdmin()?`<button class="btn small danger" data-report-delete="${safe(r.id)}">Supprimer</button>`:''}</div></td></tr>`).join('')}</tbody></table>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Mission</th><th>Heure</th><th>Agent</th><th>Site</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Photo</th><th>Statut</th><th>Action</th></tr></thead><tbody>${filtered.map(r => `<tr><td><span class="mission-badge">${safe(shortMissionId(r))}</span></td><td>${dateText(r.createdAt)}</td><td>${safe(r.agentNom)}</td><td>${safe(r.siteNom)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${reportPhotoPreviewHtml(r)}</td><td>${safe(r.status || 'new')}</td><td><div class="table-actions"><button class="btn small" data-report-detail="${safe(r.id)}">Détail</button>${isStrictAdmin()?`<button class="btn small danger" data-report-delete="${safe(r.id)}">Supprimer</button>`:''}</div></td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('[data-report-detail]').forEach(btn => btn.addEventListener('click', () => showReportDetail(filtered.find(r=>r.id===btn.dataset.reportDetail))));
   document.querySelectorAll('[data-report-delete]').forEach(btn => btn.addEventListener('click', () => requestDeleteReports(filtered.filter(r=>r.id===btn.dataset.reportDelete), 'ce rapport MCI')));
 }
@@ -3193,14 +3279,14 @@ function renderMissionView(box, groups){
 function showMissionDetail(index){
   const g = qgReportMissionGroups[index];
   if (!g) return;
-  const rows = g.reports.map(r => `<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${safe(r.status || 'new')}</td><td><button class="btn small" data-report-detail-modal="${safe(r.id)}">Détail</button></td></tr>`).join('');
-  showModal('Main courante par mission', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(missionTitle(g))}</div><div class="item-meta">Mission ${safe(g.key)}<br>${g.count} rapports · ${g.incidents} événements · ${g.critical} critique(s)</div></div></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Heure</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Statut</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div><div class="btn-row"><button class="btn primary" id="export-current-mission">Exporter CSV</button><button class="btn" id="print-current-mission">Rapport PDF</button></div>`);
+  const rows = g.reports.map(r => `<tr><td>${dateText(r.createdAt)}</td><td>${safe(r.category)}</td><td>${safe(r.severity)}</td><td>${safe(r.message)}</td><td>${reportPhotoPreviewHtml(r)}</td><td>${safe(r.status || 'new')}</td><td><button class="btn small" data-report-detail-modal="${safe(r.id)}">Détail</button></td></tr>`).join('');
+  showModal('Main courante par mission', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(missionTitle(g))}</div><div class="item-meta">Mission ${safe(g.key)}<br>${g.count} rapports · ${g.incidents} événements · ${g.critical} critique(s)</div></div></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Heure</th><th>Catégorie</th><th>Gravité</th><th>Message</th><th>Photo</th><th>Statut</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div><div class="btn-row"><button class="btn primary" id="export-current-mission">Exporter CSV</button><button class="btn" id="print-current-mission">Rapport PDF</button></div>`);
   document.querySelector('#export-current-mission')?.addEventListener('click', () => exportCSV(g.reports, `mission-${g.key}.csv`));
   document.querySelector('#print-current-mission')?.addEventListener('click', () => printMissionGroup(g));
   document.querySelectorAll('[data-report-detail-modal]').forEach(btn => btn.addEventListener('click', () => showReportDetail(g.reports.find(r=>r.id===btn.dataset.reportDetailModal))));
 }
 function showReportDetail(r){
-  showModal('Détail rapport MCI', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(r.category)} · ${safe(r.severity)}</div><div class="item-meta">${safe(r.agentNom)} · ${safe(r.siteNom)} · ${dateText(r.createdAt)}</div><p>${safe(r.message)}</p>${r.photoUrl?`<img src="${safe(r.photoUrl)}" style="border-radius:16px;margin-top:12px">`:''}${r.gps?`<p class="muted">GPS : ${r.gps.lat}, ${r.gps.lng}</p>`:''}</div></div></div><div class="field"><label>Note superviseur</label><textarea class="textarea" id="supervisor-note" placeholder="Ajouter une note...">${safe(r.supervisorNote || '')}</textarea></div><div class="btn-row"><button class="btn primary" id="mark-treated">Marquer comme traité</button>${isStrictAdmin()?'<button class="btn danger" id="delete-current-report">Supprimer définitivement</button>':''}</div>`);
+  showModal('Détail rapport MCI', `<div class="list"><div class="item"><div class="item-main"><div class="item-title">${safe(r.category)} · ${safe(r.severity)}</div><div class="item-meta">${safe(r.agentNom)} · ${safe(r.siteNom)} · ${dateText(r.createdAt)}</div><p>${safe(r.message)}</p>${reportHasPhoto(r)?`<div style="margin-top:14px"><strong>Preuve photographique</strong><div style="margin-top:8px">${reportPhotoPreviewHtml(r,{large:true})}</div></div>`:''}${r.gps?`<p class="muted">GPS : ${r.gps.lat}, ${r.gps.lng}</p>`:''}</div></div></div><div class="field"><label>Note superviseur</label><textarea class="textarea" id="supervisor-note" placeholder="Ajouter une note...">${safe(r.supervisorNote || '')}</textarea></div><div class="btn-row"><button class="btn primary" id="mark-treated">Marquer comme traité</button>${isStrictAdmin()?'<button class="btn danger" id="delete-current-report">Supprimer définitivement</button>':''}</div>`);
   document.querySelector('#mark-treated')?.addEventListener('click', async () => {
     await updateDoc(docRef('reports', r.id), { status:'treated', supervisorNote:document.querySelector('#supervisor-note').value, treatedBy:currentUser.uid, treatedAt:serverTimestamp() });
     await addAudit('report_treated', { reportId:r.id });
@@ -3246,7 +3332,7 @@ function intelText(result){
 }
 async function runSecurityIntel(city, audience='qg'){
   const workerUrl = getIntelWorkerUrl();
-  if (!workerUrl) throw new Error('Worker de veille non configuré. Ajoute securityIntelWorkerUrl dans firebase-config.js.');
+  if (!workerUrl) throw new Error('Veille externe indisponible actuellement.');
   const payload = { city, audience, userRole: currentProfile?.role || 'agent', siteActuel: currentProfile?.siteActuelNom || currentProfile?.siteActuel || null };
   const res = await fetch(workerUrl, { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify(payload) });
   let data = null;
@@ -3400,9 +3486,10 @@ function requestDeleteAgent(user){
   if (!user || user.id === currentUser.uid) return toast('Tu ne peux pas supprimer ton propre compte admin.', 'warning');
   confirmDestructiveAction({
     title:'Supprimer cet agent',
-    message:`Le profil de ${user.prenom || ''} ${user.nom || ''} sera supprimé de Firestore et son accès à Sentinelle Pro sera bloqué. Son compte Firebase Authentication restera présent tant qu’il n’est pas supprimé depuis la console Firebase. Les historiques de missions sont conservés.`,
+    message:`Le profil métier de ${user.prenom || ''} ${user.nom || ''} sera supprimé de Supabase et son accès métier sera bloqué. Son compte Supabase Auth et son profil métier seront supprimés. Les historiques de missions et MCI restent conservés.`,
     onConfirm: async()=>{
       await addAudit('agent_profile_deleted', { uid:user.id, email:user.email || '', nom:`${user.prenom||''} ${user.nom||''}`.trim() });
+      await deleteAuthAccountFromAdmin(user);
       await deleteQueryDocuments(query(collectionRef('pushTokens'), where('userId','==',user.id)), 'pushTokens');
       await deleteDoc(docRef('users', user.id));
       toast('Agent supprimé et accès bloqué.', 'success');
@@ -3449,11 +3536,11 @@ function showAgentForm(u={}){
   const c = badgeCompany(u);
   let pendingBadgePhotoDataUrl = u.badgePhotoDataUrl || u.photoDataUrl || '';
   showModal(isEdit?'Modifier profil':'Créer compte agent', `<form id="agent-form">
-    ${!isEdit ? `<div class="setup-box">Création directe : l’application crée le compte Firebase Auth puis le profil sécurisé dans Firestore. Si le compte existe déjà, colle simplement son UID Firebase Auth.</div>` : ''}
+    ${!isEdit ? `<div class="setup-box">Le compte Supabase Auth et son profil sont créés ensemble par une Edge Function sécurisée. Aucun secret administrateur n’est exposé dans le navigateur.</div>` : ''}
     <div class="invoice-form-section"><h3>Identité et accès</h3><div class="form-grid">
-      <div class="field"><label>UID Firebase Auth ${isEdit?'':'(optionnel si nouveau compte)'}</label><input class="input mono" name="uid" value="${safe(u.id || u.uid || '')}" ${isEdit?'readonly':''} placeholder="Coller l’UID si le compte existe déjà"></div>
+      <div class="field"><label>UID historique / external_uid ${isEdit?'':'(requis après création Supabase Auth)'}</label><input class="input mono" name="uid" value="${safe(u.id || u.uid || '')}" ${isEdit?'readonly':''} placeholder="Conserver l’external_uid du profil métier"></div>
       <div class="field"><label>Email de connexion</label><input class="input" name="email" type="email" value="${safe(u.email || '')}" required></div>
-      ${!isEdit ? `<div class="field"><label>Mot de passe initial</label><input class="input" name="password" type="password" minlength="6" placeholder="Minimum 6 caractères"></div><div class="field"><label>Confirmer mot de passe</label><input class="input" name="passwordConfirm" type="password" minlength="6"></div>` : ''}
+      ${!isEdit ? `<div class="field"><label>Mot de passe initial</label><input class="input" name="password" type="password" minlength="8" placeholder="Minimum 8 caractères"></div><div class="field"><label>Confirmer mot de passe</label><input class="input" name="passwordConfirm" type="password" minlength="8"></div>` : ''}
       <div class="field"><label>Prénom</label><input class="input" name="prenom" value="${safe(u.prenom || '')}" required></div>
       <div class="field"><label>Nom</label><input class="input" name="nom" value="${safe(u.nom || '')}" required></div>
       <div class="field"><label>Téléphone</label><input class="input" name="telephone" value="${safe(u.telephone || '')}"></div>
@@ -3466,7 +3553,7 @@ function showAgentForm(u={}){
     </div></div>
 
     <div class="invoice-form-section agent-card-form-section"><h3>Carte professionnelle employeur</h3>
-      <div class="agent-photo-editor"><div class="agent-photo-preview" id="agent-badge-photo-preview">${pendingBadgePhotoDataUrl?`<img src="${safe(pendingBadgePhotoDataUrl)}" alt="Photo agent">`:`<span>${safe(agentInitials(u))}</span>`}</div><div class="agent-photo-controls"><div class="field"><label>Photo agent</label><input class="input" id="badge-photo-file" type="file" accept="image/*" capture="user"></div><button class="btn small ghost" type="button" id="badge-photo-clear">Retirer la photo</button><p class="muted">Photo stockée dans la fiche agent, compressée pour rester compatible Firebase Spark.</p></div></div>
+      <div class="agent-photo-editor"><div class="agent-photo-preview" id="agent-badge-photo-preview">${pendingBadgePhotoDataUrl?`<img src="${safe(pendingBadgePhotoDataUrl)}" alt="Photo agent">`:`<span>${safe(agentInitials(u))}</span>`}</div><div class="agent-photo-controls"><div class="field"><label>Photo agent</label><input class="input" id="badge-photo-file" type="file" accept="image/*" capture="user"></div><button class="btn small ghost" type="button" id="badge-photo-clear">Retirer la photo</button><p class="muted">Photo compressée puis stockée dans le bucket privé Supabase Storage.</p></div></div>
       <div class="form-grid">
         <div class="field"><label>Date de naissance</label><input class="input" type="date" name="birthDate" value="${safe(u.birthDate || '')}"></div>
         <div class="field"><label>Lieu de naissance</label><input class="input" name="birthPlace" value="${safe(u.birthPlace || '')}" placeholder="Ville, pays"></div>
@@ -3528,11 +3615,11 @@ function showAgentForm(u={}){
     submitBtn.disabled = true;
     try {
       if (!isEdit && !uid) {
-        if (password.length < 6) throw new Error('Mot de passe : minimum 6 caractères.');
+        if (password.length < 8) throw new Error('Mot de passe : minimum 8 caractères.');
         if (password !== passwordConfirm) throw new Error('Les mots de passe ne correspondent pas.');
-        uid = await createAuthAccountFromAdmin(email, password);
+        uid = await createAuthAccountFromAdmin(email, password, { role:String(fd.get('role')||'agent'), prenom:String(fd.get('prenom')||''), nom:String(fd.get('nom')||''), telephone:String(fd.get('telephone')||'') });
       }
-      if (!uid) throw new Error('UID Firebase Auth manquant.');
+      if (!uid) throw new Error('UID historique (external_uid) manquant.');
       await setDoc(docRef('users', uid), {
         uid, email,
         prenom:fd.get('prenom'), nom:fd.get('nom'), telephone:fd.get('telephone'), matricule:fd.get('matricule'),
@@ -3554,26 +3641,30 @@ function showAgentForm(u={}){
       closeModal(); toast(isEdit?'Profil et badge enregistrés':'Compte et profil créés', 'success');
     } catch(error) {
       console.error(error);
-      toast(userFriendlyError(error, 'Création impossible. Vérifie les droits Firebase et les champs.'), 'error');
+      toast(userFriendlyError(error, 'Création impossible. Vérifie Supabase Auth, les RLS et les champs.'), 'error');
     } finally {
       submitBtn.disabled = false;
     }
   });
 }
 
-async function createAuthAccountFromAdmin(email, password){
-  const secondaryApp = initializeApp(firebaseConfig, `admin-create-${Date.now()}-${id()}`);
-  const secondaryAuth = getAuth(secondaryApp);
-  try {
-    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
-    await signOut(secondaryAuth).catch(()=>{});
-    return cred.user.uid;
-  } catch(error) {
-    if (error?.code === 'auth/email-already-in-use') throw new Error('Cet email existe déjà dans Authentication. Colle son UID Firebase Auth dans le champ UID, puis enregistre le profil.');
-    throw error;
-  } finally {
-    await deleteApp(secondaryApp).catch(()=>{});
-  }
+async function createAuthAccountFromAdmin(email, password, metadata={}){
+  const client=getSupabaseClient();
+  const {data,error}=await client.functions.invoke('admin-manage-user',{
+    body:{action:'create',email,password,role:metadata.role||'agent',firstName:metadata.prenom||'',lastName:metadata.nom||'',phone:metadata.telephone||''}
+  });
+  if(error) throw error;
+  if(!data?.ok||!data?.externalUid) throw new Error(data?.error||'Création Supabase Auth non confirmée.');
+  return String(data.externalUid);
+}
+async function deleteAuthAccountFromAdmin(user){
+  const authUserId=String(user?.authUserId||'').trim();
+  if(!authUserId) return {ok:true,skipped:true};
+  const client=getSupabaseClient();
+  const {data,error}=await client.functions.invoke('admin-manage-user',{body:{action:'delete',authUserId}});
+  if(error) throw error;
+  if(!data?.ok) throw new Error(data?.error||'Suppression Supabase Auth non confirmée.');
+  return data;
 }
 
 function renderQGSites(){
@@ -3688,7 +3779,7 @@ function showSiteForm(s={}){
       closeModal(); toast('Site enregistré et positionné sur la carte', 'success');
     } catch(error) {
       console.error(error);
-      toast(userFriendlyError(error, error.message || 'Site impossible à enregistrer. Vérifie l’adresse et les droits Firebase.'), 'error');
+      toast(userFriendlyError(error, error.message || 'Site impossible à enregistrer. Vérifie l’adresse et les RLS Supabase.'), 'error');
     } finally {
       submitBtn.disabled = false;
     }
@@ -3756,13 +3847,9 @@ async function renderQGFlash(){
     ...sites.map(s=>`<option value="site:${safe(s.id)}">Site · ${safe(s.name || s.siteNom || s.id)}</option>`),
     ...agents.map(a=>`<option value="agent:${safe(a.id || a.uid)}">Agent · ${safe(`${a.prenom || ''} ${a.nom || ''}`.trim() || a.email || a.id)}</option>`)
   ].join('');
-  const pushStatus = pushIsConfigured() && pushWorkerIsConfigured()
-    ? '<span class="pill green">Push configuré</span>'
-    : '<span class="pill orange">Push à configurer</span>';
-  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div>${pushStatus}</div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target">${targetOptions}</select></div></div><button class="btn primary full" type="submit">Envoyer Flash</button></form><div class="divider"></div><button class="btn full" id="configure-push-secret">Configurer la clé d’envoi push sur ce PC</button><button class="btn full" id="diagnose-push" type="button">Diagnostic notifications</button><p class="muted" style="font-size:12px;margin-top:10px">Le Flash est toujours visible dans l’app. La notification écran verrouillé nécessite OneSignal + Cloudflare Worker.</p></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture et statut push</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
+  const pushStatus = webPushFunctionConfigured() ? '<span class="pill green">Web Push natif</span>' : '<span class="pill orange">Web Push à configurer</span>';
+  const body = `<section class="grid cols-2"><div class="card"><div class="card-title"><div><h2>Envoyer Flash</h2><p>Alerte descendante prioritaire</p></div>${pushStatus}</div><form id="flash-form"><div class="field"><label>Titre</label><input class="input" name="title" required placeholder="Message Flash reçu"></div><div class="field"><label>Message</label><textarea class="textarea" name="message" required></textarea></div><div class="form-grid"><div class="field"><label>Priorité</label><select class="select" name="priority"><option>Information</option><option>Important</option><option>Urgent</option><option>Critique</option></select></div><div class="field"><label>Cible</label><select class="select" name="target">${targetOptions}</select></div></div><button class="btn primary full" type="submit">Envoyer Flash</button></form><div class="divider"></div><button class="btn full" id="diagnose-push" data-action="diagnose-web-push" type="button">Diagnostic Web Push</button><p class="muted" style="font-size:12px;margin-top:10px">Le Flash reste visible dans l’app et peut aussi être envoyé sur l’écran verrouillé via Supabase Edge Functions + Web Push natif.</p></div><div class="card"><div class="card-title"><div><h2>Historique Flash</h2><p>Confirmations de lecture et statut push</p></div></div><div id="flash-history" class="list"><div class="empty">Chargement...</div></div></div></section>`;
   render(page('Messages Flash QG', 'Communication descendante immédiate', body));
-  document.querySelector('#configure-push-secret')?.addEventListener('click', configurePushSecret);
-  document.querySelector('#diagnose-push')?.addEventListener('click', diagnosePushSetup);
   document.querySelector('#flash-form').addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -3770,11 +3857,11 @@ async function renderQGFlash(){
     await addAudit('flash_sent', { priority:fd.get('priority'), target:fd.get('target') });
     try {
       const push = await sendPushForFlash({ id:flashRef.id, title:fd.get('title'), message:fd.get('message'), priority:fd.get('priority'), target:fd.get('target') });
-      await updateDoc(docRef('flashMessages', flashRef.id), { pushStatus:push?.skipped?'skipped':'sent', pushProvider:'onesignal', pushSentAt:serverTimestamp(), pushResponse:push || null }).catch(()=>{});
+      await updateDoc(docRef('flashMessages', flashRef.id), { pushStatus:push?.skipped?'skipped':'sent', pushProvider:'supabase-web-push', pushSentAt:serverTimestamp(), pushResponse:push || null }).catch(()=>{});
       toast(push?.skipped ? 'Flash envoyé dans l’app. Push non configuré.' : 'Flash envoyé + notification push demandée.', push?.skipped ? 'warning' : 'success');
     } catch(error) {
       console.error(error);
-      await updateDoc(docRef('flashMessages', flashRef.id), { pushStatus:'failed', pushError:String(error.message || error), pushProvider:'onesignal' }).catch(()=>{});
+      await updateDoc(docRef('flashMessages', flashRef.id), { pushStatus:'failed', pushError:String(error.message || error), pushProvider:'supabase-web-push' }).catch(()=>{});
       toast('Flash envoyé dans l’app, mais la notification push a échoué.', 'warning');
     }
     e.currentTarget.reset();
@@ -3794,7 +3881,7 @@ function isoDateValue(value){
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI', invoice:'Facture'}[type] || type || 'Document'); }
-function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'', photoUrl:r.photoUrl||'', photoAvailable:Boolean(r.photoAvailable||r.photoUrl), photoBytes:Number(r.photoBytes||0), photoMimeType:r.photoMimeType||'', photoWidth:Number(r.photoWidth||0), photoHeight:Number(r.photoHeight||0), photoCapturedAt:isoDateValue(r.photoCapturedAt)||null, gps:r.gps||null }; }
+function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'', photoUrl:r.photoUrl||'', photoAvailable:Boolean(r.photoAvailable||r.photoUrl||r.photoStoragePath), photoStorageBucket:r.photoStorageBucket||'', photoStoragePath:r.photoStoragePath||'', photoBytes:Number(r.photoBytes||0), photoMimeType:r.photoMimeType||'', photoWidth:Number(r.photoWidth||0), photoHeight:Number(r.photoHeight||0), photoCapturedAt:isoDateValue(r.photoCapturedAt)||null, gps:r.gps||null }; }
 function compactRound(r){ return { id:r.id||'', scannedAt:isoDateValue(r.scannedAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', checkpointName:r.checkpointName||'', scanMethod:r.scanMethod||'', isValid:r.isValid !== false }; }
 function compactAlert(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt || r.heure), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteActuel||r.siteId||'', siteNom:r.siteActuelNom||r.siteNom||'', typeAlerte:r.typeAlerte||'SOS/PTI', statut:r.statut||'', niveau:r.niveau||'', message:r.message||'', closeReason:r.closeReason||r.closureReason||'' }; }
 function compactMission(m){ return { id:m.id||'', agentId:m.agentId||'', agentNom:m.agentNom||'', siteId:m.siteId||'', siteNom:m.siteNom||'', clientId:m.clientId||'', type:m.type||m.missionType||'', instructions:m.instructions||'', status:m.status||'', scheduledStart:isoDateValue(m.scheduledStart), scheduledEnd:isoDateValue(m.scheduledEnd), actualStart:isoDateValue(m.actualStart), actualEnd:isoDateValue(m.actualEnd), conformityScore:m.conformityScore ?? null, roundsCount:m.roundsCount||0, incidentsCount:m.incidentsCount||0 }; }
@@ -3863,9 +3950,10 @@ function generatedDocumentMeta(d){
   }
   return [`Type : ${documentTypeLabel(d.type)}`, `Site : ${d.siteNom || 'Tous sites'}`, `Lignes : ${d.rowCount || generatedDocumentRows(d).length}`];
 }
-function downloadGeneratedPdf(d, { silent=false }={}){
+async function downloadGeneratedPdf(d, { silent=false }={}){
   try {
-    const doc = createGeneratedDocumentPdf(d);
+    const prepared = await prepareGeneratedDocumentPhotos(d);
+    const doc = createGeneratedDocumentPdf(prepared);
     doc.save(documentSlug(d.title || documentTypeLabel(d.type), 'pdf'));
     if (!silent) toast('PDF généré et téléchargé.', 'success');
   } catch(error) {
@@ -3876,7 +3964,8 @@ function downloadGeneratedPdf(d, { silent=false }={}){
 async function deliverGeneratedDocumentToSupabase(archived){
   if (!supabaseBridgeEnabled() || !navigator.onLine || !archived?.id) return { skipped:true };
   try {
-    const pdfBlob = createGeneratedDocumentPdf(archived).output('blob');
+    const preparedArchived = await prepareGeneratedDocumentPhotos(archived);
+    const pdfBlob = createGeneratedDocumentPdf(preparedArchived).output('blob');
     const result = await mirrorGeneratedDocument({ firebaseUser:currentUser, profile:currentProfile, document:archived, pdfBlob });
     await updateDoc(docRef('generatedDocuments', archived.id), {
       deliveryStatus:result?.emailQueued ? 'email_queued' : 'supabase_archived',
@@ -3931,7 +4020,7 @@ async function renderQGDocuments(){
         <div class="field"><label>Titre personnalisé (optionnel)</label><input class="input" name="title" placeholder="Ex : Main courante hebdomadaire — Site Alpha"></div>
         <button class="btn primary full" type="submit">Générer et archiver</button>
       </form>
-      <div class="setup-box" style="margin-top:14px">Sans Firebase Storage, Sentinelle Pro archive un instantané structuré dans Firestore puis régénère le PDF ou le CSV à la demande.</div>
+      <div class="setup-box" style="margin-top:14px">Métadonnées et fichier PDF privé sont archivés dans Supabase. L’envoi e-mail automatique reste désactivé pendant le cutover initial.</div>
     </div>
     <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
   </section>`;
@@ -3956,7 +4045,7 @@ async function renderQGDocuments(){
     try {
       const archived = await generateAndArchiveDocument(new FormData(e.currentTarget), {sites, missions});
       if (archived) {
-        downloadGeneratedPdf(archived, { silent:true });
+        await downloadGeneratedPdf(archived, { silent:true });
         const documentPush = await spNotifyDocumentArchived(archived);
         await addAudit('generated_document_notified', { documentId:archived.id, type:archived.type, pushStatus:documentPush?.ok?'sent':documentPush?.reason||documentPush?.error||'skipped' });
       }
@@ -4013,7 +4102,7 @@ function listenGeneratedDocuments(){
     document.querySelectorAll('[data-delete-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteGeneratedDocument(rows.find(d=>d.id===btn.dataset.deleteGeneratedDoc))));
   };
   document.querySelector('#documents-filter')?.addEventListener('change',redraw);
-  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Publie les règles Firestore V5.1.</div>'));
+  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Vérifie les RLS Supabase.</div>'));
 }
 function openGeneratedDocument(d){
   if(!d)return;
@@ -4044,7 +4133,7 @@ async function archiveMissionGroup(group){
   if(!mission.id) mission={id:first.missionId||group.key,agentId:first.agentId,agentNom:first.agentNom,siteId:first.siteId,siteNom:first.siteNom,scheduledStart:shift.scheduledStart,scheduledEnd:shift.scheduledEnd};
   const reports=(group.reports||[]).map(compactReport);
   const archived = await archivePdfDocument({type:'mission',title:`Rapport mission — ${mission.siteNom||'Site'} — ${mission.agentNom||'Agent'}`,siteId:mission.siteId||null,siteNom:mission.siteNom||null,missionId:mission.id||null,rowCount:reports.length,payload:{mission:compactMission(mission),shift:compactShift(shift),rows:reports}}, { silent:true });
-  downloadGeneratedPdf(archived, { silent:true });
+  await downloadGeneratedPdf(archived, { silent:true });
   toast('Rapport PDF archivé dans Documents et téléchargé.','success');
 }
 
@@ -4106,7 +4195,7 @@ async function renderQGBilling(){
   ['#billing-search','#billing-site','#billing-status'].forEach(selector => document.querySelector(selector)?.addEventListener(selector==='#billing-search'?'input':'change', ()=>renderInvoiceList(qgInvoicesCache)));
   const q = query(collectionRef('invoices'), orderBy('createdAt','desc'), limit(300));
   unsubscribeList.push(onSnapshot(q, snap => { qgInvoicesCache = snap.docs.map(d=>({id:d.id,...d.data()})); renderInvoiceList(qgInvoicesCache); }, error => {
-    console.error(error); document.querySelector('#billing-list').innerHTML = '<div class="empty">Facturation indisponible. Publie les règles Firestore V5.0.</div>';
+    console.error(error); document.querySelector('#billing-list').innerHTML = '<div class="empty">Facturation secondaire en transition Supabase. Vérifie compat_records et les RLS.</div>';
   }));
 }
 function renderInvoiceList(rows){
@@ -4462,7 +4551,7 @@ function exportReportHtml(rows, filename, innerOnly=false){
 
 
 
-// -------------------- V5.6 — NOTIFICATIONS OPÉRATIONNELLES --------------------
+// -------------------- V5.8.8.6 — WEB PUSH NATIF SUPABASE --------------------
 const SP_PUSH_PREF_DEFAULTS = Object.freeze({ flash:true, planning:true, instructions:true, documents:true, operations:true });
 
 function spLoadPushPreferences(){
@@ -4478,84 +4567,281 @@ async function spSavePushPreferences(preferences){
   const normalized = { ...SP_PUSH_PREF_DEFAULTS };
   Object.keys(normalized).forEach(key => { normalized[key] = preferences?.[key] !== false; });
   localStorage.setItem('sentinelle_push_preferences', JSON.stringify(normalized));
-  if (!currentUser || !db) return normalized;
+  if (!currentUser) return normalized;
   try {
-    const snap = await getDocs(query(collectionRef('pushTokens'), where('userId','==',currentUser.uid)));
-    for (const item of snap.docs) {
-      await updateDoc(docRef('pushTokens', item.id), { preferences:normalized, updatedAt:serverTimestamp() });
-    }
+    const supabase = getSupabaseClient();
+    const { error } = await supabase.rpc('sentinelle_update_web_push_preferences', { p_preferences:normalized });
+    if (error) throw error;
   } catch(error) {
-    console.warn('Préférences push non synchronisées', error);
+    console.warn('Préférences Web Push non synchronisées', error);
   }
   return normalized;
 }
 
-function spPushPreferenceEnabled(token, category){
-  const prefs = token?.preferences && typeof token.preferences === 'object' ? token.preferences : SP_PUSH_PREF_DEFAULTS;
-  return prefs?.[category] !== false;
+function isIosLike(){
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
-
-function spStoredPushSecret(){
-  return String(localStorage.getItem('sentinelle_push_secret') || '').trim();
+function isStandalonePwa(){
+  return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
 }
-
-async function spResolveSiteAgentIds(siteId){
-  const ids = new Set();
-  if (!siteId) return [];
-  try {
-    const [usersSnap, missionsSnap] = await Promise.all([
-      getDocs(collectionRef('users')),
-      getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(1200)))
-    ]);
-    usersSnap.docs.map(d=>({id:d.id,...d.data()})).forEach(user => {
-      if (String(user.role || '').toLowerCase() === 'agent' && user.siteActuel === siteId) ids.add(user.uid || user.id);
-    });
-    const now = Date.now();
-    missionsSnap.docs.map(d=>({id:d.id,...d.data()})).forEach(mission => {
-      const end = mission.scheduledEnd?.toDate?.()?.getTime() || mission.scheduledStart?.toDate?.()?.getTime() || 0;
-      if (mission.siteId === siteId && mission.agentId && end >= now - 86400000 && !['cancelled'].includes(mission.status)) ids.add(mission.agentId);
-    });
-  } catch(error) {
-    console.warn('Résolution des agents du site impossible', error);
+async function ensureSentinelleServiceWorker({cleanupLegacy=false, timeoutMs=8000}={}){
+  if (!('serviceWorker' in navigator)) throw new Error('Service Worker non supporté par ce navigateur.');
+  if (cleanupLegacy) {
+    const registrations = await navigator.serviceWorker.getRegistrations().catch(()=>[]);
+    await Promise.all((registrations||[]).map(async registration => {
+      const scriptUrl = registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL || '';
+      if (/\/(OneSignalSDKWorker|OneSignalSDKUpdaterWorker)\.js(?:\?|$)/.test(scriptUrl) && !scriptUrl.includes('/push/onesignal/')) {
+        await registration.unregister().catch(()=>false);
+      }
+    }));
   }
-  return [...ids];
+  let registration = await navigator.serviceWorker.getRegistration('./').catch(()=>null);
+  const existingUrl = registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '';
+  if (!registration || !/service-worker\.js/i.test(existingUrl)) {
+    try {
+      registration = await navigator.serviceWorker.register('./service-worker.js?v=5886', { scope:'./', updateViaCache:'none' });
+      window.__SENTINELLE_SW_LAST_ERROR__ = '';
+    } catch(error) {
+      window.__SENTINELLE_SW_LAST_ERROR__ = error?.message || String(error || 'Échec enregistrement Service Worker');
+      throw error;
+    }
+  } else {
+    registration.update?.().catch(()=>{});
+  }
+  const ready = await Promise.race([
+    navigator.serviceWorker.ready.catch(()=>null),
+    new Promise(resolve=>setTimeout(()=>resolve(null), Math.max(1500, Number(timeoutMs||8000))))
+  ]);
+  return ready || registration;
 }
 
-async function spResolveOperationalSubscriptionIds({ userIds=[], siteId='', category='flash', role='agent' }={}){
-  const wantedUsers = new Set((userIds || []).map(String).filter(Boolean));
-  if (siteId && !wantedUsers.size) (await spResolveSiteAgentIds(siteId)).forEach(uid => wantedUsers.add(String(uid)));
-  const snapshot = await getDocs(collectionRef('pushTokens'));
-  let tokens = snapshot.docs.map(item => ({ id:item.id, ...item.data() }))
-    .filter(item => item.enabled !== false && String(item.subscriptionId || '').trim())
-    .filter(item => !role || String(item.role || '').toLowerCase() === String(role).toLowerCase())
-    .filter(item => spPushPreferenceEnabled(item, category));
-  if (wantedUsers.size) tokens = tokens.filter(item => wantedUsers.has(String(item.userId || '')));
-  return [...new Set(tokens.map(item => String(item.subscriptionId || '').trim()).filter(Boolean))];
+function nativeWebPushSupported(){
+  return Boolean('serviceWorker' in navigator && 'PushManager' in window && typeof Notification !== 'undefined');
+}
+function webPushFunctionConfigured(){
+  return Boolean(pushConfig?.pushProvider === 'supabase-web-push' && String(pushConfig?.pushFunctionUrl || '').startsWith('https://'));
+}
+function pushIsConfigured(){ return webPushFunctionConfigured(); }
+function pushWorkerIsConfigured(){ return webPushFunctionConfigured(); }
+
+function urlBase64ToUint8Array(value){
+  const padding = '='.repeat((4 - String(value || '').length % 4) % 4);
+  const base64 = (String(value || '') + padding).replace(/-/g,'+').replace(/_/g,'/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(char => char.charCodeAt(0)));
 }
 
-async function spSendOperationalPush({ title, message, category='planning', priority='Information', userIds=[], siteId='', route='home', data={} }={}){
-  if (!pushIsConfigured() || !pushWorkerIsConfigured()) return { ok:false, skipped:true, reason:'Push non configuré' };
-  const secret = spStoredPushSecret();
-  if (!secret) return { ok:false, skipped:true, reason:'Clé push QG absente sur cet appareil' };
-  const subscriptionIds = await spResolveOperationalSubscriptionIds({ userIds, siteId, category, role:'agent' });
-  if (!subscriptionIds.length) return { ok:false, skipped:true, reason:'Aucun appareil abonné pour cette notification' };
-  const response = await fetch(pushConfig.pushWorkerUrl, {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret':secret },
-    body:JSON.stringify({
-      title:String(title || 'Sentinelle Pro'),
-      message:String(message || 'Nouvelle information opérationnelle'),
-      priority,
-      subscriptionIds,
-      notificationType:category,
-      notificationId:`${category}_${Date.now()}`,
-      url:new URL(`./index.html?route=${encodeURIComponent(route)}`, location.href).href,
-      data
-    })
+async function spNativePushRequest(body, options={}){
+  if (!currentUser) return { ok:false, skipped:true, reason:'Utilisateur non connecté' };
+  if (!webPushFunctionConfigured()) return { ok:false, skipped:true, reason:'Edge Function Web Push non configurée' };
+  const timeoutMs = Math.max(3000, Number(options?.timeoutMs || 20000));
+  const supabase = getSupabaseClient();
+  const sessionResult = await supabase.auth.getSession();
+  const token = sessionResult?.data?.session?.access_token || await currentUser.getIdToken(false);
+  if (!token) throw new Error('Session Supabase absente ou expirée.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // V5.8.8.6 : la passerelle Supabase attend le JWT utilisateur dans Authorization
+    // et la clé publique du projet dans apikey pour un appel navigateur fiable.
+    const response = await fetch(pushConfig.pushFunctionUrl, {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'Accept':'application/json',
+        'Authorization':`Bearer ${token}`,
+        'apikey':stagingConfig.supabasePublishableKey,
+        'x-client-info':'sentinelle-pro-web-push/5.8.8.5'
+      },
+      body:JSON.stringify(body || {}),
+      signal:controller.signal,
+      cache:'no-store'
+    });
+    const text = await response.text().catch(()=> '');
+    let result={};
+    try { result = text ? JSON.parse(text) : {}; } catch { result = { message:text }; }
+    if (!response.ok || result?.ok === false) throw new Error(result?.error || result?.message || `Web Push HTTP ${response.status}`);
+    return result;
+  } catch(error) {
+    if (error?.name === 'AbortError') throw new Error(`Edge Function sans réponse après ${Math.round(timeoutMs/1000)} s.`);
+    if (/Load failed|Failed to fetch|NetworkError/i.test(String(error?.message||error))) {
+      throw new Error('Edge Function inaccessible depuis l’app. Vérifie son déploiement et ses logs Supabase.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function spGetVapidPublicKey(){
+  const cached = String(sessionStorage.getItem('sentinelle_vapid_public_key') || '').trim();
+  if (cached) return cached;
+  const result = await spNativePushRequest({ action:'public_key' });
+  const key = String(result?.publicKey || '').trim();
+  if (!key) throw new Error('Clé publique VAPID absente côté Supabase.');
+  sessionStorage.setItem('sentinelle_vapid_public_key', key);
+  return key;
+}
+
+async function nativePushState(options={}){
+  if (!('serviceWorker' in navigator)) return {worker:'',workerState:'absent',nativeSubscribed:false,endpoint:'',registrationError:'non supporté'};
+  const timeoutMs = Math.max(1500, Number(options?.timeoutMs || 5000));
+  let registration = null;
+  let registrationError = '';
+  try {
+    registration = await ensureSentinelleServiceWorker({cleanupLegacy:false, timeoutMs});
+  } catch(error) {
+    registrationError = error?.message || String(error || 'échec enregistrement');
+  }
+  if (!registration) return {scope:new URL('./',location.href).href,worker:'',workerState:'non prêt / délai dépassé',nativeSubscribed:false,endpoint:'',registrationError:registrationError||window.__SENTINELLE_SW_LAST_ERROR__||''};
+  const subscription = registration?.pushManager ? await registration.pushManager.getSubscription().catch(()=>null) : null;
+  return {
+    scope:registration?.scope || new URL('./',location.href).href,
+    worker:registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '',
+    workerState:registration?.active?.state || registration?.waiting?.state || registration?.installing?.state || 'enregistré',
+    nativeSubscribed:Boolean(subscription),
+    endpoint:subscription?.endpoint || '',
+    registrationError:registrationError||window.__SENTINELLE_SW_LAST_ERROR__||''
+  };
+}
+
+async function persistNativePushSubscription(subscription){
+  if (!currentUser || !subscription) return null;
+  const json = subscription.toJSON?.() || {};
+  const endpoint = String(json.endpoint || subscription.endpoint || '').trim();
+  const p256dh = String(json.keys?.p256dh || '').trim();
+  const authSecret = String(json.keys?.auth || '').trim();
+  if (!endpoint || !p256dh || !authSecret) throw new Error('Abonnement Push incomplet.');
+  const supabase = getSupabaseClient();
+  const { data,error } = await supabase.rpc('sentinelle_register_web_push_subscription', {
+    p_endpoint:endpoint,
+    p_p256dh:p256dh,
+    p_auth:authSecret,
+    p_preferences:spLoadPushPreferences(),
+    p_user_agent:navigator.userAgent || '',
+    p_platform:navigator.platform || ''
   });
-  const result = await response.json().catch(()=>({}));
-  if (!response.ok || !result.id) throw new Error(result.error || result.message || 'Notification non livrée');
-  return { ...result, requestedRecipients:subscriptionIds.length };
+  if (error) throw error;
+  localStorage.setItem('sentinelle_native_push_endpoint', endpoint);
+  return data;
+}
+
+async function syncNativePushIdentity(){
+  if (!currentUser || !nativeWebPushSupported() || Notification.permission !== 'granted') return null;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.getSubscription();
+    if (!subscription) return null;
+    return await persistNativePushSubscription(subscription);
+  } catch(error) {
+    console.warn('Synchronisation Web Push impossible', error);
+    return null;
+  }
+}
+
+async function disableNativePushForCurrentDevice(){
+  if (!currentUser || !('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.ready.catch(()=>null);
+    const subscription = await registration?.pushManager?.getSubscription?.().catch(()=>null);
+    const endpoint = subscription?.endpoint || localStorage.getItem('sentinelle_native_push_endpoint') || '';
+    if (endpoint) {
+      const supabase = getSupabaseClient();
+      await supabase.rpc('sentinelle_disable_web_push_subscription', { p_endpoint:endpoint }).catch(()=>{});
+    }
+  } catch(error) {
+    console.warn('Désactivation Web Push impossible', error);
+  }
+}
+
+async function registerPushNotifications(){
+  const button = document.querySelector('#push-activate-main');
+  const originalLabel = 'Activer les notifications sur cet appareil';
+  try {
+    if (!webPushFunctionConfigured()) return showModal('Web Push à configurer', `<div class="setup-box">Déploie d’abord l’Edge Function <strong>send-web-push</strong> et configure les secrets VAPID dans Supabase.</div>`);
+    if (!nativeWebPushSupported()) return toast('Web Push non supporté sur cet appareil.', 'warning');
+    if (isIosLike() && !isStandalonePwa()) return showModal('Installation requise sur iPhone', `<div class="setup-box">Sur iPhone/iPad, ouvre Sentinelle Pro depuis son icône installée sur l’écran d’accueil pour pouvoir activer le Web Push.</div>`);
+    if (button) { button.disabled=true; button.textContent='Demande système en cours…'; }
+    let permission = Notification.permission;
+    if (permission !== 'granted') permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      if (permission === 'denied') return showModal('Notifications bloquées', `<div class="setup-box">L’autorisation a été refusée. Réactive les notifications dans les réglages de l’appareil puis reviens dans Sentinelle Pro.</div>`);
+      throw new Error('Permission de notification non accordée.');
+    }
+    if (button) button.textContent='Création de l’abonnement sécurisé…';
+    const registration = await ensureSentinelleServiceWorker({cleanupLegacy:true, timeoutMs:10000});
+    if (!registration?.pushManager) throw new Error('Service Worker Sentinelle non prêt pour le Web Push.');
+    const publicKey = await spGetVapidPublicKey();
+    let subscription = await registration.pushManager.getSubscription();
+    // V5.8.8 : on force un abonnement lié à NOS clés VAPID, et non à un ancien fournisseur.
+    if (subscription) await subscription.unsubscribe().catch(()=>{});
+    subscription = await registration.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:urlBase64ToUint8Array(publicKey) });
+    if (button) button.textContent='Association au compte Sentinelle…';
+    await persistNativePushSubscription(subscription);
+    await addAudit('web_push_enabled', { endpointHost:(()=>{try{return new URL(subscription.endpoint).host}catch{return 'push'}})(), provider:'supabase-web-push' });
+    toast('Notifications Web Push activées sur cet appareil.', 'success');
+    setTimeout(()=>renderPushSetup(),350);
+  } catch(error) {
+    console.error(error);
+    showModal('Activation impossible', `<div class="setup-box">${safe(userFriendlyError(error,'Activation Web Push impossible.'))}</div>`);
+  } finally {
+    if (button) { button.disabled=false; button.textContent=originalLabel; }
+  }
+}
+
+async function diagnosePushSetup(triggerButton=null){
+  const button = triggerButton instanceof HTMLElement ? triggerButton : document.querySelector('#push-diagnose-main, #diagnose-push');
+  const originalLabel = button?.textContent || 'Diagnostic Web Push';
+  if (button) { button.disabled=true; button.textContent='Diagnostic en cours…'; }
+  showModal('Diagnostic Web Push', `<div id="web-push-diagnostic-result"><div class="setup-box"><strong>Diagnostic en cours…</strong><br>Vérification de l’Edge Function, de Supabase et du Service Worker.</div></div>`);
+  try {
+    const [edgeResult, dbResult, nativeResult] = await Promise.allSettled([
+      spNativePushRequest({action:'health'},{timeoutMs:8000}),
+      (async()=>{
+        const supabase=getSupabaseClient();
+        const {data,error}=await supabase.rpc('sentinelle_web_push_status');
+        if(error) throw error;
+        return data;
+      })(),
+      nativePushState({timeoutMs:4000})
+    ]);
+    const edge = edgeResult.status==='fulfilled'
+      ? `${edgeResult.value?.service||'send-web-push'} · VAPID ${edgeResult.value?.vapidConfigured?'OK':'MANQUANT'}`
+      : `Erreur : ${edgeResult.reason?.message||edgeResult.reason||'inconnue'}`;
+    const db = dbResult.status==='fulfilled'
+      ? `${dbResult.value?.enabled_count ?? 0} abonnement(s) actif(s) sur ce compte`
+      : `Erreur : ${dbResult.reason?.message||dbResult.reason||'inconnue'}`;
+    const native = nativeResult.status==='fulfilled'
+      ? nativeResult.value
+      : {worker:'',workerState:`Erreur : ${nativeResult.reason?.message||nativeResult.reason||'inconnue'}`,nativeSubscribed:false,endpoint:''};
+    const html = `<div class="setup-box"><strong>Edge Function</strong><br>${safe(edge)}</div><div class="setup-box" style="margin-top:12px"><strong>Base Supabase</strong><br>${safe(db)}</div><div class="setup-box" style="margin-top:12px"><strong>Appareil</strong><br>Permission : ${safe(typeof Notification!=='undefined'?Notification.permission:'indisponible')}<br>Service Worker : ${safe(native.worker||'absent')}<br>État : ${safe(native.workerState)}${native.registrationError?`<br>Erreur SW : ${safe(native.registrationError)}`:''}<br>Abonnement natif : ${native.nativeSubscribed?'oui':'non'}</div>`;
+    const resultBox=document.querySelector('#web-push-diagnostic-result');
+    if(resultBox) resultBox.innerHTML=html; else showModal('Diagnostic Web Push', html);
+  } catch(error) {
+    const message=userFriendlyError(error,'Diagnostic Web Push impossible.');
+    const resultBox=document.querySelector('#web-push-diagnostic-result');
+    if(resultBox) resultBox.innerHTML=`<div class="setup-box warning-copy"><strong>Diagnostic impossible</strong><br>${safe(message)}</div>`;
+    else showModal('Diagnostic Web Push', `<div class="setup-box warning-copy">${safe(message)}</div>`);
+  } finally {
+    if (button && document.contains(button)) { button.disabled=false; button.textContent=originalLabel; }
+  }
+}
+
+async function spSendOperationalPush({ title, message, category='planning', priority='Information', userIds=[], siteId='', route='home', data={}, target='' }={}){
+  return spNativePushRequest({
+    action:'send',
+    title:String(title || 'Sentinelle Pro'),
+    message:String(message || 'Nouvelle information opérationnelle'),
+    priority,
+    notificationType:category,
+    notificationId:`${category}_${data?.missionId || data?.shiftId || data?.documentId || Date.now()}`,
+    target:target || (siteId ? `site:${siteId}` : 'all'),
+    userIds:Array.isArray(userIds)?userIds:[],
+    siteId,
+    route,
+    url:new URL(`./index.html?route=${encodeURIComponent(route)}`, location.href).href,
+    data
+  });
 }
 
 function spMissionNotificationMessage({ siteName, start, end, count=1, status='created' }){
@@ -4565,544 +4851,81 @@ function spMissionNotificationMessage({ siteName, start, end, count=1, status='c
   return `${siteName || 'Nouvelle mission'} · ${period}. Consulte le planning et les consignes.`;
 }
 
-async function spNotifyQGShiftStarted({shiftId='',agentId='',agentNom='',siteId='',siteName='',missionId='',startedAt=new Date()}={}){
-  if(!pushIsConfigured()||!pushWorkerIsConfigured()) return {ok:false,skipped:true,reason:'Push non configuré'};
-  if(!currentUser||!shiftId) return {ok:false,skipped:true,reason:'Prise de poste incomplète'};
-  try{
-    const idToken=await currentUser.getIdToken(false);
-    const response=await fetch(pushConfig.pushWorkerUrl,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
-      body:JSON.stringify({
-        title:'Agent en poste',
-        message:`${agentNom||'Un agent'} a pris son poste sur ${siteName||'un site'} à ${timestampToDate(startedAt)?.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})||'l’instant'}.`,
-        priority:'Important',target:'qg',notificationType:'shift_start',notificationId:`shift_start_${shiftId}`,
-        url:new URL('./index.html?route=home',location.href).href,
-        data:{shiftId,agentId,siteId,missionId,route:'home'}
-      })
-    });
-    const result=await response.json().catch(()=>({}));
-    if(!response.ok||!result.id) return {ok:false,error:result.error||result.message||'Notification QG non livrée'};
-    return {...result,ok:true};
-  }catch(error){
-    console.warn('Notification QG de prise de poste indisponible',error);
-    return {ok:false,error:String(error?.message||error)};
-  }
+async function spNotifyQGShiftStarted({shiftId='',siteName='',startedAt=new Date()}={}){
+  if(!shiftId) return {ok:false,skipped:true,reason:'Prise de poste incomplète'};
+  return spNativePushRequest({action:'send',target:'qg',notificationType:'shift_start',notificationId:`shift_start_${shiftId}`,priority:'Important',route:'home',data:{shiftId,siteName,startedAt:new Date(startedAt).toISOString()}})
+    .catch(error=>({ok:false,error:String(error.message||error)}));
+}
+
+async function spNotifyQGShiftEnded({shiftId='',siteName='',reportsCount=0,roundsCount=0,incidentsCount=0}={}){
+  if(!shiftId) return {ok:false,skipped:true,reason:'Fin de poste incomplète'};
+  return spNativePushRequest({action:'send',target:'qg',notificationType:'shift_end',notificationId:`shift_end_${shiftId}`,priority:incidentsCount>0?'Important':'Information',route:'home',data:{shiftId,siteName,reportsCount,roundsCount,incidentsCount}})
+    .catch(error=>({ok:false,error:String(error.message||error)}));
 }
 
 async function spNotifyMissionCreated({ agentId, siteName, start, end, count=1, missionId='' }){
-  return spSendOperationalPush({
-    title:count > 1 ? 'Nouvelles missions planifiées' : 'Nouvelle mission planifiée',
-    message:spMissionNotificationMessage({ siteName, start, end, count }),
-    category:'planning', priority:'Important', userIds:[agentId], route:'planning', data:{ missionId, count }
-  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+  return spSendOperationalPush({ title:count > 1 ? 'Nouvelles missions planifiées' : 'Nouvelle mission planifiée', message:spMissionNotificationMessage({ siteName, start, end, count }), category:'planning', priority:'Important', userIds:[agentId], route:'planning', data:{ missionId, count } }).catch(error => ({ ok:false, error:String(error.message || error) }));
 }
-
 async function spNotifyMonthlyPlanningPublished({agentIds=[],monthValue='',missionCount=0}={}){
   if(!agentIds.length) return {ok:false,skipped:true,reason:'Aucun agent concerné'};
-  const range=monthRange(monthValue);
-  const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
-  return spSendOperationalPush({
-    title:`Planning ${label} disponible`,
-    message:`Ton planning mensuel est finalisé. Consulte « Mon planning » et confirme la prise de connaissance du mois.`,
-    category:'planning',priority:'Important',userIds:agentIds,route:'planning',data:{month:monthValue,status:'published',missionCount}
-  }).catch(error=>({ok:false,error:String(error.message||error)}));
+  const range=monthRange(monthValue); const label=range.label.charAt(0).toUpperCase()+range.label.slice(1);
+  return spSendOperationalPush({ title:`Planning ${label} disponible`, message:`Ton planning mensuel est finalisé. Consulte « Mon planning » et confirme la prise de connaissance du mois.`, category:'planning',priority:'Important',userIds:agentIds,route:'planning',data:{month:monthValue,status:'published',missionCount} }).catch(error=>({ok:false,error:String(error.message||error)}));
 }
-
 async function spNotifyMissionCancelled(mission){
   if (!mission?.agentId) return { ok:false, skipped:true };
-  return spSendOperationalPush({
-    title:'Mission annulée',
-    message:spMissionNotificationMessage({ siteName:mission.siteNom, start:mission.scheduledStart, end:mission.scheduledEnd, status:'cancelled' }),
-    category:'planning', priority:'Urgent', userIds:[mission.agentId], route:'planning', data:{ missionId:mission.id, status:'cancelled' }
-  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+  return spSendOperationalPush({ title:'Mission annulée', message:spMissionNotificationMessage({ siteName:mission.siteNom, start:mission.scheduledStart, end:mission.scheduledEnd, status:'cancelled' }), category:'planning', priority:'Urgent', userIds:[mission.agentId], route:'planning', data:{ missionId:mission.id, status:'cancelled' } }).catch(error => ({ ok:false, error:String(error.message || error) }));
 }
-
 async function spNotifyMissionUpdated(mission){
   if(!mission?.agentId) return {ok:false,skipped:true};
-  return spSendOperationalPush({
-    title:'Planning modifié',
-    message:`${mission.siteNom||'Mission'} · nouvel horaire ${dateText(mission.scheduledStart)} → ${dateText(mission.scheduledEnd)}. Consulte ton planning et confirme la lecture.`,
-    category:'planning',priority:'Important',userIds:[mission.agentId],route:'planning',data:{missionId:mission.id,status:'updated',revision:missionRevision(mission)}
-  }).catch(error=>({ok:false,error:String(error.message||error)}));
+  return spSendOperationalPush({ title:'Planning modifié', message:`${mission.siteNom||'Mission'} · nouvel horaire ${dateText(mission.scheduledStart)} → ${dateText(mission.scheduledEnd)}. Consulte ton planning et confirme la lecture.`, category:'planning',priority:'Important',userIds:[mission.agentId],route:'planning',data:{missionId:mission.id,status:'updated',revision:missionRevision(mission)} }).catch(error=>({ok:false,error:String(error.message||error)}));
 }
-
 async function spNotifyInstructionsChanged(site, instructions){
   if (!site?.id) return { ok:false, skipped:true };
-  return spSendOperationalPush({
-    title:`Consignes mises à jour · ${site.name || 'Site'}`,
-    message:String(instructions || 'Les consignes opérationnelles du site ont été modifiées. Ouvre Sentinelle Pro avant ta prochaine prise de poste.').slice(0,420),
-    category:'instructions', priority:'Important', siteId:site.id, route:'docs', data:{ siteId:site.id, updateType:'instructions' }
-  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+  return spSendOperationalPush({ title:`Consignes mises à jour · ${site.name || 'Site'}`, message:String(instructions || 'Les consignes opérationnelles du site ont été modifiées. Ouvre Sentinelle Pro avant ta prochaine prise de poste.').slice(0,420), category:'instructions', priority:'Important', siteId:site.id, route:'docs', data:{ siteId:site.id, updateType:'instructions' } }).catch(error => ({ ok:false, error:String(error.message || error) }));
 }
-
 async function spNotifyDocumentArchived(documentRecord){
-  const payload = documentRecord?.payload || {};
-  const missionAgentId = payload?.mission?.agentId || '';
+  const payload = documentRecord?.payload || {}; const missionAgentId = payload?.mission?.agentId || '';
   if (!missionAgentId && !documentRecord?.siteId) return { ok:false, skipped:true, reason:'Document interne sans destinataire agent' };
-  return spSendOperationalPush({
-    title:`Nouveau document · ${documentTypeLabel(documentRecord?.type)}`,
-    message:`${documentRecord?.title || 'Un nouveau document'} est disponible dans la rubrique Documents.`,
-    category:'documents', priority:'Information', userIds:missionAgentId ? [missionAgentId] : [], siteId:missionAgentId ? '' : (documentRecord?.siteId || ''), route:'docs', data:{ documentId:documentRecord?.id || '', documentType:documentRecord?.type || '' }
-  }).catch(error => ({ ok:false, error:String(error.message || error) }));
+  return spSendOperationalPush({ title:`Nouveau document · ${documentTypeLabel(documentRecord?.type)}`, message:`${documentRecord?.title || 'Un nouveau document'} est disponible dans la rubrique Documents.`, category:'documents', priority:'Information', userIds:missionAgentId ? [missionAgentId] : [], siteId:missionAgentId ? '' : (documentRecord?.siteId || ''), route:'docs', data:{ documentId:documentRecord?.id || '', documentType:documentRecord?.type || '' } }).catch(error => ({ ok:false, error:String(error.message || error) }));
 }
 
 function renderPushSetup(){
   currentRoute = 'pushsetup';
   const permission = typeof Notification !== 'undefined' ? Notification.permission : 'indisponible';
   const permissionClass = permission === 'granted' ? 'green' : permission === 'denied' ? 'red' : 'orange';
-  const installed = isStandalonePwa();
-  const ios = isIosLike();
-  const workerUrl = String(pushConfig?.pushWorkerUrl || '').trim();
-  const appId = String(pushConfig?.oneSignalAppId || '').trim();
+  const installed = isStandalonePwa(); const ios = isIosLike(); const prefs=spLoadPushPreferences();
   const body = `
     <section class="grid cols-2">
-      <div class="card">
-        <div class="card-title">
-          <div>
-            <h2>Autorisation notifications</h2>
-            <p>Active cet appareil pour recevoir les Flash QG sur écran verrouillé.</p>
-          </div>
-          <span class="pill ${permissionClass}">${safe(permission)}</span>
-        </div>
-        <div class="setup-box">
-          <strong>État de cet appareil</strong><br>
-          App installée écran d’accueil : <strong>${installed ? 'Oui' : 'Non'}</strong><br>
-          Appareil iOS/iPadOS : <strong>${ios ? 'Oui' : 'Non'}</strong><br>
-          OneSignal App ID : <strong>${pushIsConfigured() ? 'Configuré' : 'Manquant'}</strong><br>
-          Worker Cloudflare : <strong>${pushWorkerIsConfigured() ? 'Configuré' : 'Manquant'}</strong>
-        </div>
-        ${ios && !installed ? `<div class="setup-box warning-copy"><strong>iPhone détecté :</strong><br>ouvre Sentinelle Pro depuis l’icône installée sur l’écran d’accueil, sinon iOS ne montre pas la demande d’autorisation.</div>` : ''}
-        <button class="btn primary full" id="push-activate-main" type="button">Demander l’autorisation sur cet appareil</button>
+      <div class="card"><div class="card-title"><div><h2>Web Push natif</h2><p>Notifications écran verrouillé sans OneSignal.</p></div><span class="pill ${permissionClass}">${safe(permission)}</span></div>
+        <div class="setup-box">App installée écran d’accueil : <strong>${installed?'Oui':'Non'}</strong><br>Web Push navigateur : <strong>${nativeWebPushSupported()?'Supporté':'Non supporté'}</strong><br>Edge Function Supabase : <strong>${webPushFunctionConfigured()?'Configurée':'Manquante'}</strong><br>Fournisseur : <strong>Web Push + VAPID</strong></div>
+        ${ios&&!installed?`<div class="setup-box warning-copy"><strong>iPhone/iPad :</strong><br>ouvre Sentinelle Pro depuis l’icône ajoutée à l’écran d’accueil pour activer les notifications.</div>`:''}
+        <button class="btn primary full" id="push-activate-main" type="button">Activer les notifications sur cet appareil</button>
         <button class="btn full" id="push-test-local" type="button">Tester une notification locale</button>
-        <p class="muted" style="font-size:12px;margin-top:10px">La fenêtre système ne peut apparaître qu’après un clic manuel. Si elle a déjà été refusée, il faut réactiver les notifications dans les réglages de l’iPhone.</p>
       </div>
-      <div class="card">
-        <div class="card-title"><div><h2>Diagnostic</h2><p>Contrôle de la configuration push.</p></div></div>
-        <div class="list">
-          <div class="item"><div class="item-main"><div class="item-title">Compte connecté</div><div class="item-meta">${safe(currentProfile?.prenom || '')} ${safe(currentProfile?.nom || '')} · ${safe(currentProfile?.role || '')}</div></div></div>
-          <div class="item"><div class="item-main"><div class="item-title">OneSignal</div><div class="item-meta">${safe(appId || 'Non configuré')}</div></div></div>
-          <div class="item"><div class="item-main"><div class="item-title">Cloudflare Worker</div><div class="item-meta">${safe(workerUrl || 'Non configuré')}</div></div></div>
-        </div>
-        ${rolePortal(currentProfile?.role) === 'qg' ? `<button class="btn full" id="push-diagnose-main" type="button">Diagnostic QG complet</button><button class="btn full" id="push-secret-main" type="button">Configurer la clé d’envoi QG</button>` : ''}
-        <button class="btn ghost full" id="push-refresh-main" type="button">Rafraîchir l’état</button>
+      <div class="card"><div class="card-title"><div><h2>Diagnostic</h2><p>Supabase Auth → Edge Function → Web Push.</p></div></div>
+        <div class="setup-box">V5.8.8.6 : aucun OneSignal et aucun Worker Cloudflare n’est nécessaire. Le Service Worker PWA reçoit directement le Web Push.</div>
+        <div class="list"><div class="item"><div class="item-main"><div class="item-title">Compte connecté</div><div class="item-meta">${safe(currentProfile?.prenom||'')} ${safe(currentProfile?.nom||'')} · ${safe(currentProfile?.role||'')}</div></div></div><div class="item"><div class="item-main"><div class="item-title">Edge Function</div><div class="item-meta">${safe(pushConfig?.pushFunctionUrl||'Non configurée')}</div></div></div></div>
+        <button class="btn full" id="push-diagnose-main" data-action="diagnose-web-push" type="button">Diagnostic Web Push</button><button class="btn ghost full" id="push-refresh-main" type="button">Rafraîchir l’état</button>
       </div>
     </section>
-    <section class="card">
-      <div class="card-title"><div><h2>Notifications à recevoir</h2><p>Choisis les événements opérationnels envoyés sur cet appareil.</p></div></div>
-      ${(() => { const prefs = spLoadPushPreferences(); return `
-      <div class="list">
-        ${rolePortal(currentProfile?.role) === 'qg' ? `<label class="item"><div class="item-main"><div class="item-title">Prises de poste agents</div><div class="item-meta">Notification QG dès qu’un agent démarre sa mission.</div></div><input type="checkbox" data-push-pref="operations" ${prefs.operations?'checked':''}></label>` : ''}
-        <label class="item"><div class="item-main"><div class="item-title">Planning et missions</div><div class="item-meta">Nouvelle mission, duplication, annulation et changement de planning.</div></div><input type="checkbox" data-push-pref="planning" ${prefs.planning?'checked':''}></label>
-        <label class="item"><div class="item-main"><div class="item-title">Messages Flash QG</div><div class="item-meta">Informations, urgences et messages prioritaires.</div></div><input type="checkbox" data-push-pref="flash" ${prefs.flash?'checked':''}></label>
-        <label class="item"><div class="item-main"><div class="item-title">Consignes opérationnelles</div><div class="item-meta">Modification des consignes d’un site ou d’une mission.</div></div><input type="checkbox" data-push-pref="instructions" ${prefs.instructions?'checked':''}></label>
-        <label class="item"><div class="item-main"><div class="item-title">Nouveaux documents</div><div class="item-meta">Rapports de mission et documents ajoutés pour ton site.</div></div><input type="checkbox" data-push-pref="documents" ${prefs.documents?'checked':''}></label>
-      </div>
-      <button class="btn primary full" id="push-save-preferences" type="button">Enregistrer mes préférences</button>`; })()}
-    </section>
-    <section class="card">
-      <div class="card-title"><div><h2>Comment l’activer</h2><p>Procédure fiable pour les agents.</p></div></div>
-      <ol class="setup-list">
-        <li>Installer Sentinelle Pro sur l’écran d’accueil du téléphone.</li>
-        <li>Ouvrir l’application depuis l’icône, pas depuis Safari simple.</li>
-        <li>Se connecter au compte agent.</li>
-        <li>Aller dans <strong>Push</strong>.</li>
-        <li>Appuyer sur <strong>Demander l’autorisation</strong> puis accepter.</li>
-        <li>Le QG peut ensuite envoyer un Flash de test.</li>
-      </ol>
-    </section>`;
-  render(page('Notifications Push', 'Autorisation appareil et diagnostic', body));
-  document.querySelector('#push-activate-main')?.addEventListener('click', registerPushNotifications);
-  prepareOneSignalActivationButton().catch(error => console.warn('Préparation OneSignal impossible', error));
-  document.querySelector('#push-save-preferences')?.addEventListener('click', async () => {
-    const preferences = { ...SP_PUSH_PREF_DEFAULTS };
-    document.querySelectorAll('[data-push-pref]').forEach(input => { preferences[input.dataset.pushPref] = Boolean(input.checked); });
-    await spSavePushPreferences(preferences);
-    toast('Préférences de notifications enregistrées.', 'success');
-  });
-  document.querySelector('#push-refresh-main')?.addEventListener('click', () => renderPushSetup());
-  document.querySelector('#push-diagnose-main')?.addEventListener('click', diagnosePushSetup);
-  document.querySelector('#push-secret-main')?.addEventListener('click', configurePushSecret);
-  document.querySelector('#push-test-local')?.addEventListener('click', async () => {
-    try {
-      if (typeof Notification === 'undefined') return toast('Notifications indisponibles sur ce navigateur.', 'warning');
-      if (Notification.permission !== 'granted') return toast('Autorisation non accordée sur cet appareil.', 'warning');
-      new Notification('Sentinelle Pro', { body:'Notification locale de test. Si tu la vois, l’autorisation système est active.', tag:'sentinelle-local-test' });
-      toast('Notification locale envoyée.', 'success');
-    } catch(error) {
-      toast(userFriendlyError(error, 'Test notification impossible.'), 'error');
-    }
-  });
-}
-
-// -------------------- PUSH NOTIFICATIONS — ONESIGNAL --------------------
-// V5.6.5 : intégration simplifiée selon le schéma officiel OneSignal.
-// - le SDK est chargé une seule fois dans index.html ;
-// - OneSignal enregistre lui-même son Worker dédié dans /push/onesignal/ ;
-// - le Worker PWA principal garde son propre scope et ne contient plus OneSignal.
-function pushIsConfigured(){
-  return pushConfig?.pushProvider === 'onesignal' && pushConfig?.oneSignalAppId && !String(pushConfig.oneSignalAppId).includes('REMPLACE_MOI');
-}
-function pushWorkerIsConfigured(){
-  return pushConfig?.pushWorkerUrl && /^https:\/\//i.test(pushConfig.pushWorkerUrl);
-}
-function isIosLike(){
-  return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-}
-function isStandalonePwa(){
-  return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
-}
-function oneSignalScopePath(){
-  return new URL('./push/onesignal/', location.href).pathname;
-}
-function oneSignalWorkerPath(){
-  // OneSignal attend un chemin relatif à la racine du domaine, sans slash initial.
-  return new URL('./push/onesignal/OneSignalSDKWorker.js', location.href).pathname.replace(/^\/+/, '');
-}
-function oneSignalWorkerAbsoluteUrl(){
-  return new URL(`/${oneSignalWorkerPath()}`, location.origin).href;
-}
-
-async function initOneSignal(){
-  if (!pushIsConfigured()) return null;
-  if (oneSignalInitialized && window.__SENTINELLE_ONESIGNAL_INSTANCE__) return window.__SENTINELLE_ONESIGNAL_INSTANCE__;
-  if (oneSignalInitPromise) return oneSignalInitPromise;
-
-  oneSignalInitPromise = (async () => {
-    const ready = window.__SENTINELLE_ONESIGNAL_READY__;
-    if (!ready || typeof ready.then !== 'function') {
-      throw new Error('Initialisation OneSignal absente. Vérifie index.html et push-init.js.');
-    }
-    const OneSignal = await Promise.race([
-      ready,
-      new Promise((_, reject) => window.setTimeout(() => reject(new Error('Initialisation OneSignal trop longue.')), 30000))
-    ]);
-    if (!OneSignal?.Notifications || !OneSignal?.User?.PushSubscription) {
-      throw new Error('SDK OneSignal incomplet après initialisation.');
-    }
-    oneSignalInitialized = true;
-    window.__SENTINELLE_ONESIGNAL_INSTANCE__ = OneSignal;
-    return OneSignal;
-  })().catch(error => {
-    oneSignalInitPromise = null;
-    oneSignalInitialized = false;
-    throw error;
-  });
-
-  return oneSignalInitPromise;
-}
-
-function oneSignalSubscriptionState(OneSignal){
-  return {
-    id:String(OneSignal?.User?.PushSubscription?.id || '').trim(),
-    token:String(OneSignal?.User?.PushSubscription?.token || '').trim(),
-    optedIn:Boolean(OneSignal?.User?.PushSubscription?.optedIn)
-  };
-}
-
-async function nativePushState(){
-  const scope = oneSignalScopePath();
-  const registration = await navigator.serviceWorker.getRegistration(scope).catch(() => null);
-  const subscription = registration?.pushManager ? await registration.pushManager.getSubscription().catch(() => null) : null;
-  return {
-    scope,
-    worker:registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '',
-    workerState:registration?.active?.state || registration?.waiting?.state || registration?.installing?.state || 'absent',
-    nativeSubscribed:Boolean(subscription),
-    endpoint:subscription?.endpoint || ''
-  };
-}
-
-function waitForActiveOneSignalSubscription(OneSignal, timeoutMs=60000){
-  const immediate = oneSignalSubscriptionState(OneSignal);
-  if (immediate.id && immediate.token && immediate.optedIn) return Promise.resolve(immediate);
-
-  return new Promise((resolve, reject) => {
-    let done = false;
-    let pollTimer = null;
-    let timeoutTimer = null;
-
-    const cleanup = () => {
-      if (pollTimer) window.clearInterval(pollTimer);
-      if (timeoutTimer) window.clearTimeout(timeoutTimer);
-      try { OneSignal.User.PushSubscription.removeEventListener('change', onChange); } catch(error) {}
-    };
-    const finish = state => {
-      if (done) return;
-      done = true;
-      cleanup();
-      resolve(state);
-    };
-    const check = candidate => {
-      const state = candidate?.current ? {
-        id:String(candidate.current.id || '').trim(),
-        token:String(candidate.current.token || '').trim(),
-        optedIn:Boolean(candidate.current.optedIn)
-      } : oneSignalSubscriptionState(OneSignal);
-      if (state.id && state.token && state.optedIn) finish(state);
-    };
-    const onChange = event => check(event);
-
-    try { OneSignal.User.PushSubscription.addEventListener('change', onChange); } catch(error) {}
-    pollTimer = window.setInterval(() => check(), 500);
-    timeoutTimer = window.setTimeout(async () => {
-      if (done) return;
-      done = true;
-      cleanup();
-      const state = oneSignalSubscriptionState(OneSignal);
-      const native = await nativePushState();
-      const detail = [
-        `permission=${OneSignal.Notifications.permission ? 'accordée' : 'non accordée'}`,
-        `id=${state.id ? 'oui' : 'non'}`,
-        `token=${state.token ? 'oui' : 'non'}`,
-        `optedIn=${state.optedIn ? 'oui' : 'non'}`,
-        `worker=${native.worker || 'absent'}`,
-        `état=${native.workerState}`,
-        `abonnementNatif=${native.nativeSubscribed ? 'oui' : 'non'}`
-      ].join(', ');
-      reject(new Error(`Abonnement OneSignal non créé (${detail}).`));
-    }, timeoutMs);
-  });
-}
-
-async function persistActiveOneSignalSubscription(OneSignal, state=null){
-  if (!currentUser || !currentProfile) return null;
-  const active = state || oneSignalSubscriptionState(OneSignal);
-  if (!active.id || !active.token || !active.optedIn) return null;
-
-  await OneSignal.login(currentUser.uid);
-  await OneSignal.User.addTags({
-    uid:currentUser.uid,
-    role:String(currentProfile.role || ''),
-    statut:String(currentProfile.statut || ''),
-    siteActuel:String(currentProfile.siteActuel || ''),
-    siteActuelNom:String(currentProfile.siteActuelNom || '')
-  });
-
-  await setDoc(docRef('pushTokens', `${currentUser.uid}_${active.id}`), {
-    provider:'onesignal',
-    subscriptionId:active.id,
-    token:active.token,
-    userId:currentUser.uid,
-    userNom:`${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
-    role:String(currentProfile.role || ''),
-    statut:String(currentProfile.statut || ''),
-    siteActuel:currentProfile.siteActuel || null,
-    siteActuelNom:currentProfile.siteActuelNom || null,
-    enabled:true,
-    preferences:spLoadPushPreferences(),
-    userAgent:navigator.userAgent,
-    platform:navigator.platform || '',
-    createdAt:serverTimestamp(),
-    updatedAt:serverTimestamp()
-  }, { merge:true });
-  return active;
-}
-
-async function syncOneSignalIdentity(){
-  if (!currentUser || !currentProfile || !pushIsConfigured()) return null;
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return null;
-  const OneSignal = await initOneSignal();
-  if (!OneSignal) return null;
-  const state = oneSignalSubscriptionState(OneSignal);
-  if (!state.id || !state.token || !state.optedIn) return OneSignal;
-  await persistActiveOneSignalSubscription(OneSignal, state).catch(error => console.warn('Synchronisation pushTokens impossible', error));
-  return OneSignal;
-}
-
-async function prepareOneSignalActivationButton(){
-  const button = document.querySelector('#push-activate-main');
-  if (!button || !pushIsConfigured()) return;
-  button.disabled = true;
-  button.textContent = 'Préparation OneSignal…';
-  try {
-    const OneSignal = await initOneSignal();
-    const supported = await OneSignal.Notifications.isPushSupported();
-    if (!supported) throw new Error('Push web non supporté sur cet appareil.');
-    const native = await nativePushState();
-    button.dataset.onesignalReady = 'true';
-    button.dataset.onesignalWorker = native.worker || '';
-    button.disabled = false;
-    button.textContent = 'Demander l’autorisation sur cet appareil';
-  } catch(error) {
-    button.disabled = false;
-    button.dataset.onesignalReady = 'false';
-    button.textContent = 'Réessayer la préparation OneSignal';
-    console.error('Préparation OneSignal impossible', error);
-  }
-}
-
-async function registerPushNotifications(){
-  const button = document.querySelector('#push-activate-main');
-  const originalLabel = 'Demander l’autorisation sur cet appareil';
-  try {
-    if (!pushIsConfigured()) {
-      return showModal('Notifications à configurer', `<div class="setup-box">OneSignal n’est pas configuré dans firebase-config.js.</div>`);
-    }
-    if (!('serviceWorker' in navigator)) return toast('Service worker indisponible : notifications impossibles.', 'warning');
-    if (typeof Notification === 'undefined') return toast('API Notifications indisponible sur cet appareil.', 'warning');
-    if (isIosLike() && !isStandalonePwa()) {
-      return showModal('Installation requise sur iPhone', `<div class="setup-box">Sur iPhone, ouvre Sentinelle Pro depuis son icône installée sur l’écran d’accueil.</div>`);
-    }
-
-    const OneSignal = await initOneSignal();
-    if (!OneSignal?.Notifications) throw new Error('SDK OneSignal indisponible.');
-    try { OneSignal.Debug.setLogLevel('trace'); } catch(error) {}
-
-    if (button) {
-      button.disabled = true;
-      button.textContent = 'Demande système en cours…';
-    }
-
-    // L’écouteur est posé avant la demande afin de ne perdre ni le token ni l’ID sur iOS.
-    const subscriptionPromise = waitForActiveOneSignalSubscription(OneSignal, 60000);
-
-    if (!OneSignal.Notifications.permission) {
-      await OneSignal.Notifications.requestPermission();
-    }
-    if (!OneSignal.Notifications.permission) {
-      if (Notification.permission === 'denied') {
-        return showModal('Notifications bloquées', `<div class="setup-box">L’autorisation a été refusée. Réactive-la dans Réglages &gt; Notifications &gt; Sentinelle Pro.</div>`);
-      }
-      throw new Error('La permission système n’a pas été accordée.');
-    }
-
-    if (button) button.textContent = 'Création de l’abonnement…';
-    await OneSignal.User.PushSubscription.optIn();
-    const activeSubscription = await subscriptionPromise;
-
-    if (button) button.textContent = 'Association au compte agent…';
-    await persistActiveOneSignalSubscription(OneSignal, activeSubscription);
-    await addAudit('onesignal_push_enabled', { subscriptionId:activeSubscription.id });
-    toast('Notifications écran verrouillé activées sur cet appareil.', 'success');
-    setTimeout(() => renderPushSetup(), 500);
-  } catch(error) {
-    console.error(error);
-    const native = await nativePushState().catch(() => ({ scope:oneSignalScopePath(), worker:'', workerState:'inconnu', nativeSubscribed:false, endpoint:'' }));
-    showModal('Activation impossible', `<div class="setup-box">${safe(userFriendlyError(error, 'Activation notifications impossible.'))}</div><div class="setup-box" style="margin-top:12px"><strong>Diagnostic Worker</strong><br>Scope : ${safe(native.scope)}<br>Worker : ${safe(native.worker || 'absent')}<br>État : ${safe(native.workerState)}<br>Abonnement Push natif : ${native.nativeSubscribed ? 'oui' : 'non'}</div><p class="muted">Le Worker OneSignal attendu est <strong>${safe(oneSignalWorkerAbsoluteUrl())}</strong>.</p>`);
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = originalLabel;
-    }
-  }
-}
-
-function getPushSecret(){
-  let secret = localStorage.getItem('sentinelle_push_secret') || '';
-  if (!secret) {
-    secret = window.prompt('Colle la clé secrète Cloudflare Worker pour envoyer les notifications push. Elle sera stockée uniquement sur cet appareil admin.') || '';
-    if (secret.trim()) localStorage.setItem('sentinelle_push_secret', secret.trim());
-  }
-  return secret.trim();
-}
-
-async function diagnosePushSetup(){
-  const secret = localStorage.getItem('sentinelle_push_secret') || '';
-  let workerStatus = 'Non testé';
-  if (pushWorkerIsConfigured()) {
-    try {
-      const res = await fetch(pushConfig.pushWorkerUrl, {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret': secret || 'diagnostic' },
-        body:JSON.stringify({ title:'Diagnostic Sentinelle Pro', message:'Test de configuration push', priority:'Information', target:'all', url:new URL('./index.html', location.href).href })
-      });
-      const txt = await res.text();
-      workerStatus = `${res.status} · ${txt.slice(0,180)}`;
-    } catch(error) { workerStatus = `Erreur réseau : ${error.message || error}`; }
-  }
-  const html = `<div class="setup-box">Diagnostic notifications écran verrouillé</div>
-  <ul class="setup-list">
-    <li>OneSignal App ID : <strong>${pushIsConfigured() ? 'OK' : 'manquant'}</strong></li>
-    <li>Worker Cloudflare : <strong>${pushWorkerIsConfigured() ? 'OK' : 'manquant'}</strong></li>
-    <li>Clé secrète sur ce PC : <strong>${secret ? 'OK' : 'manquante'}</strong></li>
-    <li>URL Worker : <code>${safe(pushConfig?.pushWorkerUrl || '—')}</code></li>
-    <li>Résultat Worker : <code>${safe(workerStatus)}</code></li>
-  </ul>
-  <p class="muted">Si le Worker répond 401, la clé secrète locale ne correspond pas à SENTINELLE_PUSH_SECRET dans Cloudflare. Si OneSignal répond avec recipients:0, aucun agent n’a encore activé les notifications sur son téléphone.</p>`;
-  showModal('Diagnostic push', html);
-}
-
-function normalizedPushStatus(value){
-  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-}
-
-async function resolveFlashSubscriptionIds(target){
-  const targetValue = String(target || 'all');
-  const snapshot = await getDocs(collectionRef('pushTokens'));
-  const tokens = snapshot.docs.map(item => ({ id:item.id, ...item.data() }))
-    .filter(item => item.enabled !== false && String(item.subscriptionId || '').trim())
-    .filter(item => spPushPreferenceEnabled(item, 'flash'));
-
-  let selected = tokens.filter(item => String(item.role || '').toLowerCase() === 'agent');
-
-  if (targetValue.startsWith('agent:')) {
-    const userId = targetValue.slice('agent:'.length);
-    selected = tokens.filter(item => item.userId === userId);
-  } else if (targetValue.startsWith('site:')) {
-    const siteId = targetValue.slice('site:'.length);
-    selected = selected.filter(item => item.siteActuel === siteId);
-  } else if (targetValue === 'working') {
-    let activeUserIds = new Set();
-    try {
-      const usersSnapshot = await getDocs(collectionRef('users'));
-      activeUserIds = new Set(usersSnapshot.docs
-        .map(item => ({ id:item.id, ...item.data() }))
-        .filter(item => ['en_poste','enposte','active'].includes(normalizedPushStatus(item.statut)))
-        .map(item => item.uid || item.id));
-    } catch(error) {
-      console.warn('Lecture des agents en poste impossible', error);
-    }
-    selected = selected.filter(item => activeUserIds.has(item.userId) || ['en_poste','enposte','active'].includes(normalizedPushStatus(item.statut)));
-  }
-
-  return [...new Set(selected.map(item => String(item.subscriptionId || '').trim()).filter(Boolean))];
+    <section class="card"><div class="card-title"><div><h2>Notifications à recevoir</h2><p>Choisis les événements envoyés sur cet appareil.</p></div></div><div class="list">
+      ${rolePortal(currentProfile?.role)==='qg'?`<label class="item"><div class="item-main"><div class="item-title">Prises et fins de poste</div><div class="item-meta">Notification QG lorsqu’un agent démarre ou termine son poste.</div></div><input type="checkbox" data-push-pref="operations" ${prefs.operations?'checked':''}></label>`:''}
+      <label class="item"><div class="item-main"><div class="item-title">Planning et missions</div><div class="item-meta">Nouvelle mission, annulation et modification de planning.</div></div><input type="checkbox" data-push-pref="planning" ${prefs.planning?'checked':''}></label>
+      <label class="item"><div class="item-main"><div class="item-title">Messages Flash QG</div><div class="item-meta">Informations, urgences et messages prioritaires.</div></div><input type="checkbox" data-push-pref="flash" ${prefs.flash?'checked':''}></label>
+      <label class="item"><div class="item-main"><div class="item-title">Consignes opérationnelles</div><div class="item-meta">Modification des consignes d’un site ou d’une mission.</div></div><input type="checkbox" data-push-pref="instructions" ${prefs.instructions?'checked':''}></label>
+      <label class="item"><div class="item-main"><div class="item-title">Nouveaux documents</div><div class="item-meta">Rapports de mission et documents disponibles.</div></div><input type="checkbox" data-push-pref="documents" ${prefs.documents?'checked':''}></label>
+    </div><button class="btn primary full" id="push-save-preferences" type="button">Enregistrer mes préférences</button></section>`;
+  render(page('Notifications Web Push','Supabase Edge Functions · sans OneSignal',body));
+  spGetVapidPublicKey().catch(error=>console.warn('Préchargement VAPID impossible',error));
+  navigator.serviceWorker?.ready?.catch?.(()=>{});
+  document.querySelector('#push-activate-main')?.addEventListener('click',registerPushNotifications);
+  document.querySelector('#push-save-preferences')?.addEventListener('click',async()=>{const preferences={...SP_PUSH_PREF_DEFAULTS};document.querySelectorAll('[data-push-pref]').forEach(input=>{preferences[input.dataset.pushPref]=Boolean(input.checked)});await spSavePushPreferences(preferences);toast('Préférences de notifications enregistrées.','success');});
+  document.querySelector('#push-refresh-main')?.addEventListener('click',()=>renderPushSetup());
+  document.querySelector('#push-test-local')?.addEventListener('click',async()=>{try{if(typeof Notification==='undefined')return toast('Notifications indisponibles sur ce navigateur.','warning');if(Notification.permission!=='granted')return toast('Autorisation non accordée sur cet appareil.','warning');const reg=await ensureSentinelleServiceWorker({timeoutMs:8000});await reg.showNotification('Sentinelle Pro',{body:'Notification locale de test. Le Service Worker est opérationnel.',tag:'sentinelle-local-test',icon:'./assets/icons/icon-192.png',badge:'./assets/icons/icon-192.png'});toast('Notification locale envoyée.','success')}catch(error){toast(userFriendlyError(error,'Test notification impossible.'),'error')}});
 }
 
 async function sendPushForFlash(flash){
-  if (!pushIsConfigured() || !pushWorkerIsConfigured()) {
-    return { ok:false, skipped:true, reason:'OneSignal ou Worker non configuré' };
-  }
-  const secret = getPushSecret();
-  if (!secret) return { ok:false, skipped:true, reason:'Clé d’envoi manquante' };
-
-  const subscriptionIds = await resolveFlashSubscriptionIds(flash.target);
-  if (!subscriptionIds.length) {
-    throw new Error('Aucun appareil agent abonné ne correspond à cette cible. Active les notifications sur le téléphone agent puis vérifie la rubrique Push.');
-  }
-
-  const response = await fetch(pushConfig.pushWorkerUrl, {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json', 'x-sentinelle-push-secret': secret },
-    body: JSON.stringify({
-      title: flash.title,
-      message: flash.message,
-      priority: flash.priority,
-      target: flash.target,
-      subscriptionIds,
-      flashId: flash.id,
-      sentBy: currentUser?.uid || '',
-      url: new URL('./index.html?route=flash', location.href).href
-    })
-  });
-  const result = await response.json().catch(()=>({}));
-  if (!response.ok) {
-    const details = Array.isArray(result.errors) ? result.errors.join(' · ') : (result.error || result.message || 'Worker notification refusé');
-    throw new Error(details);
-  }
-  if (!result.id) {
-    throw new Error(result.error || 'OneSignal n’a créé aucun message : abonnement invalide ou désabonné.');
-  }
-  return { ...result, requestedRecipients:subscriptionIds.length };
-}
-
-async function configurePushSecret(){
-  const current = localStorage.getItem('sentinelle_push_secret') || '';
-  const next = window.prompt('Clé secrète Cloudflare Worker pour les notifications push', current) || '';
-  if (next.trim()) {
-    localStorage.setItem('sentinelle_push_secret', next.trim());
-    toast('Clé push enregistrée sur cet appareil admin.', 'success');
-  }
+  return spNativePushRequest({ action:'send', title:flash.title, message:flash.message, priority:flash.priority, target:flash.target, notificationType:'flash', notificationId:`flash_${flash.id}`, route:'flash', url:new URL('./index.html?route=flash',location.href).href, data:{flashId:flash.id} });
 }
 
 // -------------------- FLASH / SOS / UTILS --------------------
@@ -5231,10 +5054,10 @@ function userFriendlyError(error, fallback){
   const msg = String(error?.message || '');
   const code = String(error?.code || '');
   if (msg && !msg.includes('FirebaseError')) return msg;
-  if (code.includes('permission-denied')) return 'Permission refusée par Firebase. Vérifie que ton profil Firestore a bien role: "admin" et que les règles V4.1 sont publiées.';
+  if (code.includes('permission-denied')) return 'Permission refusée par Supabase. Vérifie profiles.role et les RLS V5.8.7.';
   if (code.includes('auth/weak-password')) return 'Mot de passe trop faible : minimum 6 caractères.';
   if (code.includes('auth/invalid-email')) return 'Email invalide.';
-  if (code.includes('auth/email-already-in-use')) return 'Cet email existe déjà dans Authentication. Colle son UID dans le formulaire puis enregistre le profil.';
+  if (code.includes('auth/email-already-in-use')) return 'Cet email existe déjà dans Supabase Auth. Relie son auth.users.id au profil avant de poursuivre.';
   return fallback;
 }
 
@@ -5483,10 +5306,42 @@ function pdfDrawTable(doc, headers, rows, widths, y, rowMapper){
 }
 
 function reportHasPhoto(report){
+  return Boolean(report?.photoUrl || report?.photoStoragePath || report?.photoAvailable);
+}
+function reportHasEmbeddablePdfPhoto(report){
   return Boolean(report?.photoUrl && String(report.photoUrl).startsWith('data:image/'));
 }
 function reportPhotoLabel(report){
   return reportHasPhoto(report) ? 'Photo jointe' : '—';
+}
+async function imageUrlToDataUrl(url){
+  const value=String(url||'');
+  if(!value || value.startsWith('data:image/')) return value;
+  const response=await fetch(value,{cache:'no-store'});
+  if(!response.ok) throw new Error(`Photo indisponible (${response.status})`);
+  const blob=await response.blob();
+  return await new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>resolve(String(reader.result||''));
+    reader.onerror=()=>reject(new Error('Conversion de la photo impossible.'));
+    reader.readAsDataURL(blob);
+  });
+}
+async function prepareGeneratedDocumentPhotos(d){
+  const p=d?.payload||{};
+  const rows=Array.isArray(p.rows)?p.rows:[];
+  if(!rows.length) return d;
+  const preparedRows=await Promise.all(rows.map(async row=>{
+    if(!row?.photoUrl || String(row.photoUrl).startsWith('data:image/')) return row;
+    try { return {...row,photoUrl:await imageUrlToDataUrl(row.photoUrl)}; }
+    catch(error){ console.warn('Photo PDF non convertie',error); return row; }
+  }));
+  const byId=new Map(preparedRows.map(row=>[String(row.id||''),row]));
+  const timelineRows=Array.isArray(p.timelineRows)?p.timelineRows.map(row=>{
+    const hit=byId.get(String(row?.id||''));
+    return hit ? {...row,photoUrl:hit.photoUrl,photoAvailable:hit.photoAvailable,photoStorageBucket:hit.photoStorageBucket,photoStoragePath:hit.photoStoragePath} : row;
+  }):p.timelineRows;
+  return {...d,payload:{...p,rows:preparedRows,...(timelineRows?{timelineRows}:{})}};
 }
 function pdfImageFormat(dataUrl){
   return String(dataUrl||'').startsWith('data:image/png') ? 'PNG' : 'JPEG';
@@ -5506,7 +5361,7 @@ function pdfPhotoMetaLines(report, index){
 }
 function pdfDrawPhotoAnnexes(doc, reports){
   const C = AZZERA_DOC_BRAND;
-  const photos = (reports||[]).filter(reportHasPhoto);
+  const photos = (reports||[]).filter(reportHasEmbeddablePdfPhoto);
   if(!photos.length) return;
   photos.forEach((report,index)=>{
     doc.addPage();
