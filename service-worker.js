@@ -1,16 +1,19 @@
-const CACHE_NAME = 'sentinelle-pro-v5-9-0-web-push';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-0';
+const CACHE_NAME = 'sentinelle-pro-v5-9-1-web-push';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-1';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=590',
-  './app.js?v=590',
+  './style.css?v=591',
+  './app.js?v=591',
   './sentinelle-config.js',
-  './supabase-compat.js?v=590',
+  './supabase-compat.js?v=591',
   './supabase-config.js',
   './supabase-bridge.js',
   './manifest.json',
   './offline.html',
+  './client.html',
+  './client-style.css?v=591',
+  './client-app.js?v=591',
   './assets/logo.png',
   './assets/favicon.png',
   './assets/icons/icon-192.png'
@@ -124,9 +127,11 @@ self.addEventListener('fetch', event => {
   }
   if (url.origin !== self.location.origin) return;
   if (request.mode === 'navigate') {
-    event.respondWith(networkFirst(request, CACHE_NAME, './index.html').then(async response => {
+    const clientPortal = /\/client\.html$/i.test(url.pathname);
+    const fallbackPage = clientPortal ? './client.html' : './index.html';
+    event.respondWith(networkFirst(request, CACHE_NAME, fallbackPage).then(async response => {
       if (response && response.type !== 'error') return response;
-      return (await caches.match('./index.html')) || (await caches.match('./offline.html'));
+      return (await caches.match(fallbackPage)) || (await caches.match('./offline.html'));
     }));
     return;
   }

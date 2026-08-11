@@ -5,7 +5,7 @@ import {
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient
-} from './supabase-compat.js?v=5886';
+} from './supabase-compat.js?v=591';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -327,7 +327,7 @@ function qgNav(){
   const items = [
     navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents')
   ];
-  if (isStrictAdmin()) items.push(navBtn('billing','€','Facturation'));
+  if (isStrictAdmin()) items.push(navBtn('clients','◇','Clients'), navBtn('billing','€','Facturation'));
   items.push(navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('history','⇩','Exports'));
   return items.join('');
 }
@@ -397,7 +397,7 @@ async function loadProfile(user){
     const requestedRoute = new URLSearchParams(location.search).get('route') || 'home';
     const portal = rolePortal(currentProfile.role);
     const allowedAgentRoutes = ['home','planning','badge','mci','round','docs','flash','pushsetup','intel'];
-    const allowedQGRoutes = ['home','missions','notifications','reports','documents','billing','intel','device','sites','agents','alerts','flash','pushsetup','history'];
+    const allowedQGRoutes = ['home','missions','notifications','reports','documents','clients','billing','intel','device','sites','agents','alerts','flash','pushsetup','history'];
     currentRoute = portal === 'agent' && allowedAgentRoutes.includes(requestedRoute) ? requestedRoute : portal === 'qg' && allowedQGRoutes.includes(requestedRoute) ? requestedRoute : 'home';
     navigate(currentRoute);
     if (navigator.onLine) {
@@ -472,7 +472,7 @@ function navigate(route){
   if (portal === 'agent') {
     ({ home:renderAgentHome, planning:renderAgentPlanning, badge:renderAgentBadge, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, pushsetup:renderPushSetup, intel:renderAgentIntel }[route] || renderAgentHome)();
   } else {
-    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
+    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, clients:renderQGClients, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
   }
 }
 
@@ -3442,6 +3442,114 @@ function renderQGDevice(){
   }));
 }
 
+
+async function renderQGClients(){
+  currentRoute='clients';
+  if(!isStrictAdmin()) return navigate('home');
+  const body=`<section class="grid cols-3" id="client-admin-metrics">
+    <div class="card stat blue"><div class="stat-label">Clients</div><div class="stat-value" id="client-count">—</div><div class="muted">Entités rattachées aux sites</div></div>
+    <div class="card stat green"><div class="stat-label">Accès portail</div><div class="stat-value" id="client-user-count">—</div><div class="muted">Comptes client actifs</div></div>
+    <div class="card stat orange"><div class="stat-label">PDF rattachés</div><div class="stat-value" id="client-doc-count">—</div><div class="muted">Documents visibles via RLS</div></div>
+  </section>
+  <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Clients & espace client</h2><p>Sites autorisés, destinataires et comptes de connexion</p></div><div class="btn-row"><button class="btn" id="client-copy-link">Copier le lien portail</button><button class="btn primary" id="client-add">+ Ajouter client</button></div></div>
+  <div class="setup-box">L’espace client est sécurisé par Supabase Auth et RLS. L’option « e-mail auto » prépare l’envoi futur des mains courantes mais l’envoi automatique global reste désactivé tant qu’il n’a pas été validé.</div>
+  <div id="client-admin-table" class="table-wrap"><div class="empty">Chargement…</div></div></section>`;
+  render(page('Clients','Portail client et distribution des mains courantes',body));
+  document.querySelector('#client-copy-link')?.addEventListener('click',async()=>{
+    const url=new URL('./client.html',location.href).href;
+    await navigator.clipboard?.writeText(url).catch(()=>{});toast('Lien espace client copié.','success');
+  });
+  document.querySelector('#client-add')?.addEventListener('click',()=>showClientAdminForm(null,[]));
+  await loadQGClientsAdmin();
+}
+
+async function loadQGClientsAdmin(){
+  const box=document.querySelector('#client-admin-table');if(!box)return;
+  const client=getSupabaseClient();
+  try{
+    const [clientsRes,sitesRes,linksRes,docsRes]=await Promise.all([
+      client.from('clients').select('id,name,report_email,billing_email,siret,address,active,portal_enabled,auto_email,created_at').order('name'),
+      client.from('sites').select('id,firebase_id,name,address,client_id,client_name,active').order('name'),
+      client.from('client_users').select('client_id,profile_id,profiles(id,email,first_name,last_name,active,auth_user_id)').order('created_at'),
+      client.from('generated_documents').select('id,client_id,status,delivery_status,created_at').eq('status','active')
+    ]);
+    for(const r of [clientsRes,sitesRes,linksRes,docsRes]) if(r.error) throw r.error;
+    const clients=clientsRes.data||[],sites=sitesRes.data||[],links=linksRes.data||[],docs=docsRes.data||[];
+    document.querySelector('#client-count').textContent=String(clients.length);
+    document.querySelector('#client-user-count').textContent=String(links.filter(l=>l.profiles?.active!==false).length);
+    document.querySelector('#client-doc-count').textContent=String(docs.filter(d=>d.client_id).length);
+    const siteCount=new Map(),docCount=new Map(),userMap=new Map();
+    sites.forEach(site=>{if(site.client_id)siteCount.set(site.client_id,(siteCount.get(site.client_id)||0)+1)});
+    docs.forEach(doc=>{if(doc.client_id)docCount.set(doc.client_id,(docCount.get(doc.client_id)||0)+1)});
+    links.forEach(link=>{if(!userMap.has(link.client_id))userMap.set(link.client_id,[]);userMap.get(link.client_id).push(link.profiles)});
+    box.innerHTML=clients.length?`<table class="table"><thead><tr><th>Client</th><th>Sites</th><th>PDF</th><th>Portail</th><th>E-mail rapports</th><th>Envoi auto</th><th>Actions</th></tr></thead><tbody>${clients.map(c=>{
+      const users=(userMap.get(c.id)||[]).filter(Boolean);
+      const portal=users.length?users.map(u=>safe(u.email||`${u.first_name||''} ${u.last_name||''}`.trim())).join('<br>'):'Aucun compte';
+      return `<tr><td><strong>${safe(c.name)}</strong><br><span class="muted">${safe(c.address||'')}</span></td><td>${siteCount.get(c.id)||0}</td><td>${docCount.get(c.id)||0}</td><td>${portal}<br><span class="pill ${c.portal_enabled===false?'red':'green'}">${c.portal_enabled===false?'désactivé':'autorisé'}</span></td><td>${safe(c.report_email||'—')}</td><td><span class="pill ${c.auto_email?'green':''}">${c.auto_email?'Oui':'Non'}</span></td><td><div class="table-actions"><button class="btn small" data-client-edit="${safe(c.id)}">Configurer</button><button class="btn small primary" data-client-access="${safe(c.id)}">Créer accès</button></div></td></tr>`;
+    }).join('')}</tbody></table>`:'<div class="empty">Aucun client. La migration V5.9.1 peut reconstituer les clients à partir des sites existants.</div>';
+    document.querySelectorAll('[data-client-edit]').forEach(btn=>btn.addEventListener('click',()=>showClientAdminForm(clients.find(c=>c.id===btn.dataset.clientEdit),sites)));
+    document.querySelectorAll('[data-client-access]').forEach(btn=>btn.addEventListener('click',()=>showClientAccessForm(clients.find(c=>c.id===btn.dataset.clientAccess))));
+  }catch(error){
+    console.error(error);box.innerHTML=`<div class="setup-box danger-copy">${safe(userFriendlyError(error,'Module clients indisponible. Exécute la migration SQL V5.9.1 avant d’utiliser cet écran.'))}</div>`;
+  }
+}
+
+function showClientAdminForm(c=null,sites=[]){
+  const isEdit=Boolean(c?.id);const clientId=c?.id||'';
+  const siteRows=(sites||[]).map(site=>{
+    const checked=site.client_id===clientId;
+    const other=site.client_id&&site.client_id!==clientId;
+    return `<label class="item compact" style="cursor:pointer"><input type="checkbox" name="siteIds" value="${safe(site.id)}" ${checked?'checked':''}><div class="item-main"><div class="item-title">${safe(site.name)}</div><div class="item-meta">${safe(site.address||'')}${other?' · actuellement rattaché à un autre client':''}</div></div></label>`;
+  }).join('');
+  showModal(isEdit?'Configurer client':'Créer client',`<form id="client-admin-form">
+    <div class="form-grid"><div class="field span-2"><label>Raison sociale / nom client</label><input class="input" name="name" value="${safe(c?.name||'')}" required></div><div class="field"><label>E-mail rapports</label><input class="input" type="email" name="reportEmail" value="${safe(c?.report_email||'')}"></div><div class="field"><label>E-mail facturation</label><input class="input" type="email" name="billingEmail" value="${safe(c?.billing_email||'')}"></div><div class="field"><label>SIRET</label><input class="input" name="siret" value="${safe(c?.siret||'')}"></div><div class="field"><label>Portail</label><select class="select" name="portalEnabled"><option value="true" ${c?.portal_enabled!==false?'selected':''}>Activé</option><option value="false" ${c?.portal_enabled===false?'selected':''}>Désactivé</option></select></div><div class="field span-2"><label>Adresse</label><input class="input" name="address" value="${safe(c?.address||'')}"></div><div class="field"><label>Envoi automatique futur</label><select class="select" name="autoEmail"><option value="false" ${!c?.auto_email?'selected':''}>Non</option><option value="true" ${c?.auto_email?'selected':''}>Oui</option></select></div><div class="field"><label>Statut</label><select class="select" name="active"><option value="true" ${c?.active!==false?'selected':''}>Actif</option><option value="false" ${c?.active===false?'selected':''}>Inactif</option></select></div></div>
+    ${isEdit?`<div class="divider"></div><h3>Sites accessibles</h3><div class="list" style="max-height:310px;overflow:auto">${siteRows||'<div class="empty">Aucun site disponible.</div>'}</div>`:'<div class="setup-box">Après création, ouvre « Configurer » pour rattacher les sites.</div>'}
+    <button class="btn primary full" type="submit">${isEdit?'Enregistrer':'Créer le client'}</button></form>`,'wide');
+  document.querySelector('#client-admin-form')?.addEventListener('submit',async e=>{
+    e.preventDefault();const button=e.currentTarget.querySelector('button[type="submit"]');button.disabled=true;const fd=new FormData(e.currentTarget);const sb=getSupabaseClient();
+    try{
+      const record={organization_id:stagingConfig.organizationId,name:String(fd.get('name')||'').trim(),report_email:String(fd.get('reportEmail')||'').trim()||null,billing_email:String(fd.get('billingEmail')||'').trim()||null,siret:String(fd.get('siret')||'').trim()||null,address:String(fd.get('address')||'').trim()||null,portal_enabled:String(fd.get('portalEnabled'))==='true',auto_email:String(fd.get('autoEmail'))==='true',active:String(fd.get('active'))==='true',updated_at:new Date().toISOString()};
+      let id=clientId;
+      if(isEdit){const {error}=await sb.from('clients').update(record).eq('id',clientId);if(error)throw error;}
+      else{record.firebase_id=`client:qg:${crypto.randomUUID()}`;const {data,error}=await sb.from('clients').insert(record).select('id').single();if(error)throw error;id=data.id;}
+      if(isEdit){
+        const selected=new Set(fd.getAll('siteIds').map(String));
+        const owned=(sites||[]).filter(s=>s.client_id===clientId);
+        for(const site of owned.filter(s=>!selected.has(String(s.id)))){
+          const {error}=await sb.from('sites').update({client_id:null,updated_at:new Date().toISOString()}).eq('id',site.id);if(error)throw error;
+          await sb.from('client_sites').delete().eq('client_id',clientId).eq('site_id',site.id);
+        }
+        for(const siteId of selected){
+          const {error:cleanupError}=await sb.from('client_sites').delete().eq('site_id',siteId).neq('client_id',clientId);if(cleanupError)throw cleanupError;
+          const {error}=await sb.from('sites').update({client_id:clientId,updated_at:new Date().toISOString()}).eq('id',siteId);if(error)throw error;
+          const {error:linkError}=await sb.from('client_sites').upsert({organization_id:stagingConfig.organizationId,client_id:clientId,site_id:siteId},{onConflict:'client_id,site_id'});if(linkError)throw linkError;
+        }
+        for(const site of (sites||[])){
+          const siteId=String(site.id);const firebaseSiteId=String(site.firebase_id||'');if(!firebaseSiteId)continue;
+          if(selected.has(siteId)){
+            const {error}=await sb.from('generated_documents').update({client_id:clientId,updated_at:new Date().toISOString()}).eq('firebase_site_id',firebaseSiteId);if(error)throw error;
+          }else if(site.client_id===clientId){
+            const {error}=await sb.from('generated_documents').update({client_id:null,updated_at:new Date().toISOString()}).eq('firebase_site_id',firebaseSiteId).eq('client_id',clientId);if(error)throw error;
+          }
+        }
+      }
+      await addAudit(isEdit?'client_updated':'client_created',{clientId:id,name:record.name});closeModal();toast(isEdit?'Client enregistré':'Client créé','success');await loadQGClientsAdmin();
+    }catch(error){console.error(error);toast(userFriendlyError(error,'Enregistrement client impossible.'),'error');button.disabled=false;}
+  });
+}
+
+function showClientAccessForm(c){
+  if(!c)return;
+  showModal('Créer un accès espace client',`<form id="client-access-form"><div class="setup-box">Le compte sera limité au client <strong>${safe(c.name)}</strong> par Supabase Auth et les RLS.</div><div class="form-grid"><div class="field"><label>Prénom</label><input class="input" name="firstName" required></div><div class="field"><label>Nom</label><input class="input" name="lastName" required></div><div class="field span-2"><label>E-mail de connexion</label><input class="input" type="email" name="email" value="${safe(c.report_email||'')}" required></div><div class="field"><label>Mot de passe initial</label><input class="input" type="password" name="password" minlength="8" required></div><div class="field"><label>Confirmer</label><input class="input" type="password" name="confirm" minlength="8" required></div></div><button class="btn primary full" type="submit">Créer le compte client</button></form>`);
+  document.querySelector('#client-access-form')?.addEventListener('submit',async e=>{
+    e.preventDefault();const fd=new FormData(e.currentTarget);const password=String(fd.get('password')||'');if(password.length<8)return toast('Mot de passe : 8 caractères minimum.','warning');if(password!==String(fd.get('confirm')||''))return toast('Les mots de passe ne correspondent pas.','warning');const button=e.currentTarget.querySelector('button');button.disabled=true;
+    try{
+      const sb=getSupabaseClient();const {data,error}=await sb.functions.invoke('admin-manage-user',{body:{action:'create_client',clientId:c.id,email:String(fd.get('email')||'').trim(),password,firstName:String(fd.get('firstName')||'').trim(),lastName:String(fd.get('lastName')||'').trim()}});
+      if(error)throw error;if(!data?.ok)throw new Error(data?.error||'Création du compte client non confirmée.');await addAudit('client_portal_account_created',{clientId:c.id,email:data.email});closeModal();toast('Accès client créé.','success');await loadQGClientsAdmin();
+    }catch(error){console.error(error);toast(userFriendlyError(error,'Création du compte client impossible.'),'error');button.disabled=false;}
+  });
+}
+
 function renderQGAgents(){
   currentRoute = 'agents';
   const body = `<section class="card"><div class="card-title"><div><h2>Gestion Agents</h2><p>Profils, rôles et statut</p></div><button class="btn primary small" id="add-agent-profile">Ajouter profil</button></div><div id="agents-table" class="table-wrap"><div class="empty">Chargement...</div></div></section>`;
@@ -4599,7 +4707,7 @@ async function ensureSentinelleServiceWorker({cleanupLegacy=false, timeoutMs=800
   const existingUrl = registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '';
   if (!registration || !/service-worker\.js/i.test(existingUrl)) {
     try {
-      registration = await navigator.serviceWorker.register('./service-worker.js?v=5886', { scope:'./', updateViaCache:'none' });
+      registration = await navigator.serviceWorker.register('./service-worker.js?v=591', { scope:'./', updateViaCache:'none' });
       window.__SENTINELLE_SW_LAST_ERROR__ = '';
     } catch(error) {
       window.__SENTINELLE_SW_LAST_ERROR__ = error?.message || String(error || 'Échec enregistrement Service Worker');

@@ -3,25 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#050A13">
+  <meta name="theme-color" content="#06101c">
+  <meta name="robots" content="noindex,nofollow">
   <title>Sentinelle Pro — Espace client</title>
   <link rel="icon" href="./assets/favicon.png">
-  <link rel="stylesheet" href="./client-style.css?v=581">
+  <link rel="stylesheet" href="./client-style.css?v=591">
 </head>
 <body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
   <main id="client-app" class="client-shell">
-    <section class="client-login-card">
-      <img src="./assets/logo.png" alt="Sentinelle Pro" class="client-logo">
-      <h1>Espace client</h1>
-      <p>Consultez les mains courantes et rapports PDF de vos sites.</p>
-      <form id="client-login-form">
-        <label>Adresse e-mail<input type="email" name="email" autocomplete="username" required></label>
-        <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
-        <button type="submit">Se connecter</button>
-      </form>
-      <div id="client-message" role="status" aria-live="polite"></div>
+    <section class="auth-wrap">
+      <div class="auth-card">
+        <div class="brand-lockup"><img src="./assets/logo.png" alt="Sentinelle Pro" class="client-logo"><span>PORTAIL CLIENT</span></div>
+        <h1>Vos rapports de sécurité, au même endroit.</h1>
+        <p class="lead">Consultez et téléchargez les mains courantes et rapports PDF autorisés pour vos sites.</p>
+        <form id="client-login-form" class="auth-form">
+          <label>Adresse e-mail<input type="email" name="email" autocomplete="username" placeholder="vous@entreprise.fr" required></label>
+          <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
+          <button type="submit">Se connecter</button>
+        </form>
+        <button class="link-button" type="button" id="client-forgot-password">Mot de passe oublié ?</button>
+        <div id="client-message" role="status" aria-live="polite"></div>
+        <div class="security-note"><span>●</span> Accès protégé par Supabase Auth et restrictions par client.</div>
+      </div>
     </section>
   </main>
-  <script type="module" src="./client-app.js?v=581"></script>
+  <script type="module" src="./client-app.js?v=591"></script>
 </body>
 </html>

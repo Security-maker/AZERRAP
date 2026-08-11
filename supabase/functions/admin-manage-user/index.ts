@@ -60,6 +60,42 @@ Deno.serve(async req=>{
       return json({ok:true,authUserId:created.user.id,externalUid,email,role})
     }
 
+    if(action==='create_client'){
+      if(caller.role!=='admin') return json({ok:false,error:'Création d’un accès client réservée à un administrateur'},403)
+      const clientId=String(body.clientId||'').trim()
+      const email=String(body.email||'').trim().toLowerCase()
+      const password=String(body.password||'')
+      const firstName=String(body.firstName||'').trim()
+      const lastName=String(body.lastName||'').trim()
+      if(!clientId) return json({ok:false,error:'clientId requis'},400)
+      if(!email||!email.includes('@')) return json({ok:false,error:'E-mail invalide'},400)
+      if(password.length<8) return json({ok:false,error:'Mot de passe initial : 8 caractères minimum'},400)
+      const {data:clientRow,error:clientError}=await admin.from('clients')
+        .select('id,organization_id,name,active,portal_enabled').eq('id',clientId).maybeSingle()
+      if(clientError) throw clientError
+      if(!clientRow||clientRow.organization_id!==caller.organization_id) return json({ok:false,error:'Client hors organisation ou introuvable'},404)
+      if(clientRow.active===false||clientRow.portal_enabled===false) return json({ok:false,error:'Le portail est désactivé pour ce client'},400)
+      const {data:created,error:createError}=await admin.auth.admin.createUser({
+        email,password,email_confirm:true,user_metadata:{first_name:firstName,last_name:lastName,sentinelle_role:'client',client_id:clientId}
+      })
+      if(createError||!created?.user) throw createError||new Error('Compte Auth client non créé')
+      const externalUid=crypto.randomUUID()
+      const {data:profile,error:profileError}=await admin.from('profiles').insert({
+        organization_id:caller.organization_id,auth_user_id:created.user.id,external_uid:externalUid,role:'client',
+        first_name:firstName||null,last_name:lastName||null,email,active:true,
+        firebase_payload:{uid:externalUid,email,prenom:firstName,nom:lastName,role:'client',clientId}
+      }).select('id').single()
+      if(profileError){ await admin.auth.admin.deleteUser(created.user.id).catch(()=>{}); throw profileError }
+      const {error:linkError}=await admin.from('client_users').insert({organization_id:caller.organization_id,client_id:clientId,profile_id:profile.id})
+      if(linkError){
+        try{ await admin.from('profiles').delete().eq('id',profile.id) }catch{}
+        await admin.auth.admin.deleteUser(created.user.id).catch(()=>{})
+        throw linkError
+      }
+      try{ await admin.from('audit_logs').insert({organization_id:caller.organization_id,actor_external_uid:caller.external_uid||null,action:'client_portal_account_created',details:{clientId,email,profileId:profile.id}}) }catch{}
+      return json({ok:true,authUserId:created.user.id,externalUid,email,role:'client',clientId})
+    }
+
     if(action==='delete'){
       if(caller.role!=='admin') return json({ok:false,error:'Suppression réservée à un administrateur'},403)
       const authUserId=String(body.authUserId||'').trim()
