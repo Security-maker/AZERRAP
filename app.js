@@ -1,5 +1,5 @@
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=510';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
@@ -2946,7 +2946,7 @@ async function clearQGNotifications(){
 }
 function listenQGNotifications(selector, max=10){
   const box = document.querySelector(selector); if (!box) return;
-  const state = { missions:[], shifts:[], users:[], alerts:[], reports:[], flash:[], clearedAt:qgNotificationClearedAt };
+  const state = { missions:[], shifts:[], users:[], alerts:[], reports:[], flash:[], documents:[], clearedAt:qgNotificationClearedAt };
   const redraw = () => {
     const rows = buildQGNotifications(state).slice(0,max);
     qgNotificationsCache = rows;
@@ -2959,6 +2959,36 @@ function listenQGNotifications(selector, max=10){
   bind('alerts', query(collectionRef('alerts'), orderBy('createdAt','desc'), limit(100)));
   bind('reports', query(collectionRef('reports'), orderBy('createdAt','desc'), limit(100)));
   bind('flash', query(collectionRef('flashMessages'), orderBy('sentAt','desc'), limit(30)));
+
+  // Les relances e-mail sont exécutées côté Supabase : on lit donc leur statut
+  // directement depuis Supabase pour que le QG voie aussi les échecs survenus
+  // après fermeture de l'application de l'agent.
+  let deliveryPollBusy=false;
+  const pollMainCouranteDeliveryAlerts=async()=>{
+    if(deliveryPollBusy||!navigator.onLine)return;
+    deliveryPollBusy=true;
+    try{
+      const sb=getSupabaseClient();
+      const {data,error}=await sb.from('generated_documents')
+        .select('id,title,type,delivery_status,delivery_error,updated_at,created_at')
+        .eq('organization_id',stagingConfig.organizationId)
+        .eq('type','mission')
+        .in('delivery_status',['failed','no_recipient'])
+        .order('updated_at',{ascending:false})
+        .limit(80);
+      if(error)throw error;
+      state.documents=(data||[]).map(d=>({
+        id:d.id,title:d.title,type:d.type,deliveryStatus:d.delivery_status,deliveryError:d.delivery_error,updatedAt:d.updated_at,createdAt:d.created_at
+      }));
+      redraw();
+    }catch(error){
+      console.warn('Statuts e-mail mains courantes indisponibles',error);
+    }finally{deliveryPollBusy=false;}
+  };
+  pollMainCouranteDeliveryAlerts();
+  const deliveryPollTimer=setInterval(pollMainCouranteDeliveryAlerts,60000);
+  unsubscribeList.push(()=>clearInterval(deliveryPollTimer));
+
   const stateRef=docRef('qgNotificationStates',currentUser.uid);
   unsubscribeList.push(onSnapshot(stateRef,snap=>{
     const clearMs=snap.exists()?qgNotificationEventMs(snap.data().clearedAt):0;
@@ -3000,6 +3030,17 @@ function buildQGNotifications(state){
   state.flash.filter(f => f.priority === 'Critique').forEach(f => {
     const sent = qgNotificationEventMs(f.sentAt);
     if (sent && now - sent > 10*60000 && Object.keys(f.readBy || {}).length === 0) rows.push({id:`flash_${f.id}`,level:'orange',eventAt:sent,title:`Flash critique non lu`, meta:`Envoyé ${dateText(f.sentAt)}`, body:f.title || f.message || 'Message sans lecture confirmée'});
+  });
+  state.documents.filter(d=>d.type==='mission' && ['failed','no_recipient'].includes(String(d.deliveryStatus||''))).forEach(d=>{
+    const eventAt=qgNotificationEventMs(d.updatedAt||d.createdAt);
+    rows.push({
+      id:`main_courante_delivery_${d.id}`,
+      level:d.deliveryStatus==='failed'?'red':'orange',
+      eventAt,
+      title:d.deliveryStatus==='failed'?'Échec envoi main courante':'Main courante sans destinataire',
+      meta:`${d.title||'Rapport de mission'} · ${dateText(d.updatedAt||d.createdAt)}`,
+      body:d.deliveryStatus==='failed'?'Les 3 tentatives automatiques ont échoué. Vérification QG requise.':'Configure un e-mail rapports dans la fiche client puis relance l’envoi.'
+    });
   });
   const clearedAt=Number(state.clearedAt||0);
   const levelWeight={red:3,orange:2,blue:1};
@@ -3516,7 +3557,7 @@ async function renderQGClients(){
     <div class="card stat orange"><div class="stat-label">PDF rattachés</div><div class="stat-value" id="client-doc-count">—</div><div class="muted">Documents visibles via RLS</div></div>
   </section>
   <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Clients & espace client</h2><p>Sites autorisés, destinataires et comptes de connexion</p></div><div class="btn-row"><button class="btn" id="client-copy-link">Copier le lien portail</button><button class="btn primary" id="client-add">+ Ajouter client</button></div></div>
-  <div class="setup-box">L’espace client est sécurisé par Supabase Auth et RLS. L’option « e-mail auto » prépare l’envoi futur des mains courantes mais l’envoi automatique global reste désactivé tant qu’il n’a pas été validé.</div>
+  <div class="setup-box">L’espace client est sécurisé par Supabase Auth et RLS. Active « e-mail auto » pour qu’une main courante soit envoyée automatiquement après clôture réelle de mission. En cas d’échec, le serveur effectue jusqu’à 3 tentatives sans doubler un envoi déjà confirmé.</div>
   <div id="client-admin-table" class="table-wrap"><div class="empty">Chargement…</div></div></section>`;
   render(page('Clients','Portail client et distribution des mains courantes',body));
   document.querySelector('#client-copy-link')?.addEventListener('click',async()=>{
@@ -3571,7 +3612,7 @@ function showClientAdminForm(c=null,sites=[]){
     return `<label class="item compact" style="cursor:pointer"><input type="checkbox" name="siteIds" value="${safe(site.id)}" ${checked?'checked':''}><div class="item-main"><div class="item-title">${safe(site.name)}</div><div class="item-meta">${safe(site.address||'')}${other?' · actuellement rattaché à un autre client':''}</div></div></label>`;
   }).join('');
   showModal(isEdit?'Configurer client':'Créer client',`<form id="client-admin-form">
-    <div class="form-grid"><div class="field span-2"><label>Raison sociale / nom client</label><input class="input" name="name" value="${safe(c?.name||'')}" required></div><div class="field"><label>E-mail rapports</label><input class="input" type="email" name="reportEmail" value="${safe(c?.report_email||'')}"></div><div class="field"><label>E-mail facturation</label><input class="input" type="email" name="billingEmail" value="${safe(c?.billing_email||'')}"></div><div class="field"><label>SIRET</label><input class="input" name="siret" value="${safe(c?.siret||'')}"></div><div class="field"><label>Portail</label><select class="select" name="portalEnabled"><option value="true" ${c?.portal_enabled!==false?'selected':''}>Activé</option><option value="false" ${c?.portal_enabled===false?'selected':''}>Désactivé</option></select></div><div class="field span-2"><label>Adresse</label><input class="input" name="address" value="${safe(c?.address||'')}"></div><div class="field"><label>Envoi automatique futur</label><select class="select" name="autoEmail"><option value="false" ${!c?.auto_email?'selected':''}>Non</option><option value="true" ${c?.auto_email?'selected':''}>Oui</option></select></div><div class="field"><label>Statut</label><select class="select" name="active"><option value="true" ${c?.active!==false?'selected':''}>Actif</option><option value="false" ${c?.active===false?'selected':''}>Inactif</option></select></div></div>
+    <div class="form-grid"><div class="field span-2"><label>Raison sociale / nom client</label><input class="input" name="name" value="${safe(c?.name||'')}" required></div><div class="field"><label>E-mail rapports</label><input class="input" type="email" name="reportEmail" value="${safe(c?.report_email||'')}"></div><div class="field"><label>E-mail facturation</label><input class="input" type="email" name="billingEmail" value="${safe(c?.billing_email||'')}"></div><div class="field"><label>SIRET</label><input class="input" name="siret" value="${safe(c?.siret||'')}"></div><div class="field"><label>Portail</label><select class="select" name="portalEnabled"><option value="true" ${c?.portal_enabled!==false?'selected':''}>Activé</option><option value="false" ${c?.portal_enabled===false?'selected':''}>Désactivé</option></select></div><div class="field span-2"><label>Adresse</label><input class="input" name="address" value="${safe(c?.address||'')}"></div><div class="field"><label>Envoi automatique des mains courantes</label><select class="select" name="autoEmail"><option value="false" ${!c?.auto_email?'selected':''}>Non</option><option value="true" ${c?.auto_email?'selected':''}>Oui</option></select></div><div class="field"><label>Statut</label><select class="select" name="active"><option value="true" ${c?.active!==false?'selected':''}>Actif</option><option value="false" ${c?.active===false?'selected':''}>Inactif</option></select></div></div>
     ${isEdit?`<div class="divider"></div><h3>Sites accessibles</h3><div class="list" style="max-height:310px;overflow:auto">${siteRows||'<div class="empty">Aucun site disponible.</div>'}</div>`:'<div class="setup-box">Après création, ouvre « Configurer » pour rattacher les sites.</div>'}
     <button class="btn primary full" type="submit">${isEdit?'Enregistrer':'Créer le client'}</button></form>`,'wide');
   document.querySelector('#client-admin-form')?.addEventListener('submit',async e=>{
@@ -4165,10 +4206,10 @@ async function deliverGeneratedDocumentToSupabase(archived){
     const pdfBlob = createGeneratedDocumentPdf(preparedArchived).output('blob');
     const result = await mirrorGeneratedDocument({ firebaseUser:currentUser, profile:currentProfile, document:archived, pdfBlob });
     await updateDoc(docRef('generatedDocuments', archived.id), {
-      deliveryStatus:result?.emailQueued ? 'email_queued' : 'supabase_archived',
+      deliveryStatus:result?.emailStatus || (result?.emailQueued ? 'email_queued' : 'supabase_archived'),
       supabaseDocumentId:result?.documentId || null,
       supabaseStoragePath:result?.storagePath || null,
-      deliveryError:null,
+      deliveryError:result?.emailError || null,
       deliveredAt:serverTimestamp()
     }).catch(()=>{});
     return result;
@@ -4217,7 +4258,7 @@ async function renderQGDocuments(){
         <div class="field"><label>Titre personnalisé (optionnel)</label><input class="input" name="title" placeholder="Ex : Main courante hebdomadaire — Site Alpha"></div>
         <button class="btn primary full" type="submit">Générer et archiver</button>
       </form>
-      <div class="setup-box" style="margin-top:14px">Métadonnées et fichier PDF privé sont archivés dans Supabase. L’envoi e-mail automatique reste désactivé pendant le cutover initial.</div>
+      <div class="setup-box" style="margin-top:14px">Métadonnées et PDF privé sont archivés dans Supabase. Pour les clients ayant « e-mail auto » activé, le rapport de mission est envoyé automatiquement après archivage avec relances serveur en cas d’échec.</div>
     </div>
     <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="btn-row">${isStrictAdmin()?`<button class="btn small" type="button" id="repair-historical-pdfs">Réparer PDF historiques</button>`:''}<div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
   </section>`;
@@ -4329,19 +4370,64 @@ async function generateAndArchiveDocument(fd, caches={}){
   }
   return archivePdfDocument({ type,title,siteId:siteId||null,siteNom:site?.name||null,missionId,rowCount,payload }, { silent:true });
 }
+function generatedDeliveryStatusMeta(status){
+  const value=String(status||'');
+  const map={
+    sent:{label:'Envoyé au client',cls:'green'},
+    retry_pending:{label:'Relance programmée',cls:'orange'},
+    waiting_pdf:{label:'PDF en attente',cls:'orange'},
+    no_recipient:{label:'Aucun destinataire',cls:'orange'},
+    failed:{label:'Échec envoi',cls:'red'},
+    disabled:{label:'Envoi auto désactivé',cls:''},
+    email_queued:{label:'Envoi en cours',cls:'blue'},
+    supabase_archived:{label:'PDF archivé',cls:'blue'},
+    bridge_failed:{label:'Relance serveur',cls:'orange'},
+    v587_metadata_only:{label:'PDF en préparation',cls:'blue'},
+    pending:{label:'En attente',cls:'blue'}
+  };
+  return map[value]||{label:value?value:'—',cls:''};
+}
+
+async function hydrateGeneratedDeliveryStatuses(rows){
+  const missionIds=(rows||[]).filter(d=>d.type==='mission'&&d.id).map(d=>String(d.id));
+  if(!missionIds.length||!navigator.onLine)return rows;
+  try{
+    const sb=getSupabaseClient();
+    const {data,error}=await sb.from('generated_documents')
+      .select('firebase_id,delivery_status,delivery_attempts,next_delivery_attempt_at,delivery_error,delivered_at,updated_at')
+      .eq('organization_id',stagingConfig.organizationId)
+      .in('firebase_id',missionIds);
+    if(error)throw error;
+    const byId=new Map((data||[]).map(d=>[String(d.firebase_id),d]));
+    return (rows||[]).map(d=>{
+      const remote=byId.get(String(d.id));
+      if(!remote)return d;
+      return {...d,deliveryStatus:remote.delivery_status,deliveryAttempts:remote.delivery_attempts,nextDeliveryAttemptAt:remote.next_delivery_attempt_at,deliveryError:remote.delivery_error,deliveredAt:remote.delivered_at,deliveryUpdatedAt:remote.updated_at};
+    });
+  }catch(error){
+    console.warn('Synchronisation statuts e-mail documents indisponible',error);
+    return rows;
+  }
+}
+
 function listenGeneratedDocuments(){
   const box=document.querySelector('#generated-documents-list'); if(!box)return;
   let rows=[];
   const redraw=()=>{
     const type=document.querySelector('#documents-filter')?.value||'';
     const filtered=rows.filter(d=>!type||d.type===type);
-    box.innerHTML=filtered.length?filtered.map(d=>`<div class="item document-item pdf-document"><div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span></div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}">Supprimer</button>`:''}</div></div>`).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
+    box.innerHTML=filtered.length?filtered.map(d=>{const delivery=generatedDeliveryStatusMeta(d.deliveryStatus);return `<div class="item document-item pdf-document"><div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span>${d.type==='mission'?` <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${d.type==='mission'&&d.deliveryStatus!=='sent'?`<button class="btn small" data-retry-generated-email="${safe(d.id)}">Relancer envoi</button>`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}">Supprimer</button>`:''}</div></div>`}).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
     document.querySelectorAll('[data-open-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>openGeneratedDocument(rows.find(d=>d.id===btn.dataset.openGeneratedDoc))));
     document.querySelectorAll('[data-download-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>downloadGeneratedDocument(rows.find(d=>d.id===btn.dataset.downloadGeneratedDoc))));
+    document.querySelectorAll('[data-retry-generated-email]').forEach(btn=>btn.addEventListener('click',()=>retryGeneratedDocumentEmail(rows.find(d=>d.id===btn.dataset.retryGeneratedEmail),btn)));
     document.querySelectorAll('[data-delete-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteGeneratedDocument(rows.find(d=>d.id===btn.dataset.deleteGeneratedDoc))));
   };
   document.querySelector('#documents-filter')?.addEventListener('change',redraw);
-  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{rows=snap.docs.map(d=>({id:d.id,...d.data()}));redraw();},()=>box.innerHTML='<div class="empty">Documents indisponibles. Vérifie les RLS Supabase.</div>'));
+  unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{
+    const localRows=snap.docs.map(d=>({id:d.id,...d.data()}));
+    rows=localRows;redraw();
+    hydrateGeneratedDeliveryStatuses(localRows).then(merged=>{rows=merged;redraw();}).catch(()=>{});
+  },()=>box.innerHTML='<div class="empty">Documents indisponibles. Vérifie les RLS Supabase.</div>'));
 }
 function openGeneratedDocument(d){
   if(!d)return;
@@ -4359,6 +4445,27 @@ function printGeneratedDocument(d){
 function downloadGeneratedDocument(d){
   if(!d)return;
   downloadGeneratedPdf(d);
+}
+async function retryGeneratedDocumentEmail(d,button=null){
+  if(!d||d.type!=='mission')return;
+  const original=button?.textContent||'Relancer envoi';
+  if(button){button.disabled=true;button.textContent='Relance…';}
+  try{
+    const sb=getSupabaseClient();
+    const {data:row,error}=await sb.from('generated_documents').select('id').eq('organization_id',stagingConfig.organizationId).eq('firebase_id',d.id).single();
+    if(error)throw error;
+    const invoke=await sb.functions.invoke('send-main-courante',{body:{documentId:row.id,manual:true}});
+    if(invoke.error)throw invoke.error;
+    const status=String(invoke.data?.status||'');
+    if(status==='sent')toast('Main courante envoyée au client.','success');
+    else if(status==='retry_pending'||invoke.data?.queued)toast('Relance enregistrée. Le serveur réessaiera automatiquement.','warning');
+    else if(status==='disabled')toast('Active d’abord « e-mail auto » dans la fiche client.','warning');
+    else if(status==='no_recipient')toast('Aucun destinataire configuré pour ce client.','warning');
+    else toast('Demande de relance prise en compte.','success');
+  }catch(error){
+    console.error(error);
+    toast(userFriendlyError(error,'Relance e-mail impossible.'),'error');
+  }finally{if(button&&button.isConnected){button.disabled=false;button.textContent=original;}}
 }
 function requestDeleteGeneratedDocument(d){
   if(!d)return;
