@@ -1,19 +1,19 @@
-const CACHE_NAME = 'sentinelle-pro-v5-9-1-web-push';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-1';
+const CACHE_NAME = 'sentinelle-pro-v5-9-2-web-push';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-2';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=591',
-  './app.js?v=591',
+  './style.css?v=592',
+  './app.js?v=592',
   './sentinelle-config.js',
-  './supabase-compat.js?v=591',
+  './supabase-compat.js?v=592',
   './supabase-config.js',
   './supabase-bridge.js',
   './manifest.json',
   './offline.html',
   './client.html',
-  './client-style.css?v=591',
-  './client-app.js?v=591',
+  './client-style.css?v=592',
+  './client-app.js?v=592',
   './assets/logo.png',
   './assets/favicon.png',
   './assets/icons/icon-192.png'

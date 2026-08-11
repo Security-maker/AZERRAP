@@ -1,4 +1,4 @@
-// Sentinelle Pro V5.9.0 — Supabase natif PRODUCTION.
+// Sentinelle Pro V5.9.2 — Supabase natif PRODUCTION.
 // Storage PDF actif. Envoi e-mail automatique laissé désactivé pour le cutover initial.
 // Il pourra être activé après validation de la fonction send-main-courante en production.
 export const supabaseConfig = Object.freeze({

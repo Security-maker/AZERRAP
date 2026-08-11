@@ -5,7 +5,7 @@ import {
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient
-} from './supabase-compat.js?v=591';
+} from './supabase-compat.js?v=592';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -47,6 +47,7 @@ let qgInvoicesCache = [];
 let billingProfileCache = null;
 let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mode: 'sites', days: 14, status: '', density: 'comfort', collaboratorAgentId: '', collaboratorMonth: '', publications: new Map() };
 let pendingMissionSelectionId = null;
+let passwordRecoveryMode = new URLSearchParams(location.search).get('recovery') === '1';
 
 const rolePortal = role => role === 'agent' ? 'agent' : 'qg';
 const nowText = () => new Date().toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
@@ -366,10 +367,18 @@ function boot(){
     return renderFatal('Configuration Supabase production invalide', error.message);
   }
 
+  getSupabaseClient().auth.onAuthStateChange((event)=>{
+    if(event==='PASSWORD_RECOVERY'){
+      passwordRecoveryMode=true;
+      queueMicrotask(()=>renderPasswordRecovery());
+    }
+  });
+
   onAuthStateChanged(auth, async user => {
     clearSubs();
     currentUser = user;
     activeShiftCache = null;
+    if (passwordRecoveryMode) return renderPasswordRecovery();
     if (!user) return renderLogin();
     await loadProfile(user);
   });
@@ -505,10 +514,10 @@ function renderLogin(){
         <img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro">
         <h1>Sentinelle Pro</h1>
         <p class="subtitle">Portail opérationnel sécurisé</p>
-        <div class="field"><label>Email</label><input class="input" name="email" type="email" autocomplete="email" required placeholder="agent@agence.fr"></div>
+        <div class="field"><label>Email</label><input class="input" id="login-email" name="email" type="email" autocomplete="email" required placeholder="agent@agence.fr"></div>
         <div class="field"><label>Mot de passe</label><input class="input" name="password" type="password" autocomplete="current-password" required placeholder="••••••••"></div>
         <button class="btn primary full" type="submit" ${navigator.onLine?'':'disabled'}>${navigator.onLine?'Connexion sécurisée':'Connexion impossible sans réseau'}</button>
-        ${navigator.onLine?'':`<div class="setup-box warning-copy">Aucune session active n’est disponible sur cet appareil. La toute première connexion Supabase ne peut pas être vérifiée sans réseau. Connecte cet appareil une fois, puis conserve la session pour les futurs démarrages hors ligne.</div>`}
+        ${navigator.onLine?`<button class="btn ghost full" type="button" id="main-forgot-password">Mot de passe oublié ?</button>`:`<div class="setup-box warning-copy">Aucune session active n’est disponible sur cet appareil. La toute première connexion Supabase ne peut pas être vérifiée sans réseau. Connecte cet appareil une fois, puis conserve la session pour les futurs démarrages hors ligne.</div>`}
         <div class="divider"></div>
         <p class="muted" style="font-size:12px;line-height:1.55">Authentification native <strong>Supabase Auth</strong>. Les rôles métier sont lus dans <strong>public.profiles</strong>.</p>
       </form>
@@ -522,6 +531,61 @@ function renderLogin(){
     } catch (error) {
       toast('Connexion refusée. Vérifie email et mot de passe.', 'error');
     }
+  });
+  document.querySelector('#main-forgot-password')?.addEventListener('click', requestMainPasswordReset);
+}
+async function requestMainPasswordReset(){
+  if(!navigator.onLine) return toast('Connexion internet requise pour réinitialiser le mot de passe.','warning');
+  const email=String(document.querySelector('#login-email')?.value||'').trim().toLowerCase();
+  if(!email) return toast('Saisis d’abord ton adresse e-mail.','warning');
+  try{
+    const redirectTo=new URL('./index.html?recovery=1',location.href).href;
+    const {error}=await getSupabaseClient().auth.resetPasswordForEmail(email,{redirectTo});
+    if(error) throw error;
+    toast('Si ce compte existe, un e-mail de réinitialisation vient d’être envoyé.','success');
+  }catch(error){
+    console.error('Réinitialisation mot de passe impossible',error);
+    toast(userFriendlyError(error,'Envoi du lien de réinitialisation impossible.'),'error');
+  }
+}
+function renderPasswordRecovery(){
+  currentProfile=null;
+  render(`
+    <div class="login-page">
+      <form class="login-card" id="main-password-reset-form">
+        <img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro">
+        <h1>Nouveau mot de passe</h1>
+        <p class="subtitle">Compte Sentinelle Pro</p>
+        <div class="setup-box">Choisis un nouveau mot de passe d’au moins 8 caractères.</div>
+        <div class="field"><label>Nouveau mot de passe</label><input class="input" name="password" type="password" minlength="8" autocomplete="new-password" required></div>
+        <div class="field"><label>Confirmer</label><input class="input" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div>
+        <button class="btn primary full" type="submit">Mettre à jour le mot de passe</button>
+        <button class="btn ghost full" type="button" id="cancel-password-recovery">Retour à la connexion</button>
+      </form>
+    </div>`);
+  document.querySelector('#main-password-reset-form')?.addEventListener('submit',async e=>{
+    e.preventDefault();
+    const fd=new FormData(e.currentTarget);const password=String(fd.get('password')||'');const confirm=String(fd.get('confirm')||'');
+    if(password.length<8) return toast('Le mot de passe doit contenir au moins 8 caractères.','warning');
+    if(password!==confirm) return toast('Les deux mots de passe ne correspondent pas.','warning');
+    const button=e.currentTarget.querySelector('button[type="submit"]');button.disabled=true;
+    try{
+      const client=getSupabaseClient();
+      const {data:{session}}=await client.auth.getSession();
+      if(!session) throw new Error('Lien expiré ou session de récupération introuvable. Demande un nouveau lien.');
+      const {error}=await client.auth.updateUser({password});if(error)throw error;
+      await client.auth.signOut().catch(()=>{});
+      passwordRecoveryMode=false;
+      history.replaceState({},'',new URL('./index.html',location.href).href);
+      renderLogin();
+      toast('Mot de passe modifié. Tu peux maintenant te reconnecter.','success');
+    }catch(error){console.error(error);toast(userFriendlyError(error,'Modification du mot de passe impossible.'),'error');}
+    finally{button.disabled=false;}
+  });
+  document.querySelector('#cancel-password-recovery')?.addEventListener('click',async()=>{
+    passwordRecoveryMode=false;
+    await getSupabaseClient().auth.signOut().catch(()=>{});
+    location.replace(new URL('./index.html',location.href).href);
   });
 }
 function renderMissingProfile(user){
@@ -4130,7 +4194,7 @@ async function renderQGDocuments(){
       </form>
       <div class="setup-box" style="margin-top:14px">Métadonnées et fichier PDF privé sont archivés dans Supabase. L’envoi e-mail automatique reste désactivé pendant le cutover initial.</div>
     </div>
-    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
+    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="btn-row">${isStrictAdmin()?`<button class="btn small" type="button" id="repair-historical-pdfs">Réparer PDF historiques</button>`:''}<div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
   </section>`;
   render(page('Documents', 'Génération, archivage et téléchargement opérationnel', body));
   const [sitesSnap, missionsSnap] = await Promise.all([
@@ -4162,8 +4226,50 @@ async function renderQGDocuments(){
     catch(error){ console.error(error); toast(userFriendlyError(error,'Génération impossible.'),'error'); }
     finally { btn.disabled=false; }
   });
+  document.querySelector('#repair-historical-pdfs')?.addEventListener('click',e=>repairHistoricalPdfStorage(e.currentTarget));
   listenGeneratedDocuments();
 }
+
+function historicalPdfSlug(value){
+  return String(value||'document').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_-]+/gi,'-').replace(/^-+|-+$/g,'').toLowerCase()||'document';
+}
+async function repairHistoricalPdfStorage(button){
+  if(!isStrictAdmin()) return toast('Réparation réservée au compte admin.','error');
+  if(!navigator.onLine) return toast('Connexion internet requise.','warning');
+  const accepted=confirm('Régénérer et archiver dans Supabase Storage tous les PDF MCI et rapports de mission historiques ? Les données métier ne seront pas supprimées.');
+  if(!accepted)return;
+  const original=button?.textContent||'Réparer PDF historiques';if(button){button.disabled=true;button.textContent='Préparation…';}
+  let ok=0,failed=0,total=0;const errors=[];
+  try{
+    const snap=await getDocs(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)));
+    const targets=snap.docs.map(d=>({id:d.id,...d.data()})).filter(d=>['mci','mission'].includes(String(d.type||''))&&String(d.status||'active')==='active');
+    total=targets.length;
+    if(!total){toast('Aucun PDF historique MCI/mission à réparer.','success');return;}
+    const client=getSupabaseClient();
+    for(let i=0;i<targets.length;i++){
+      const d=targets[i];
+      if(button)button.textContent=`PDF ${i+1}/${total}…`;
+      try{
+        const prepared=await prepareGeneratedDocumentPhotos(d);
+        const pdfBlob=createGeneratedDocumentPdf(prepared).output('blob');
+        const filename=`${historicalPdfSlug(d.id)}-${historicalPdfSlug(d.title||documentTypeLabel(d.type))}.pdf`;
+        const storagePath=`${stagingConfig.organizationId}/historique-v592/${historicalPdfSlug(d.type)}/${historicalPdfSlug(d.siteId||'sans-site')}/${filename}`;
+        const upload=await client.storage.from(stagingConfig.reportBucket).upload(storagePath,pdfBlob,{contentType:'application/pdf',upsert:true,cacheControl:'3600'});
+        if(upload.error)throw upload.error;
+        const update=await client.from('generated_documents').update({storage_bucket:stagingConfig.reportBucket,storage_path:storagePath,delivery_status:'supabase_archived',updated_at:new Date().toISOString()}).eq('organization_id',stagingConfig.organizationId).eq('firebase_id',d.id);
+        if(update.error)throw update.error;
+        ok++;
+      }catch(error){
+        failed++;errors.push(`${d.id}: ${error?.message||error}`);console.error('Réparation PDF historique impossible',d.id,error);
+      }
+    }
+    await addAudit('historical_pdf_storage_repair',{total,success:ok,failed,version:'5.9.2'}).catch(()=>{});
+    if(failed){toast(`Réparation terminée : ${ok}/${total} PDF archivés, ${failed} erreur(s).`,'warning');console.warn('Erreurs PDF historiques',errors);}
+    else toast(`Réparation terminée : ${ok}/${total} PDF archivés dans Supabase Storage.`,'success');
+  }catch(error){console.error(error);toast(userFriendlyError(error,'Réparation des PDF impossible.'),'error');}
+  finally{if(button){button.disabled=false;button.textContent=original;}}
+}
+
 async function generateAndArchiveDocument(fd, caches={}){
   const type = String(fd.get('type')||'mci');
   const siteId = String(fd.get('siteId')||'');
@@ -4707,7 +4813,7 @@ async function ensureSentinelleServiceWorker({cleanupLegacy=false, timeoutMs=800
   const existingUrl = registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '';
   if (!registration || !/service-worker\.js/i.test(existingUrl)) {
     try {
-      registration = await navigator.serviceWorker.register('./service-worker.js?v=591', { scope:'./', updateViaCache:'none' });
+      registration = await navigator.serviceWorker.register('./service-worker.js?v=592', { scope:'./', updateViaCache:'none' });
       window.__SENTINELLE_SW_LAST_ERROR__ = '';
     } catch(error) {
       window.__SENTINELLE_SW_LAST_ERROR__ = error?.message || String(error || 'Échec enregistrement Service Worker');
@@ -5440,8 +5546,17 @@ async function prepareGeneratedDocumentPhotos(d){
   const rows=Array.isArray(p.rows)?p.rows:[];
   if(!rows.length) return d;
   const preparedRows=await Promise.all(rows.map(async row=>{
-    if(!row?.photoUrl || String(row.photoUrl).startsWith('data:image/')) return row;
-    try { return {...row,photoUrl:await imageUrlToDataUrl(row.photoUrl)}; }
+    if(String(row?.photoUrl||'').startsWith('data:image/')) return row;
+    try {
+      let photoUrl=String(row?.photoUrl||'');
+      if(!photoUrl && row?.photoStorageBucket && row?.photoStoragePath){
+        const {data,error}=await getSupabaseClient().storage.from(row.photoStorageBucket).createSignedUrl(row.photoStoragePath,180);
+        if(error) throw error;
+        photoUrl=String(data?.signedUrl||'');
+      }
+      if(!photoUrl) return row;
+      return {...row,photoUrl:await imageUrlToDataUrl(photoUrl),photoAvailable:true};
+    }
     catch(error){ console.warn('Photo PDF non convertie',error); return row; }
   }));
   const byId=new Map(preparedRows.map(row=>[String(row.id||''),row]));

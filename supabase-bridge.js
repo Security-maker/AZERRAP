@@ -1,5 +1,5 @@
 import { supabaseConfig } from './supabase-config.js';
-import { getSupabaseClient } from './supabase-compat.js?v=591';
+import { getSupabaseClient } from './supabase-compat.js?v=592';
 
 function isConfigured(){
   return Boolean(
