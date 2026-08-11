@@ -5,7 +5,7 @@ import {
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient
-} from './supabase-compat.js?v=592';
+} from './supabase-compat.js?v=593';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -539,7 +539,7 @@ async function requestMainPasswordReset(){
   const email=String(document.querySelector('#login-email')?.value||'').trim().toLowerCase();
   if(!email) return toast('Saisis d’abord ton adresse e-mail.','warning');
   try{
-    const redirectTo=new URL('./index.html?recovery=1',location.href).href;
+    const redirectTo=new URL('./reset-password.html?return=main',location.href).href;
     const {error}=await getSupabaseClient().auth.resetPasswordForEmail(email,{redirectTo});
     if(error) throw error;
     toast('Si ce compte existe, un e-mail de réinitialisation vient d’être envoyé.','success');
@@ -3548,11 +3548,16 @@ async function loadQGClientsAdmin(){
     links.forEach(link=>{if(!userMap.has(link.client_id))userMap.set(link.client_id,[]);userMap.get(link.client_id).push(link.profiles)});
     box.innerHTML=clients.length?`<table class="table"><thead><tr><th>Client</th><th>Sites</th><th>PDF</th><th>Portail</th><th>E-mail rapports</th><th>Envoi auto</th><th>Actions</th></tr></thead><tbody>${clients.map(c=>{
       const users=(userMap.get(c.id)||[]).filter(Boolean);
-      const portal=users.length?users.map(u=>safe(u.email||`${u.first_name||''} ${u.last_name||''}`.trim())).join('<br>'):'Aucun compte';
+      const portal=users.length?users.map(u=>`<div style="display:flex;align-items:center;gap:8px;justify-content:space-between;margin:0 0 7px;min-width:220px"><span style="overflow-wrap:anywhere">${safe(u.email||`${u.first_name||''} ${u.last_name||''}`.trim())}</span><button class="btn small danger" type="button" data-client-access-delete="${safe(u.id)}" data-client-id="${safe(c.id)}">Supprimer accès</button></div>`).join(''):'Aucun compte';
       return `<tr><td><strong>${safe(c.name)}</strong><br><span class="muted">${safe(c.address||'')}</span></td><td>${siteCount.get(c.id)||0}</td><td>${docCount.get(c.id)||0}</td><td>${portal}<br><span class="pill ${c.portal_enabled===false?'red':'green'}">${c.portal_enabled===false?'désactivé':'autorisé'}</span></td><td>${safe(c.report_email||'—')}</td><td><span class="pill ${c.auto_email?'green':''}">${c.auto_email?'Oui':'Non'}</span></td><td><div class="table-actions"><button class="btn small" data-client-edit="${safe(c.id)}">Configurer</button><button class="btn small primary" data-client-access="${safe(c.id)}">Créer accès</button></div></td></tr>`;
     }).join('')}</tbody></table>`:'<div class="empty">Aucun client. La migration V5.9.1 peut reconstituer les clients à partir des sites existants.</div>';
     document.querySelectorAll('[data-client-edit]').forEach(btn=>btn.addEventListener('click',()=>showClientAdminForm(clients.find(c=>c.id===btn.dataset.clientEdit),sites)));
     document.querySelectorAll('[data-client-access]').forEach(btn=>btn.addEventListener('click',()=>showClientAccessForm(clients.find(c=>c.id===btn.dataset.clientAccess))));
+    document.querySelectorAll('[data-client-access-delete]').forEach(btn=>btn.addEventListener('click',()=>{
+      const link=links.find(l=>String(l.profile_id)===String(btn.dataset.clientAccessDelete)&&String(l.client_id)===String(btn.dataset.clientId));
+      const clientRow=clients.find(c=>String(c.id)===String(btn.dataset.clientId));
+      requestDeleteClientPortalAccess(clientRow,link?.profiles);
+    }));
   }catch(error){
     console.error(error);box.innerHTML=`<div class="setup-box danger-copy">${safe(userFriendlyError(error,'Module clients indisponible. Exécute la migration SQL V5.9.1 avant d’utiliser cet écran.'))}</div>`;
   }
@@ -3611,6 +3616,26 @@ function showClientAccessForm(c){
       const sb=getSupabaseClient();const {data,error}=await sb.functions.invoke('admin-manage-user',{body:{action:'create_client',clientId:c.id,email:String(fd.get('email')||'').trim(),password,firstName:String(fd.get('firstName')||'').trim(),lastName:String(fd.get('lastName')||'').trim()}});
       if(error)throw error;if(!data?.ok)throw new Error(data?.error||'Création du compte client non confirmée.');await addAudit('client_portal_account_created',{clientId:c.id,email:data.email});closeModal();toast('Accès client créé.','success');await loadQGClientsAdmin();
     }catch(error){console.error(error);toast(userFriendlyError(error,'Création du compte client impossible.'),'error');button.disabled=false;}
+  });
+}
+
+
+function requestDeleteClientPortalAccess(clientRow,profile){
+  if(!clientRow||!profile?.id) return toast('Accès client introuvable.','error');
+  const label=profile.email||`${profile.first_name||''} ${profile.last_name||''}`.trim()||'ce compte';
+  confirmDestructiveAction({
+    title:'Supprimer l’accès client',
+    message:`Le compte ${label} sera supprimé de Sentinelle Pro. Son utilisateur Supabase Auth, son profil client et tous ses liens d’accès seront supprimés. Le client ${clientRow.name}, ses sites et ses PDF restent intacts.`,
+    confirmWord:'SUPPRIMER',
+    actionLabel:'Supprimer l’accès',
+    onConfirm:async()=>{
+      const sb=getSupabaseClient();
+      const {data,error}=await sb.functions.invoke('admin-manage-user',{body:{action:'delete_client_access',profileId:profile.id,authUserId:profile.auth_user_id||'',clientId:clientRow.id}});
+      if(error) throw error;
+      if(!data?.ok) throw new Error(data?.error||'Suppression de l’accès client non confirmée.');
+      toast('Accès client supprimé. L’adresse e-mail peut être réutilisée.','success');
+      await loadQGClientsAdmin();
+    }
   });
 }
 
@@ -4813,7 +4838,7 @@ async function ensureSentinelleServiceWorker({cleanupLegacy=false, timeoutMs=800
   const existingUrl = registration?.active?.scriptURL || registration?.waiting?.scriptURL || registration?.installing?.scriptURL || '';
   if (!registration || !/service-worker\.js/i.test(existingUrl)) {
     try {
-      registration = await navigator.serviceWorker.register('./service-worker.js?v=592', { scope:'./', updateViaCache:'none' });
+      registration = await navigator.serviceWorker.register('./service-worker.js?v=593', { scope:'./', updateViaCache:'none' });
       window.__SENTINELLE_SW_LAST_ERROR__ = '';
     } catch(error) {
       window.__SENTINELLE_SW_LAST_ERROR__ = error?.message || String(error || 'Échec enregistrement Service Worker');

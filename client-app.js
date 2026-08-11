@@ -50,7 +50,7 @@ function bindLogin(){
 async function forgotPassword(){
   const email=String(document.querySelector('[name="email"]')?.value||'').trim().toLowerCase();
   if(!email){message('Saisissez votre adresse e-mail avant de demander un nouveau mot de passe.');return;}
-  const redirectTo=new URL('./client.html',location.href).href;
+  const redirectTo=new URL('./reset-password.html?return=client',location.href).href;
   const {error}=await supabase.auth.resetPasswordForEmail(email,{redirectTo});
   if(error)return message('Impossible d’envoyer le lien de réinitialisation.');
   message('Un lien de réinitialisation vient d’être envoyé si ce compte existe.','success');
@@ -58,7 +58,7 @@ async function forgotPassword(){
 function renderLogin(){location.replace('./client.html');}
 function renderError(error){root.innerHTML=`<section class="error-panel"><img src="./assets/logo.png" class="client-logo" alt="Sentinelle Pro"><h1>Espace client indisponible</h1><p>${safe(error?.message||error)}</p><button class="secondary" onclick="location.reload()">Réessayer</button></section>`;}
 function renderPasswordRecovery(){
-  root.innerHTML=`<section class="auth-wrap"><div class="auth-card"><div class="brand-lockup"><img src="./assets/logo.png" class="client-logo" alt="Sentinelle Pro"><span>SÉCURITÉ</span></div><h1>Choisir un nouveau mot de passe</h1><p class="lead">Utilisez au moins 8 caractères. Votre session sera conservée après la modification.</p><form id="client-reset-form" class="reset-box"><label>Nouveau mot de passe<input type="password" name="password" minlength="8" required></label><label>Confirmer<input type="password" name="confirm" minlength="8" required></label><button type="submit">Mettre à jour</button></form><div id="client-message"></div></div></section>`;
+  root.innerHTML=`<section class="auth-wrap"><div class="auth-card"><div class="brand-lockup"><img src="./assets/logo.png" class="client-logo" alt="Sentinelle Pro"><span>SÉCURITÉ</span></div><h1>Choisir un nouveau mot de passe</h1><p class="lead">Utilisez au moins 8 caractères. Vous devrez ensuite vous reconnecter.</p><form id="client-reset-form" class="reset-box"><label>Nouveau mot de passe<input type="password" name="password" minlength="8" required></label><label>Confirmer<input type="password" name="confirm" minlength="8" required></label><button type="submit">Mettre à jour</button></form><div id="client-message"></div></div></section>`;
   document.querySelector('#client-reset-form')?.addEventListener('submit',async e=>{
     e.preventDefault();const fd=new FormData(e.currentTarget);const password=String(fd.get('password')||'');const confirm=String(fd.get('confirm')||'');
     if(password.length<8)return message('Le mot de passe doit contenir au moins 8 caractères.');
@@ -66,7 +66,7 @@ function renderPasswordRecovery(){
     const button=e.currentTarget.querySelector('button');button.disabled=true;
     const {error}=await supabase.auth.updateUser({password});
     if(error){button.disabled=false;return message('Impossible de modifier le mot de passe.');}
-    recoveryMode=false;message('Mot de passe modifié. Ouverture de votre espace…','success');setTimeout(()=>loadPortal().catch(renderError),650);
+    recoveryMode=false;await supabase.auth.signOut({scope:'local'}).catch(()=>supabase.auth.signOut().catch(()=>{}));message('Mot de passe modifié. Reconnectez-vous avec votre nouveau mot de passe.','success');setTimeout(()=>location.replace('./client.html'),850);
   });
 }
 

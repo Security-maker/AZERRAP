@@ -1,19 +1,21 @@
-const CACHE_NAME = 'sentinelle-pro-v5-9-2-web-push';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-2';
+const CACHE_NAME = 'sentinelle-pro-v5-9-3-web-push';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-3';
 const APP_SHELL = [
   './',
   './index.html',
-  './style.css?v=592',
-  './app.js?v=592',
+  './style.css?v=593',
+  './app.js?v=593',
   './sentinelle-config.js',
-  './supabase-compat.js?v=592',
+  './supabase-compat.js?v=593',
   './supabase-config.js',
   './supabase-bridge.js',
   './manifest.json',
   './offline.html',
   './client.html',
-  './client-style.css?v=592',
-  './client-app.js?v=592',
+  './client-style.css?v=593',
+  './client-app.js?v=593',
+  './reset-password.html',
+  './reset-password.js?v=593',
   './assets/logo.png',
   './assets/favicon.png',
   './assets/icons/icon-192.png'
@@ -128,7 +130,8 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin) return;
   if (request.mode === 'navigate') {
     const clientPortal = /\/client\.html$/i.test(url.pathname);
-    const fallbackPage = clientPortal ? './client.html' : './index.html';
+    const resetPortal = /\/reset-password\.html$/i.test(url.pathname);
+    const fallbackPage = resetPortal ? './reset-password.html' : (clientPortal ? './client.html' : './index.html');
     event.respondWith(networkFirst(request, CACHE_NAME, fallbackPage).then(async response => {
       if (response && response.type !== 'error') return response;
       return (await caches.match(fallbackPage)) || (await caches.match('./offline.html'));
