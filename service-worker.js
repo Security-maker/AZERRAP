@@ -1,5 +1,5 @@
-const CACHE_NAME = 'sentinelle-pro-v5-9-3-web-push';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-3';
+const CACHE_NAME = 'sentinelle-pro-v5-9-4-client-premium';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-4';
 const APP_SHELL = [
   './',
   './index.html',
@@ -10,15 +10,19 @@ const APP_SHELL = [
   './supabase-config.js',
   './supabase-bridge.js',
   './manifest.json',
+  './manifest-client.json',
   './offline.html',
   './client.html',
-  './client-style.css?v=593',
-  './client-app.js?v=593',
+  './client-style.css?v=594',
+  './client-app.js?v=594',
   './reset-password.html',
   './reset-password.js?v=593',
   './assets/logo.png',
   './assets/favicon.png',
-  './assets/icons/icon-192.png'
+  './assets/icons/icon-192.png',
+  './assets/icons/client-180.png',
+  './assets/icons/client-192.png',
+  './assets/icons/client-512.png'
 ];
 
 const TRUSTED_OFFLINE_CDN = new Set([
