@@ -68,12 +68,12 @@ async function forgotPassword(){
 function renderLogin(){location.replace('./client.html');}
 function renderError(error){
   root.className='client-shell';
-  root.innerHTML=`<section class="error-panel"><img src="./assets/logo.png" class="client-logo" alt="Sentinelle Pro"><h1>Espace client indisponible</h1><p>${safe(error?.message||error)}</p><button class="secondary" id="client-retry">Réessayer</button></section>`;
+  root.innerHTML=`<section class="error-panel"><img src="./assets/client-logo.png" class="client-logo" alt="Sentinelle Pro"><h1>Espace client indisponible</h1><p>${safe(error?.message||error)}</p><button class="secondary" id="client-retry">Réessayer</button></section>`;
   document.querySelector('#client-retry')?.addEventListener('click',()=>location.reload());
 }
 function renderPasswordRecovery(){
   root.className='client-shell auth-shell';
-  root.innerHTML=`<section class="auth-layout"><div class="auth-showcase"><div class="auth-brandline"><span class="brand-mark"><img src="./assets/logo.png" alt=""></span><div><strong>Sentinelle Pro</strong><span>par Azzera Protect</span></div></div><div class="auth-showcase-copy"><span class="eyebrow-light">ESPACE SÉCURISÉ</span><h1>Un nouvel accès.<br><em>En toute sécurité.</em></h1><p>Choisissez votre nouveau mot de passe pour retrouver votre portail client Sentinelle Pro.</p></div><div class="trust-grid"><div><span class="trust-icon">✓</span><strong>Accès privé</strong><small>Authentification sécurisée</small></div><div><span class="trust-icon">8+</span><strong>Mot de passe</strong><small>8 caractères minimum</small></div><div><span class="trust-icon">↗</span><strong>Reconnexion</strong><small>Après validation</small></div></div></div><div class="auth-panel"><div class="auth-card"><div class="auth-mobile-brand"><span class="brand-mark"><img src="./assets/logo.png" alt="Sentinelle Pro"></span><div><strong>Sentinelle Pro</strong><span>Espace client</span></div></div><span class="eyebrow">RÉINITIALISATION</span><h2>Nouveau mot de passe</h2><p class="lead">Utilisez au moins 8 caractères. Vous devrez ensuite vous reconnecter.</p><form id="client-reset-form" class="reset-box"><label>Nouveau mot de passe<input type="password" name="password" minlength="8" autocomplete="new-password" required></label><label>Confirmer<input type="password" name="confirm" minlength="8" autocomplete="new-password" required></label><button type="submit" class="primary-button"><span>Mettre à jour</span><span class="button-arrow">→</span></button></form><div id="client-message"></div><div class="security-note"><span class="security-dot"></span><span>Votre session de récupération est protégée.</span></div></div></div></section>`;
+  root.innerHTML=`<section class="auth-layout"><div class="auth-showcase"><div class="auth-brandline"><span class="brand-mark"><img src="./assets/client-logo.png" alt=""></span><div><strong>Sentinelle Pro</strong><span>par Azzera Protect</span></div></div><div class="auth-showcase-copy"><span class="eyebrow-light">ESPACE SÉCURISÉ</span><h1>Un nouvel accès<br><em>En toute sécurité</em></h1><p>Choisissez votre nouveau mot de passe pour retrouver votre portail client Sentinelle Pro</p></div><div class="trust-grid"><div><span class="trust-icon">✓</span><strong>Accès privé</strong><small>Authentification sécurisée</small></div><div><span class="trust-icon">8+</span><strong>Mot de passe</strong><small>8 caractères minimum</small></div><div><span class="trust-icon">↗</span><strong>Reconnexion</strong><small>Après validation</small></div></div></div><div class="auth-panel"><div class="auth-card"><div class="auth-mobile-brand"><span class="brand-mark"><img src="./assets/client-logo.png" alt="Sentinelle Pro"></span><div><strong>Sentinelle Pro</strong><span>Espace client</span></div></div><span class="eyebrow">RÉINITIALISATION</span><h2>Nouveau mot de passe</h2><p class="lead">Utilisez au moins 8 caractères · Vous devrez ensuite vous reconnecter</p><form id="client-reset-form" class="reset-box"><label>Nouveau mot de passe<input type="password" name="password" minlength="8" autocomplete="new-password" required></label><label>Confirmer<input type="password" name="confirm" minlength="8" autocomplete="new-password" required></label><button type="submit" class="primary-button"><span>Mettre à jour</span><span class="button-arrow">→</span></button></form><div id="client-message"></div><div class="security-note"><span class="security-dot"></span><span>Votre session de récupération est protégée</span></div></div></div></section>`;
   document.querySelector('#client-reset-form')?.addEventListener('submit',async e=>{
     e.preventDefault();const fd=new FormData(e.currentTarget);const password=String(fd.get('password')||'');const confirm=String(fd.get('confirm')||'');
     if(password.length<8)return message('Le mot de passe doit contenir au moins 8 caractères.');
@@ -115,19 +115,24 @@ function renderPortal(){
   root.className='client-shell';
   const clientNames=clients.map(c=>c.name).join(' · ');
   const latest=documents[0]||null;
+  const latestMainCourante=documents.find(d=>{
+    const type=String(d.type||'').toLowerCase();
+    const title=String(d.title||'').toLowerCase();
+    return type==='mission'||type==='mci'||title.includes('main courante');
+  })||null;
   const last30=documents.filter(d=>{const dt=asDate(d.created_at);return dt&&Date.now()-dt.getTime()<=30*86400000;}).length;
   const sitePills=sites.length?sites.map(s=>`<span class="site-pill"><strong>${safe(s.name)}</strong>${s.address?` · ${safe(s.address)}`:''}</span>`).join(''):'<span class="site-pill">Aucun site affiché</span>';
   const siteOptions=sites.map(s=>`<option value="${safe(s.firebase_id||s.id)}">${safe(s.name)}</option>`).join('');
   const monthOptions=[...new Set(documents.map(d=>monthKey(d.created_at)).filter(Boolean))].slice(0,18).map(m=>{const [y,mo]=m.split('-');const label=new Date(Number(y),Number(mo)-1,1).toLocaleDateString('fr-FR',{month:'long',year:'numeric'});return `<option value="${m}">${safe(label)}</option>`;}).join('');
   root.innerHTML=`
     <header class="client-topbar">
-      <div class="client-brand"><span class="client-brand-mark"><img src="./assets/logo.png" alt=""></span><div class="client-brand-text"><h1>Sentinelle Pro <span class="portal-label">ESPACE CLIENT</span></h1><p>${safe(clientNames)}</p></div></div>
+      <div class="client-brand"><span class="client-brand-mark"><img src="./assets/client-logo.png" alt=""></span><div class="client-brand-text"><h1>Sentinelle Pro <span class="portal-label">ESPACE CLIENT</span></h1><p>${safe(clientNames)}</p></div></div>
       <div class="client-actions"><button class="secondary" id="client-refresh">Actualiser</button><button class="ghost" id="client-logout">Déconnexion</button></div>
     </header>
 
     <section class="portal-hero">
-      <div class="hero-card hero-main"><span class="hero-kicker">ACCÈS SÉCURISÉ ACTIF</span><h2>Bonjour ${safe(profile.first_name||'')}</h2><p>Votre espace de suivi opérationnel pour ${safe(clientNames)}. Consultez les rapports mis à votre disposition et retrouvez rapidement les documents de chacun de vos sites.</p><div class="sites-strip">${sitePills}</div></div>
-      <div class="hero-card hero-side"><div class="hero-side-top"><span class="hero-side-icon">↗</span><span class="hero-side-status">À JOUR</span></div><div><div class="hero-side-label">DERNIER DOCUMENT DISPONIBLE</div><div class="big">${latest?shortDate(latest.created_at):'—'}</div><div class="hero-side-title">${latest?safe(latest.title):'Aucun rapport disponible'}</div></div></div>
+      <div class="hero-card hero-main"><span class="hero-kicker">ACCÈS SÉCURISÉ ACTIF</span><h2>Bonjour ${safe(profile.first_name||'')}</h2><p>Votre espace de suivi opérationnel pour ${safe(clientNames)} · Consultez les rapports mis à votre disposition et retrouvez rapidement les documents de chacun de vos sites</p><div class="sites-strip">${sitePills}</div></div>
+      <div class="hero-card hero-side latest-main-courante"><div class="hero-side-top"><span class="hero-side-icon">▤</span><span class="hero-side-status">ACCÈS DIRECT</span></div><div><div class="hero-side-label">DERNIÈRE MAIN COURANTE</div><div class="big">${latestMainCourante?shortDate(latestMainCourante.created_at):'—'}</div><div class="hero-side-title">${latestMainCourante?safe(latestMainCourante.title):'Aucune main courante disponible'}</div>${latestMainCourante?`<div class="hero-side-actions"><button id="client-open-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Ouvrir</button><button class="secondary" id="client-download-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Télécharger</button></div>`:'<div class="hero-side-empty">Le dernier PDF apparaîtra ici dès sa génération</div>'}</div></div>
     </section>
 
     <section class="client-metrics">
@@ -137,13 +142,17 @@ function renderPortal(){
     </section>
 
     <section class="portal-card">
-      <div class="panel-head"><div><h2>Mains courantes & rapports</h2><p>Consultez, recherchez et téléchargez vos PDF opérationnels.</p></div><span class="panel-count" id="client-result-count">${documents.length} document${documents.length>1?'s':''}</span></div>
+      <div class="panel-head"><div><h2>Mains courantes & rapports</h2><p>Consultez, recherchez et téléchargez vos PDF opérationnels</p></div><span class="panel-count" id="client-result-count">${documents.length} document${documents.length>1?'s':''}</span></div>
       <div class="filters"><select id="client-site-filter" aria-label="Filtrer par site"><option value="">Tous les sites</option>${siteOptions}</select><select id="client-type-filter" aria-label="Filtrer par type"><option value="">Tous les types</option><option value="mission">Rapports de mission</option><option value="mci">Mains courantes</option><option value="rounds">Rondes</option><option value="alerts">SOS / PTI</option></select><select id="client-month-filter" aria-label="Filtrer par période"><option value="">Toutes les périodes</option>${monthOptions}</select><input id="client-search" type="search" placeholder="Rechercher un rapport…" aria-label="Rechercher un rapport"></div>
       <div id="client-document-list" class="document-grid"></div>
     </section>
     <div class="footer-note"><strong>Sentinelle Pro</strong> · Portail client sécurisé · Azzera Protect — Sécurité privée</div>`;
   document.querySelector('#client-logout').addEventListener('click',()=>supabase.auth.signOut());
-  document.querySelector('#client-refresh').addEventListener('click',async()=>{const button=document.querySelector('#client-refresh');if(button)button.disabled=true;try{await loadPortal();toast('Données actualisées.','success');}catch(error){renderError(error);}});
+  document.querySelector('#client-refresh').addEventListener('click',async()=>{const button=document.querySelector('#client-refresh');if(button)button.disabled=true;try{await loadPortal();toast('Données actualisées','success');}catch(error){renderError(error);}});
+  const latestOpen=document.querySelector('#client-open-latest-main-courante');
+  const latestDownload=document.querySelector('#client-download-latest-main-courante');
+  if(latestOpen)latestOpen.addEventListener('click',()=>openDocument(latestOpen.dataset.documentId,latestOpen,false));
+  if(latestDownload)latestDownload.addEventListener('click',()=>openDocument(latestDownload.dataset.documentId,latestDownload,true));
   ['client-site-filter','client-type-filter','client-month-filter'].forEach(id=>document.querySelector(`#${id}`)?.addEventListener('change',drawDocuments));
   document.querySelector('#client-search')?.addEventListener('input',drawDocuments);
   drawDocuments();

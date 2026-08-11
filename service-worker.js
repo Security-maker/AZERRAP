@@ -1,5 +1,5 @@
-const CACHE_NAME = 'sentinelle-pro-v5-9-4-client-premium';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-4';
+const CACHE_NAME = 'sentinelle-pro-v5-9-5-client-premium';
+const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-5';
 const APP_SHELL = [
   './',
   './index.html',
@@ -13,11 +13,12 @@ const APP_SHELL = [
   './manifest-client.json',
   './offline.html',
   './client.html',
-  './client-style.css?v=594',
-  './client-app.js?v=594',
+  './client-style.css?v=595',
+  './client-app.js?v=595',
   './reset-password.html',
   './reset-password.js?v=593',
   './assets/logo.png',
+  './assets/client-logo.png',
   './assets/favicon.png',
   './assets/icons/icon-192.png',
   './assets/icons/client-180.png',
