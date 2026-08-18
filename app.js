@@ -3707,7 +3707,7 @@ function openAgentPasswordRecovery(user){
   const label=`${user.prenom||''} ${user.nom||''}`.trim()||email;
   showModal('Accès au compte', `
     <div class="setup-box"><strong>${safe(label)}</strong><br>${safe(email)}</div>
-    <p class="muted" style="line-height:1.55">Envoie un lien sécurisé permettant à l’agent de choisir lui-même un nouveau mot de passe. Si l’envoi e-mail échoue, le QG pourra copier le lien et le transmettre directement à l’agent.</p>
+    <p class="muted" style="line-height:1.55">Envoie un lien sécurisé permettant à l’agent de choisir lui-même un nouveau mot de passe. Le QG pourra également copier ce même lien et le transmettre directement à l’agent par un autre canal s’il ne reçoit pas l’e-mail.</p>
     <button class="btn primary full" type="button" id="agent-recovery-send">Envoyer le lien de récupération</button>
     <div id="agent-recovery-result" style="margin-top:12px"></div>
   `);
@@ -3728,25 +3728,33 @@ async function sendAgentPasswordRecovery(user){
     });
     if(error) throw error;
     if(!data?.ok) throw new Error(data?.error||'Le lien de récupération n’a pas pu être généré.');
+    const recoveryLink=String(data.recoveryLink||'');
+    if(!recoveryLink) throw new Error(data.error||'Aucun lien de récupération n’est disponible.');
     if(data.sent){
-      result.innerHTML=`<div class="setup-box" style="border-color:rgba(34,197,94,.35)"><strong>✓ Lien envoyé</strong><br><span class="muted">Un e-mail de récupération a été envoyé à ${safe(data.email||user.email||'l’agent')}.</span></div>`;
-      button.textContent='Renvoyer un nouveau lien';
-      toast('Lien de récupération envoyé.', 'success');
+      result.innerHTML=`
+        <div class="setup-box" style="border-color:rgba(34,197,94,.35)"><strong>✓ Envoi accepté</strong><br><span class="muted">Brevo a accepté l’e-mail destiné à ${safe(data.email||user.email||'l’agent')}. Si l’agent ne le reçoit pas, copie le lien sécurisé ci-dessous et transmets-le directement.</span></div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary" type="button" id="agent-recovery-copy">Copier le lien de récupération</button>
+          <button class="btn" type="button" id="agent-recovery-retry">Renvoyer un nouvel e-mail</button>
+        </div>
+        <div class="setup-box" style="margin-top:10px"><span class="muted">Lien sensible : transmets-le uniquement à l’agent concerné. Il n’est pas enregistré dans l’historique QG.</span></div>`;
+      document.querySelector('#agent-recovery-copy')?.addEventListener('click',()=>copyText(recoveryLink,'Lien de récupération copié.'));
+      document.querySelector('#agent-recovery-retry')?.addEventListener('click',()=>sendAgentPasswordRecovery(user));
+      button.textContent='Générer un nouveau lien';
+      toast('E-mail accepté. Lien manuel disponible.', 'success');
       return;
     }
-    const recoveryLink=String(data.recoveryLink||'');
-    if(!recoveryLink) throw new Error(data.error||'L’e-mail a échoué et aucun lien de secours n’est disponible.');
     result.innerHTML=`
       <div class="setup-box warning-copy"><strong>Envoi e-mail impossible</strong><br>${safe(data.error||'Le fournisseur e-mail n’a pas confirmé l’envoi.')}<br><br>Le lien sécurisé a néanmoins été généré. Tu peux le copier et le transmettre directement à l’agent.</div>
       <div class="btn-row" style="margin-top:10px">
-        <button class="btn primary" type="button" id="agent-recovery-copy">Copier le lien</button>
+        <button class="btn primary" type="button" id="agent-recovery-copy">Copier le lien de récupération</button>
         <button class="btn" type="button" id="agent-recovery-retry">Réessayer l’envoi</button>
       </div>
-      <textarea class="textarea mono" id="agent-recovery-fallback" rows="3" readonly style="margin-top:10px">${safe(recoveryLink)}</textarea>`;
+      <div class="setup-box" style="margin-top:10px"><span class="muted">Lien sensible : transmets-le uniquement à l’agent concerné. Il n’est pas enregistré dans l’historique QG.</span></div>`;
     document.querySelector('#agent-recovery-copy')?.addEventListener('click',()=>copyText(recoveryLink,'Lien de récupération copié.'));
     document.querySelector('#agent-recovery-retry')?.addEventListener('click',()=>sendAgentPasswordRecovery(user));
     button.textContent='Générer un nouveau lien';
-    toast('E-mail non envoyé : lien de secours disponible.', 'warning');
+    toast('E-mail non envoyé : lien manuel disponible.', 'warning');
   }catch(error){
     console.error('Récupération mot de passe QG impossible',error);
     result.innerHTML=`<div class="setup-box danger-copy">${safe(userFriendlyError(error,'Récupération du mot de passe impossible.'))}</div>`;
