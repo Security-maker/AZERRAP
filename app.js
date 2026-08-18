@@ -4327,7 +4327,7 @@ async function renderQGDocuments(){
       </form>
       <div class="setup-box" style="margin-top:14px">Métadonnées et PDF privé sont archivés dans Supabase. Pour les clients ayant « e-mail auto » activé, le rapport de mission est envoyé automatiquement après archivage avec relances serveur en cas d’échec.</div>
     </div>
-    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="btn-row">${isStrictAdmin()?`<button class="btn small" type="button" id="repair-historical-pdfs">Réparer PDF historiques</button>`:''}<div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div></div><div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
+    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="btn-row">${isStrictAdmin()?`<button class="btn small" type="button" id="repair-historical-pdfs">Réparer PDF historiques</button>`:''}<div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div></div>${isStrictAdmin()?`<div id="documents-bulk-toolbar" class="setup-box" style="margin-bottom:12px"><div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap"><div><strong id="documents-selected-count">0 document sélectionné</strong><div class="muted" style="margin-top:3px;font-size:.86rem">Sélection multiple réservée à l’admin. Les documents récents ou en cours d’envoi sont protégés.</div></div><div class="btn-row"><button class="btn small" type="button" id="documents-select-all">Sélectionner tout (affichés)</button><button class="btn small ghost" type="button" id="documents-clear-selection" disabled>Tout désélectionner</button><button class="btn small danger" type="button" id="documents-delete-selected" disabled>Supprimer la sélection</button></div></div></div>`:''}<div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
   </section>`;
   render(page('Documents', 'Génération, archivage et téléchargement opérationnel', body));
   const [sitesSnap, missionsSnap] = await Promise.all([
@@ -4477,19 +4477,140 @@ async function hydrateGeneratedDeliveryStatuses(rows){
   }
 }
 
+function generatedDocumentDeleteLocked(d){
+  const status=String(d?.deliveryStatus||'');
+  const activeStatuses=new Set(['pending','email_queued','waiting_pdf','retry_pending','bridge_failed']);
+  const createdMs=timestampToDate(d?.createdAt)?.getTime?.()||0;
+  const tooRecent=createdMs>0 && (Date.now()-createdMs)<5*60*1000;
+  return tooRecent || activeStatuses.has(status);
+}
+async function deleteGeneratedDocumentsPermanently(documents){
+  if(!isStrictAdmin()) throw new Error('Suppression réservée au compte admin.');
+  const unique=[...new Map((documents||[]).filter(Boolean).map(d=>[String(d.id||''),d])).values()].filter(d=>d.id);
+  if(!unique.length) return {deleted:0,failed:0,deletedIds:[],failedIds:[],storageRemoved:0};
+  const locked=unique.filter(generatedDocumentDeleteLocked);
+  if(locked.length) throw new Error(`${locked.length} document(s) sont trop récents ou encore en cours de traitement. Attends leur archivage complet avant suppression.`);
+  if(!navigator.onLine) throw new Error('Connexion internet requise pour supprimer les PDF archivés.');
+
+  const sb=getSupabaseClient();
+  const failedIds=new Set();
+  let storageRemoved=0;
+
+  // Supprime d’abord les vrais fichiers PDF privés. En cas d’échec Storage,
+  // la ligne reste volontairement présente afin de pouvoir réessayer sans perdre la référence du fichier.
+  const byBucket=new Map();
+  unique.forEach(d=>{
+    const bucket=String(d.storageBucket||'').trim();
+    const path=String(d.storagePath||'').trim();
+    if(!bucket||!path)return;
+    if(!byBucket.has(bucket))byBucket.set(bucket,[]);
+    byBucket.get(bucket).push({id:String(d.id),path});
+  });
+  for(const [bucket,items] of byBucket.entries()){
+    for(let i=0;i<items.length;i+=50){
+      const chunk=items.slice(i,i+50);
+      const {error}=await sb.storage.from(bucket).remove(chunk.map(x=>x.path));
+      if(error){
+        console.error('Suppression Storage impossible',bucket,error);
+        chunk.forEach(x=>failedIds.add(x.id));
+      }else storageRemoved+=chunk.length;
+    }
+  }
+
+  const ready=unique.filter(d=>!failedIds.has(String(d.id)));
+  const deletedIds=[];
+  for(let i=0;i<ready.length;i+=50){
+    const chunk=ready.slice(i,i+50);
+    const ids=chunk.map(d=>String(d.id));
+    const {error}=await sb.from('generated_documents')
+      .delete()
+      .eq('organization_id',stagingConfig.organizationId)
+      .in('firebase_id',ids);
+    if(error){
+      console.error('Suppression métadonnées documents impossible',error);
+      ids.forEach(id=>failedIds.add(id));
+    }else deletedIds.push(...ids);
+  }
+
+  const failed=[...failedIds];
+  await addAudit('generated_documents_bulk_deleted',{
+    count:deletedIds.length,
+    failedCount:failed.length,
+    storageRemoved,
+    documentIds:deletedIds.slice(0,250),
+    failedDocumentIds:failed.slice(0,100)
+  }).catch(()=>{});
+  return {deleted:deletedIds.length,failed:failed.length,deletedIds,failedIds:failed,storageRemoved};
+}
+
 function listenGeneratedDocuments(){
   const box=document.querySelector('#generated-documents-list'); if(!box)return;
   let rows=[];
+  let visibleRows=[];
+  const selectedIds=new Set();
+
+  const updateBulkToolbar=()=>{
+    if(!isStrictAdmin())return;
+    const count=selectedIds.size;
+    const label=document.querySelector('#documents-selected-count');
+    if(label)label.textContent=`${count} document${count>1?'s':''} sélectionné${count>1?'s':''}`;
+    const clear=document.querySelector('#documents-clear-selection');
+    const remove=document.querySelector('#documents-delete-selected');
+    if(clear)clear.disabled=!count;
+    if(remove)remove.disabled=!count;
+  };
+
   const redraw=()=>{
     const type=document.querySelector('#documents-filter')?.value||'';
-    const filtered=rows.filter(d=>!type||d.type===type);
-    box.innerHTML=filtered.length?filtered.map(d=>{const delivery=generatedDeliveryStatusMeta(d.deliveryStatus);return `<div class="item document-item pdf-document"><div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span>${d.type==='mission'?` <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${d.type==='mission'&&d.deliveryStatus!=='sent'?`<button class="btn small" data-retry-generated-email="${safe(d.id)}">Relancer envoi</button>`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}">Supprimer</button>`:''}</div></div>`}).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
+    const validIds=new Set(rows.map(d=>String(d.id)));
+    [...selectedIds].forEach(id=>{if(!validIds.has(id))selectedIds.delete(id);});
+    visibleRows=rows.filter(d=>!type||d.type===type);
+    box.innerHTML=visibleRows.length?visibleRows.map(d=>{
+      const delivery=generatedDeliveryStatusMeta(d.deliveryStatus);
+      const locked=generatedDocumentDeleteLocked(d);
+      const checked=selectedIds.has(String(d.id));
+      const selector=isStrictAdmin()?`<label style="display:flex;align-items:flex-start;padding:5px 8px 0 0;min-width:34px" title="${locked?'Document protégé pendant son traitement':'Sélectionner ce document'}"><input type="checkbox" data-select-generated-doc="${safe(d.id)}" ${checked?'checked':''} ${locked?'disabled':''} style="width:19px;height:19px;accent-color:#32b8ff"></label>`:'';
+      return `<div class="item document-item pdf-document">${selector}<div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span>${d.type==='mission'?` <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>`:''}${locked&&isStrictAdmin()?` <span class="pill orange">Protégé</span>`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${d.type==='mission'&&d.deliveryStatus!=='sent'?`<button class="btn small" data-retry-generated-email="${safe(d.id)}">Relancer envoi</button>`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}" ${locked?'disabled title="Disponible après archivage complet"':''}>Supprimer</button>`:''}</div></div>`;
+    }).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
     document.querySelectorAll('[data-open-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>openGeneratedDocument(rows.find(d=>d.id===btn.dataset.openGeneratedDoc))));
     document.querySelectorAll('[data-download-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>downloadGeneratedDocument(rows.find(d=>d.id===btn.dataset.downloadGeneratedDoc))));
     document.querySelectorAll('[data-retry-generated-email]').forEach(btn=>btn.addEventListener('click',()=>retryGeneratedDocumentEmail(rows.find(d=>d.id===btn.dataset.retryGeneratedEmail),btn)));
     document.querySelectorAll('[data-delete-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteGeneratedDocument(rows.find(d=>d.id===btn.dataset.deleteGeneratedDoc))));
+    document.querySelectorAll('[data-select-generated-doc]').forEach(input=>input.addEventListener('change',()=>{
+      const id=String(input.dataset.selectGeneratedDoc||'');
+      if(input.checked)selectedIds.add(id);else selectedIds.delete(id);
+      updateBulkToolbar();
+    }));
+    updateBulkToolbar();
   };
-  document.querySelector('#documents-filter')?.addEventListener('change',redraw);
+
+  document.querySelector('#documents-filter')?.addEventListener('change',()=>{selectedIds.clear();redraw();});
+  document.querySelector('#documents-select-all')?.addEventListener('click',()=>{
+    visibleRows.filter(d=>!generatedDocumentDeleteLocked(d)).forEach(d=>selectedIds.add(String(d.id)));
+    redraw();
+  });
+  document.querySelector('#documents-clear-selection')?.addEventListener('click',()=>{selectedIds.clear();redraw();});
+  document.querySelector('#documents-delete-selected')?.addEventListener('click',()=>{
+    const selected=rows.filter(d=>selectedIds.has(String(d.id)));
+    if(!selected.length)return toast('Sélectionne au moins un document.','warning');
+    const counts=selected.reduce((acc,d)=>{const label=documentTypeLabel(d.type);acc[label]=(acc[label]||0)+1;return acc;},{});
+    const detail=Object.entries(counts).map(([label,count])=>`${count} ${label}`).join(' · ');
+    confirmDestructiveAction({
+      title:'Supprimer les documents sélectionnés',
+      message:`Tu vas supprimer définitivement ${selected.length} document(s) (${detail}). Les métadonnées Sentinelle ET les PDF privés correspondants dans Storage seront supprimés. Les missions, MCI sources, agents, sites et plannings ne seront pas modifiés. Cette action ne peut pas être annulée.`,
+      onConfirm:async()=>{
+        const result=await deleteGeneratedDocumentsPermanently(selected);
+        if(result.deletedIds.length){
+          const deletedSet=new Set(result.deletedIds);
+          rows=rows.filter(d=>!deletedSet.has(String(d.id)));
+        }
+        selectedIds.clear();redraw();
+        if(result.failed)toast(`${result.deleted} document(s) supprimé(s), ${result.failed} échec(s). Les éléments en échec ont été conservés pour pouvoir réessayer.`,'warning');
+        else toast(`${result.deleted} document(s) et PDF associé(s) supprimé(s).`,'success');
+      }
+    });
+  });
+
   unsubscribeList.push(onSnapshot(query(collectionRef('generatedDocuments'),orderBy('createdAt','desc'),limit(250)),snap=>{
     const localRows=snap.docs.map(d=>({id:d.id,...d.data()}));
     rows=localRows;redraw();
@@ -4505,30 +4626,23 @@ function openGeneratedDocument(d){
 }
 function printGeneratedDocument(d){
   document.querySelector('#print-root')?.remove();
-  const root=document.createElement('div');root.id='print-root';root.className='print-root';root.innerHTML=generatedDocumentHtml(d);document.body.appendChild(root);
-  toast('Aperçu préparé. Choisis Imprimer puis Enregistrer en PDF si besoin.','success');
-  window.addEventListener('afterprint',()=>setTimeout(()=>root.remove(),400),{once:true});setTimeout(()=>window.print(),220);setTimeout(()=>root.remove(),15000);
+  const root=document.createElement('div');root.id='print-root';root.className='print-root';root.innerHTML=generatedDocumentHtml(d);document.body.appendChild(root);window.print();setTimeout(()=>root.remove(),600);
 }
-function downloadGeneratedDocument(d){
+async function downloadGeneratedDocument(d){
   if(!d)return;
-  downloadGeneratedPdf(d);
+  await downloadGeneratedPdf(d);
 }
-async function retryGeneratedDocumentEmail(d,button=null){
-  if(!d||d.type!=='mission')return;
+async function retryGeneratedDocumentEmail(d,button){
+  if(!d?.id)return;
   const original=button?.textContent||'Relancer envoi';
   if(button){button.disabled=true;button.textContent='Relance…';}
   try{
-    const sb=getSupabaseClient();
-    const {data:row,error}=await sb.from('generated_documents').select('id').eq('organization_id',stagingConfig.organizationId).eq('firebase_id',d.id).single();
+    const {data,error}=await invokeSupabaseFunction('send-main-courante',{documentId:d.id});
     if(error)throw error;
-    const invoke=await sb.functions.invoke('send-main-courante',{body:{documentId:row.id,manual:true}});
-    if(invoke.error)throw invoke.error;
-    const status=String(invoke.data?.status||'');
-    if(status==='sent')toast('Main courante envoyée au client.','success');
-    else if(status==='retry_pending'||invoke.data?.queued)toast('Relance enregistrée. Le serveur réessaiera automatiquement.','warning');
-    else if(status==='disabled')toast('Active d’abord « e-mail auto » dans la fiche client.','warning');
-    else if(status==='no_recipient')toast('Aucun destinataire configuré pour ce client.','warning');
-    else toast('Demande de relance prise en compte.','success');
+    const status=data?.status||data?.deliveryStatus||'';
+    if(data?.ok||['sent','already_sent'].includes(status))toast(status==='already_sent'?'Document déjà envoyé.':'Document envoyé au client.','success');
+    else if(['retry_pending','failed'].includes(status))toast(data?.error||'Envoi impossible. Une nouvelle relance sera tentée automatiquement.','warning');
+    else toast('Demande de relance transmise.','success');
   }catch(error){
     console.error(error);
     toast(userFriendlyError(error,'Relance e-mail impossible.'),'error');
@@ -4536,7 +4650,16 @@ async function retryGeneratedDocumentEmail(d,button=null){
 }
 function requestDeleteGeneratedDocument(d){
   if(!d)return;
-  confirmDestructiveAction({title:'Supprimer le document',message:`Le document “${d.title||d.id}” sera supprimé définitivement de la rubrique Documents.`,onConfirm:async()=>{await addAudit('generated_document_deleted',{documentId:d.id,title:d.title||''});await deleteDoc(docRef('generatedDocuments',d.id));toast('Document supprimé.','success');}});
+  if(generatedDocumentDeleteLocked(d))return toast('Ce document est encore récent ou en cours de traitement. Réessaie dans quelques minutes.','warning');
+  confirmDestructiveAction({
+    title:'Supprimer le document',
+    message:`Le document “${d.title||d.id}” et son PDF privé seront supprimés définitivement de la rubrique Documents. Les données métier sources ne seront pas supprimées.`,
+    onConfirm:async()=>{
+      const result=await deleteGeneratedDocumentsPermanently([d]);
+      if(result.failed)throw new Error('Le document n’a pas pu être supprimé complètement. Il a été conservé afin de pouvoir réessayer.');
+      toast('Document et PDF associé supprimés.','success');
+    }
+  });
 }
 async function archiveMissionGroup(group){
   const first=group?.reports?.[0]||{};
