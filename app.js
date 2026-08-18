@@ -4302,15 +4302,42 @@ async function retryPendingSupabaseDeliveries(){
   }
 }
 
+const generatedDocumentArchiveInFlight = new Map();
+function stableGeneratedDocumentSegment(value){
+  return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_-]+/gi,'-').replace(/^-+|-+$/g,'').toLowerCase();
+}
+function stableGeneratedDocumentId(data={}){
+  const explicit=stableGeneratedDocumentSegment(data.generationKey||'');
+  if(explicit)return explicit.slice(0,120);
+  const type=String(data.type||'').toLowerCase();
+  if(type==='mission' && data.missionId){
+    const mission=stableGeneratedDocumentSegment(data.missionId);
+    if(mission)return `mission-${mission}`.slice(0,120);
+  }
+  if(type==='invoice'){
+    const invoice=data?.payload?.invoice||{};
+    const key=stableGeneratedDocumentSegment(invoice.id||invoice.number||'');
+    if(key)return `invoice-${key}`.slice(0,120);
+  }
+  return null;
+}
 async function archivePdfDocument(data, { silent=false, documentId=null }={}){
-  const payload = { ...data, fileType:'pdf', status:'active', deliveryStatus:supabaseBridgeEnabled() ? 'pending' : 'firebase_only', createdAt:serverTimestamp(), createdBy:currentUser.uid, createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() };
-  const ref = documentId ? docRef('generatedDocuments', documentId) : doc(collectionRef('generatedDocuments'));
-  await setDoc(ref, payload);
-  const archived = { id:ref.id, ...payload, createdAt:new Date() };
-  await addAudit('generated_pdf_archived', { type:data.type, title:data.title || '', documentId:ref.id, missionId:data.missionId || null, rowCount:data.rowCount || 0 });
-  if (supabaseBridgeEnabled()) deliverGeneratedDocumentToSupabase(archived).catch(()=>{});
-  if (!silent) toast('PDF archivé dans Documents.', 'success');
-  return archived;
+  const stableId=stableGeneratedDocumentSegment(documentId||'') || stableGeneratedDocumentId(data);
+  if(stableId && generatedDocumentArchiveInFlight.has(stableId)) return generatedDocumentArchiveInFlight.get(stableId);
+  const task=(async()=>{
+    const payload = { ...data, fileType:'pdf', status:'active', deliveryStatus:supabaseBridgeEnabled() ? 'pending' : 'firebase_only', createdAt:serverTimestamp(), createdBy:currentUser.uid, createdByNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim() };
+    delete payload.generationKey;
+    const ref = stableId ? docRef('generatedDocuments', stableId) : doc(collectionRef('generatedDocuments'));
+    const existedBefore=stableId ? await getDoc(ref).then(s=>s.exists()).catch(()=>false) : false;
+    await setDoc(ref, payload);
+    const archived = { id:ref.id, ...payload, createdAt:new Date() };
+    await addAudit(existedBefore?'generated_pdf_updated':'generated_pdf_archived', { type:data.type, title:data.title || '', documentId:ref.id, missionId:data.missionId || null, rowCount:data.rowCount || 0, deduplicated:Boolean(stableId) });
+    if (supabaseBridgeEnabled()) deliverGeneratedDocumentToSupabase(archived).catch(()=>{});
+    if (!silent) toast(existedBefore?'PDF existant mis à jour sans créer de doublon.':'PDF archivé dans Documents.', 'success');
+    return archived;
+  })();
+  if(stableId) generatedDocumentArchiveInFlight.set(stableId,task);
+  try{return await task;}finally{if(stableId && generatedDocumentArchiveInFlight.get(stableId)===task)generatedDocumentArchiveInFlight.delete(stableId);}
 }
 async function renderQGDocuments(){
   currentRoute = 'documents';
@@ -4435,7 +4462,12 @@ async function generateAndArchiveDocument(fd, caches={}){
     payload={rows:compactRows,truncated:rowCount>compactRows.length};
     title=titleInput || `${documentTypeLabel(type)} — ${site?.name || 'Tous sites'} — ${fd.get('dateFrom')||''} au ${fd.get('dateTo')||''}`;
   }
-  return archivePdfDocument({ type,title,siteId:siteId||null,siteNom:site?.name||null,missionId,rowCount,payload }, { silent:true });
+  const dateFrom=String(fd.get('dateFrom')||'');
+  const dateTo=String(fd.get('dateTo')||'');
+  const generationKey = type==='mission'
+    ? `mission-${missionId}`
+    : `${type}-${siteId||'tous-sites'}-${dateFrom||'debut'}-${dateTo||'fin'}`;
+  return archivePdfDocument({ type,title,siteId:siteId||null,siteNom:site?.name||null,missionId,rowCount,payload,generationKey }, { silent:true });
 }
 function generatedDeliveryStatusMeta(status){
   const value=String(status||'');
