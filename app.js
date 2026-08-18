@@ -3691,11 +3691,70 @@ function renderQGAgents(){
 function renderAgentsTable(rows){
   const box = document.querySelector('#agents-table');
   if (!rows.length) return box.innerHTML = `<div class="empty">Aucun profil agent.</div>`;
-  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><div class="table-actions"><button class="btn small primary" data-agent-planning="${safe(u.id)}">Planning</button><button class="btn small" data-agent-badge="${safe(u.id)}">Badge</button><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button>${isStrictAdmin() && u.id !== currentUser.uid ? `<button class="btn small danger" data-delete-agent="${safe(u.id)}">Supprimer</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
+  box.innerHTML = `<table class="table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Statut</th><th>Site actuel</th><th>Action</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${safe(u.prenom)} ${safe(u.nom)}</td><td>${safe(u.email)}</td><td>${safe(u.telephone || '')}</td><td>${safe(u.role)}</td><td>${safe(u.statut)}</td><td>${safe(u.siteActuelNom || '—')}</td><td><div class="table-actions"><button class="btn small primary" data-agent-planning="${safe(u.id)}">Planning</button><button class="btn small" data-agent-badge="${safe(u.id)}">Badge</button><button class="btn small" data-agent-recovery="${safe(u.id)}">Accès</button><button class="btn small" data-edit-agent="${safe(u.id)}">Modifier</button>${isStrictAdmin() && u.id !== currentUser.uid ? `<button class="btn small danger" data-delete-agent="${safe(u.id)}">Supprimer</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
   document.querySelectorAll('[data-agent-planning]').forEach(btn => btn.addEventListener('click', () => { sessionStorage.setItem('sentinellePlanningAgentId',btn.dataset.agentPlanning); navigate('missions'); }));
   document.querySelectorAll('[data-agent-badge]').forEach(btn => btn.addEventListener('click', () => openAgentBadgePreview(rows.find(u=>u.id===btn.dataset.agentBadge))));
+  document.querySelectorAll('[data-agent-recovery]').forEach(btn => btn.addEventListener('click', () => openAgentPasswordRecovery(rows.find(u=>u.id===btn.dataset.agentRecovery))));
   document.querySelectorAll('[data-edit-agent]').forEach(btn => btn.addEventListener('click', () => showAgentForm(rows.find(u=>u.id===btn.dataset.editAgent))));
   document.querySelectorAll('[data-delete-agent]').forEach(btn => btn.addEventListener('click', () => requestDeleteAgent(rows.find(u=>u.id===btn.dataset.deleteAgent))));
+}
+
+
+function openAgentPasswordRecovery(user){
+  if(!user?.id) return toast('Agent introuvable.', 'error');
+  const email=String(user.email||'').trim().toLowerCase();
+  if(!email) return toast('Aucune adresse e-mail n’est renseignée pour cet agent.', 'warning');
+  const label=`${user.prenom||''} ${user.nom||''}`.trim()||email;
+  showModal('Accès au compte', `
+    <div class="setup-box"><strong>${safe(label)}</strong><br>${safe(email)}</div>
+    <p class="muted" style="line-height:1.55">Envoie un lien sécurisé permettant à l’agent de choisir lui-même un nouveau mot de passe. Si l’envoi e-mail échoue, le QG pourra copier le lien et le transmettre directement à l’agent.</p>
+    <button class="btn primary full" type="button" id="agent-recovery-send">Envoyer le lien de récupération</button>
+    <div id="agent-recovery-result" style="margin-top:12px"></div>
+  `);
+  document.querySelector('#agent-recovery-send')?.addEventListener('click',()=>sendAgentPasswordRecovery(user));
+}
+async function sendAgentPasswordRecovery(user){
+  const button=document.querySelector('#agent-recovery-send');
+  const result=document.querySelector('#agent-recovery-result');
+  if(!button||!result) return;
+  button.disabled=true;
+  button.textContent='Génération du lien…';
+  result.innerHTML='';
+  try{
+    const redirectTo=new URL('./reset-password.html?return=main',location.href).href;
+    const client=getSupabaseClient();
+    const {data,error}=await client.functions.invoke('admin-manage-user',{
+      body:{action:'send_recovery',externalUid:String(user.id||''),redirectTo}
+    });
+    if(error) throw error;
+    if(!data?.ok) throw new Error(data?.error||'Le lien de récupération n’a pas pu être généré.');
+    if(data.sent){
+      result.innerHTML=`<div class="setup-box" style="border-color:rgba(34,197,94,.35)"><strong>✓ Lien envoyé</strong><br><span class="muted">Un e-mail de récupération a été envoyé à ${safe(data.email||user.email||'l’agent')}.</span></div>`;
+      button.textContent='Renvoyer un nouveau lien';
+      toast('Lien de récupération envoyé.', 'success');
+      return;
+    }
+    const recoveryLink=String(data.recoveryLink||'');
+    if(!recoveryLink) throw new Error(data.error||'L’e-mail a échoué et aucun lien de secours n’est disponible.');
+    result.innerHTML=`
+      <div class="setup-box warning-copy"><strong>Envoi e-mail impossible</strong><br>${safe(data.error||'Le fournisseur e-mail n’a pas confirmé l’envoi.')}<br><br>Le lien sécurisé a néanmoins été généré. Tu peux le copier et le transmettre directement à l’agent.</div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn primary" type="button" id="agent-recovery-copy">Copier le lien</button>
+        <button class="btn" type="button" id="agent-recovery-retry">Réessayer l’envoi</button>
+      </div>
+      <textarea class="textarea mono" id="agent-recovery-fallback" rows="3" readonly style="margin-top:10px">${safe(recoveryLink)}</textarea>`;
+    document.querySelector('#agent-recovery-copy')?.addEventListener('click',()=>copyText(recoveryLink,'Lien de récupération copié.'));
+    document.querySelector('#agent-recovery-retry')?.addEventListener('click',()=>sendAgentPasswordRecovery(user));
+    button.textContent='Générer un nouveau lien';
+    toast('E-mail non envoyé : lien de secours disponible.', 'warning');
+  }catch(error){
+    console.error('Récupération mot de passe QG impossible',error);
+    result.innerHTML=`<div class="setup-box danger-copy">${safe(userFriendlyError(error,'Récupération du mot de passe impossible.'))}</div>`;
+    button.textContent='Réessayer';
+    toast(userFriendlyError(error,'Récupération du mot de passe impossible.'),'error');
+  }finally{
+    button.disabled=false;
+  }
 }
 
 function confirmDestructiveAction({ title, message, confirmWord='SUPPRIMER', actionLabel='Supprimer', onConfirm }){
