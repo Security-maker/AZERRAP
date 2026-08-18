@@ -10,10 +10,55 @@ let recoveryMode=false;
 
 function safe(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function configured(){return supabaseConfig.enabled&&supabaseConfig.url&&!supabaseConfig.url.includes('REMPLACE_MOI')&&supabaseConfig.publishableKey&&!supabaseConfig.publishableKey.includes('REMPLACE_MOI');}
-function asDate(value){const d=new Date(value);return Number.isNaN(d.getTime())?null:d;}
+function asDate(value){if(value===null||value===undefined||value==='')return null;const d=new Date(value);return Number.isNaN(d.getTime())?null:d;}
 function dateText(value){const d=asDate(value);return d?d.toLocaleString('fr-FR',{dateStyle:'medium',timeStyle:'short'}):'—';}
 function shortDate(value){const d=asDate(value);return d?d.toLocaleDateString('fr-FR',{day:'2-digit',month:'short',year:'numeric'}):'—';}
 function monthKey(value){const d=asDate(value);return d?`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`:'';}
+function documentRowDate(row={}){
+  return asDate(row.createdAt||row.occurredAt||row.scannedAt||row.capturedAt||row.photoCapturedAt||row.heure||row.date||null);
+}
+function titleBusinessPeriod(title=''){
+  const matches=String(title||'').match(/(20\d{2}-\d{2}-\d{2})/g)||[];
+  const start=matches[0]?asDate(`${matches[0]}T12:00:00`):null;
+  const end=matches[1]?asDate(`${matches[1]}T12:00:00`):start;
+  return {start,end};
+}
+function documentBusinessPeriod(document={}){
+  const payload=document.payload&&typeof document.payload==='object'?document.payload:{};
+  const type=String(document.type||'').toLowerCase();
+  let start=asDate(payload.businessPeriodStart||payload.periodStart||payload.dateFrom||null);
+  let end=asDate(payload.businessPeriodEnd||payload.periodEnd||payload.dateTo||null);
+  if(type==='mission'){
+    const mission=payload.mission||{};
+    const shift=payload.shift||{};
+    start=start||asDate(mission.actualStart||shift.startTime||mission.scheduledStart||shift.scheduledStart||null);
+    end=end||asDate(mission.actualEnd||shift.completedAt||mission.scheduledEnd||shift.scheduledEnd||null);
+  }
+  if(!start||!end){
+    const rows=Array.isArray(payload.rows)?payload.rows:[];
+    const dates=rows.map(documentRowDate).filter(Boolean).sort((a,b)=>a-b);
+    start=start||dates[0]||null;
+    end=end||dates[dates.length-1]||null;
+  }
+  if(!start||!end){
+    const fromTitle=titleBusinessPeriod(document.title);
+    start=start||fromTitle.start;
+    end=end||fromTitle.end;
+  }
+  start=start||asDate(document.created_at);
+  end=end||start;
+  return {start,end,sortDate:type==='mission'?start:(end||start)};
+}
+function documentBusinessDate(document={}){return documentBusinessPeriod(document).sortDate||asDate(document.created_at);}
+function documentBusinessLabel(document={}){
+  const {start,end}=documentBusinessPeriod(document);
+  if(!start)return '—';
+  const type=String(document.type||'').toLowerCase();
+  const sameDay=end&&start.toLocaleDateString('fr-FR')===end.toLocaleDateString('fr-FR');
+  if(type==='mission')return dateText(start);
+  if(end&&!sameDay)return `Du ${shortDate(start)} au ${shortDate(end)}`;
+  return shortDate(start);
+}
 function docTypeLabel(type){return ({mission:'Rapport de mission',mci:'Main courante',rounds:'Rapport de rondes',alerts:'Rapport SOS / PTI'}[String(type||'').toLowerCase()]||'Document opérationnel');}
 function message(text,type='error'){const box=document.querySelector('#client-message');if(box){box.className=type;box.textContent=text;}}
 function toast(text,type='error'){
@@ -104,10 +149,10 @@ async function loadPortal(){
   sites=(siteLinks||[]).map(row=>row.sites).filter(Boolean).filter(s=>s.active!==false);
 
   const {data:docs,error:docsError}=await supabase.from('generated_documents')
-    .select('id,client_id,title,type,row_count,created_at,firebase_site_id,storage_bucket,storage_path,delivery_status,status')
+    .select('id,client_id,title,type,row_count,created_at,firebase_site_id,storage_bucket,storage_path,delivery_status,status,payload')
     .eq('organization_id',profile.organization_id).eq('status','active').order('created_at',{ascending:false}).limit(500);
   if(docsError)throw docsError;
-  documents=docs||[];
+  documents=(docs||[]).sort((a,b)=>(documentBusinessDate(b)?.getTime()||0)-(documentBusinessDate(a)?.getTime()||0));
   renderPortal();
 }
 
@@ -123,7 +168,7 @@ function renderPortal(){
   const last30=documents.filter(d=>{const dt=asDate(d.created_at);return dt&&Date.now()-dt.getTime()<=30*86400000;}).length;
   const sitePills=sites.length?sites.map(s=>`<span class="site-pill"><span class="site-pill-name">${safe(s.name)}</span>${s.address?`<span class="site-pill-address">${safe(s.address)}</span>`:''}</span>`).join(''):'<span class="site-pill site-pill-empty"><span class="site-pill-name">Aucun site affiché</span></span>';
   const siteOptions=sites.map(s=>`<option value="${safe(s.firebase_id||s.id)}">${safe(s.name)}</option>`).join('');
-  const monthOptions=[...new Set(documents.map(d=>monthKey(d.created_at)).filter(Boolean))].slice(0,18).map(m=>{const [y,mo]=m.split('-');const label=new Date(Number(y),Number(mo)-1,1).toLocaleDateString('fr-FR',{month:'long',year:'numeric'});return `<option value="${m}">${safe(label)}</option>`;}).join('');
+  const monthOptions=[...new Set(documents.map(d=>monthKey(documentBusinessDate(d))).filter(Boolean))].slice(0,18).map(m=>{const [y,mo]=m.split('-');const label=new Date(Number(y),Number(mo)-1,1).toLocaleDateString('fr-FR',{month:'long',year:'numeric'});return `<option value="${m}">${safe(label)}</option>`;}).join('');
   root.innerHTML=`
     <header class="client-topbar">
       <div class="client-brand"><span class="client-brand-mark"><img src="./assets/client-logo.png" alt=""></span><div class="client-brand-text"><h1>Sentinelle Pro <span class="portal-label">ESPACE CLIENT</span></h1><p>${safe(clientNames)}</p></div></div>
@@ -132,7 +177,7 @@ function renderPortal(){
 
     <section class="portal-hero">
       <div class="hero-card hero-main"><span class="hero-kicker">ACCÈS SÉCURISÉ ACTIF</span><h2>Bonjour ${safe(profile.first_name||'')}</h2><p>Votre espace de suivi opérationnel pour ${safe(clientNames)} · Consultez les rapports mis à votre disposition et retrouvez rapidement les documents de chacun de vos sites</p><div class="sites-strip">${sitePills}</div></div>
-      <div class="hero-card hero-side latest-main-courante"><div class="hero-side-top"><span class="hero-side-icon">▤</span><span class="hero-side-status">ACCÈS DIRECT</span></div><div><div class="hero-side-label">DERNIÈRE MAIN COURANTE</div><div class="big">${latestMainCourante?shortDate(latestMainCourante.created_at):'—'}</div><div class="hero-side-title">${latestMainCourante?safe(latestMainCourante.title):'Aucune main courante disponible'}</div>${latestMainCourante?`<div class="hero-side-actions"><button id="client-open-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Ouvrir</button><button class="secondary" id="client-download-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Télécharger</button></div>`:'<div class="hero-side-empty">Le dernier PDF apparaîtra ici dès sa génération</div>'}</div></div>
+      <div class="hero-card hero-side latest-main-courante"><div class="hero-side-top"><span class="hero-side-icon">▤</span><span class="hero-side-status">ACCÈS DIRECT</span></div><div><div class="hero-side-label">DERNIÈRE MAIN COURANTE</div><div class="big">${latestMainCourante?shortDate(documentBusinessDate(latestMainCourante)):'—'}</div><div class="hero-side-title">${latestMainCourante?safe(latestMainCourante.title):'Aucune main courante disponible'}</div>${latestMainCourante?`<div class="hero-side-actions"><button id="client-open-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Ouvrir</button><button class="secondary" id="client-download-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Télécharger</button></div>`:'<div class="hero-side-empty">Le dernier PDF apparaîtra ici dès sa génération</div>'}</div></div>
     </section>
 
     <section class="client-metrics">
@@ -170,12 +215,12 @@ function drawDocuments(){
     const dSite=String(d.firebase_site_id||'');
     const siteAllowed=!dSite||allowedSiteIds.has(dSite);
     const matchSearch=!search||String(d.title||'').toLowerCase().includes(search)||String(siteMap.get(dSite)?.name||'').toLowerCase().includes(search);
-    return d.status==='active'&&siteAllowed&&(!site||dSite===site)&&(!type||String(d.type||'')===type)&&(!month||monthKey(d.created_at)===month)&&matchSearch;
+    return d.status==='active'&&siteAllowed&&(!site||dSite===site)&&(!type||String(d.type||'')===type)&&(!month||monthKey(documentBusinessDate(d))===month)&&matchSearch;
   });
   const count=document.querySelector('#client-result-count');if(count)count.textContent=`${rows.length} document${rows.length>1?'s':''}`;
   box.innerHTML=rows.length?rows.map(d=>{
     const siteName=siteMap.get(String(d.firebase_site_id||''))?.name||'Site rattaché';
-    return `<article class="document-card"><div class="doc-icon" aria-hidden="true"></div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(docTypeLabel(d.type))}</span>${d.delivery_status==='sent'?'<span class="tag sent">Envoyé par e-mail</span>':''}</div><h3 title="${safe(d.title||'Document')}">${safe(d.title||'Document')}</h3><p>${safe(siteName)} · ${dateText(d.created_at)} · ${Number(d.row_count||0)} événement(s)</p></div><div class="doc-actions"><button data-open-document="${safe(d.id)}">Ouvrir PDF</button><button class="secondary" data-download-document="${safe(d.id)}">Télécharger</button></div></article>`;
+    return `<article class="document-card"><div class="doc-icon" aria-hidden="true"></div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(docTypeLabel(d.type))}</span>${d.delivery_status==='sent'?'<span class="tag sent">Envoyé par e-mail</span>':''}</div><h3 title="${safe(d.title||'Document')}">${safe(d.title||'Document')}</h3><p>${safe(siteName)} · ${safe(documentBusinessLabel(d))} · ${Number(d.row_count||0)} événement(s)</p></div><div class="doc-actions"><button data-open-document="${safe(d.id)}">Ouvrir PDF</button><button class="secondary" data-download-document="${safe(d.id)}">Télécharger</button></div></article>`;
   }).join(''):'<div class="empty">Aucun document ne correspond à ces filtres.</div>';
   box.querySelectorAll('[data-open-document]').forEach(button=>button.addEventListener('click',()=>openDocument(button.dataset.openDocument,button,false)));
   box.querySelectorAll('[data-download-document]').forEach(button=>button.addEventListener('click',()=>openDocument(button.dataset.downloadDocument,button,true)));
