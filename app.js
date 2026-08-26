@@ -36,6 +36,7 @@ let sosTriggered = false;
 let activeShiftCache = null;
 let takeShiftSubmissionLock = false;
 const endShiftSubmissionLocks = new Set();
+const qgEndShiftSubmissionLocks = new Set(); // V5.10.10 · clôture QG d'une vacation active
 let lastSitesCache = [];
 let qgReportMissionGroups = [];
 let qgNotificationsCache = [];
@@ -2433,6 +2434,200 @@ function missionConflicts(agentId,startValue,endValue,excludeId=''){
     return ms&&me&&ms<end&&me>start;
   });
 }
+// V5.10.10 · clôture QG sécurisée d'une mission oubliée par l'agent.
+// Principe : on ne force jamais uniquement le statut mission. Il faut retrouver le shift actif lié,
+// puis reproduire les écritures métier essentielles d'une vraie fin de poste.
+async function findActiveShiftForQGMission(mission){
+  if(!mission?.id) return null;
+  if(mission.shiftId){
+    const snap=await getDoc(docRef('shifts',mission.shiftId)).catch(()=>null);
+    if(snap?.exists?.()){
+      const shift={id:snap.id,...snap.data()};
+      if(shift.status==='active' && (!shift.missionId || String(shift.missionId)===String(mission.id))) return shift;
+    }
+  }
+  let snap=await getDocs(query(collectionRef('shifts'),where('missionId','==',mission.id),where('status','==','active'),limit(5))).catch(()=>null);
+  if(!snap){
+    snap=await getDocs(query(collectionRef('shifts'),where('missionId','==',mission.id),limit(20))).catch(()=>({docs:[]}));
+  }
+  const linked=(snap?.docs||[]).map(d=>({id:d.id,...d.data()})).filter(s=>s.status==='active' && String(s.missionId||'')===String(mission.id));
+  if(linked.length) return linked.sort((a,b)=>(timestampToDate(b.startTime)?.getTime?.()||0)-(timestampToDate(a.startTime)?.getTime?.()||0))[0];
+
+  // Compatibilité anciennes vacations : on accepte le shift actif de l'agent uniquement s'il référence bien cette mission.
+  if(mission.agentId){
+    const agentSnap=await getDocs(query(collectionRef('shifts'),where('agentId','==',mission.agentId),where('status','==','active'),limit(5))).catch(()=>({docs:[]}));
+    return agentSnap.docs.map(d=>({id:d.id,...d.data()})).find(s=>String(s.missionId||'')===String(mission.id)) || null;
+  }
+  return null;
+}
+function qgClosureAdminName(){
+  return `${currentProfile?.prenom||''} ${currentProfile?.nom||''}`.trim() || currentProfile?.email || 'QG';
+}
+function qgClosureEffectiveDate(mode, customValue, mission){
+  if(mode==='scheduled') return timestampToDate(mission?.scheduledEnd);
+  if(mode==='custom'){
+    const value=fromLocalInputValue(customValue);
+    return value?.toDate?.() || null;
+  }
+  return new Date();
+}
+async function openQGEndShiftModal(mission){
+  if(!roleAllowedAdmin()) return toast('Action réservée au QG.','error');
+  const latestMissionSnap=await getDoc(docRef('missions',mission.id)).catch(()=>null);
+  const latestMission=latestMissionSnap?.exists?.()?{id:latestMissionSnap.id,...latestMissionSnap.data()}:mission;
+  if(latestMission.status!=='active') return toast('Cette mission n’est plus en cours.','warning');
+  const shift=await findActiveShiftForQGMission(latestMission);
+  if(!shift) return toast('Aucun poste actif lié à cette mission. Aucune donnée n’a été modifiée.','error');
+
+  const now=new Date();
+  const scheduledEnd=timestampToDate(latestMission.scheduledEnd || shift.scheduledEnd);
+  const plannedAlreadyPassed=scheduledEnd && scheduledEnd.getTime()<=now.getTime();
+  const defaultMode=plannedAlreadyPassed?'scheduled':'now';
+  const defaultReason='Fin de poste non effectuée par l’agent.';
+  const earlyWarning=scheduledEnd && scheduledEnd.getTime()>now.getTime()
+    ? `<div class="setup-box warning-copy"><strong>Attention :</strong> l’heure de fin prévue n’est pas encore dépassée. Utilise cette clôture uniquement si le QG doit réellement interrompre la vacation.</div>`:'';
+
+  showModal('Clôturer la mission depuis le QG',`<form id="qg-end-shift-form" class="end-shift-flow">
+    <div class="end-shift-hero"><span>CLÔTURE EXCEPTIONNELLE QG</span><strong>${safe(latestMission.agentNom||shift.agentNom||'Agent')}</strong><p>${safe(latestMission.siteNom||shift.siteNom||'Site')} · poste ouvert ${dateText(shift.startTime)}</p></div>
+    ${earlyWarning}
+    <div class="setup-box">Cette action termine le <strong>poste actif réel</strong>, libère l’agent pour une prochaine prise de poste, ajoute une trace de fin de service à la main courante et actualise le rapport de mission. La clôture sera identifiée comme effectuée par le QG.</div>
+    <div class="field"><label>Heure de fin à enregistrer</label><select class="select" name="endMode" id="qg-end-mode">
+      ${scheduledEnd?`<option value="scheduled" ${defaultMode==='scheduled'?'selected':''}>Heure prévue · ${dateText(scheduledEnd)}</option>`:''}
+      <option value="now" ${defaultMode==='now'?'selected':''}>Maintenant · ${dateText(now)}</option>
+      <option value="custom">Choisir une heure</option>
+    </select></div>
+    <div class="field hidden" id="qg-end-custom-wrap"><label>Heure personnalisée</label><input class="input" type="datetime-local" name="customEnd" value="${toLocalInputValue(now)}"></div>
+    <div class="field"><label>Motif obligatoire</label><textarea class="textarea" name="reason" required maxlength="500">${safe(defaultReason)}</textarea></div>
+    <label class="checkline"><input type="checkbox" name="certify" required> Je confirme que le QG doit clôturer cette vacation à la place de l’agent.</label>
+    <button class="btn danger full" type="submit">Clôturer définitivement le poste actif</button>
+    <p class="muted end-shift-note">Aucune mission, MCI antérieure ou donnée de planning n’est supprimée.</p>
+  </form>`,'wide');
+
+  const modeSelect=document.querySelector('#qg-end-mode');
+  const customWrap=document.querySelector('#qg-end-custom-wrap');
+  modeSelect?.addEventListener('change',()=>customWrap?.classList.toggle('hidden',modeSelect.value!=='custom'));
+  document.querySelector('#qg-end-shift-form')?.addEventListener('submit',async e=>{
+    e.preventDefault();
+    const form=e.currentTarget,button=form.querySelector('button[type="submit"]');
+    const shiftKey=String(shift.id||'');
+    if(!shiftKey || qgEndShiftSubmissionLocks.has(shiftKey)) return;
+    const fd=new FormData(form);
+    const reason=String(fd.get('reason')||'').trim();
+    const endAt=qgClosureEffectiveDate(String(fd.get('endMode')||'now'),fd.get('customEnd'),latestMission);
+    if(!reason) return toast('Le motif de clôture est obligatoire.','warning');
+    if(!endAt || Number.isNaN(endAt.getTime())) return toast('Heure de fin invalide.','warning');
+    const startAt=timestampToDate(shift.startTime);
+    if(startAt && endAt.getTime()<startAt.getTime()) return toast('La fin de poste ne peut pas être antérieure à la prise de poste.','warning');
+    if(endAt.getTime()>Date.now()+60000) return toast('La fin de poste ne peut pas être enregistrée dans le futur.','warning');
+
+    qgEndShiftSubmissionLocks.add(shiftKey);
+    const original=button?.textContent||'Clôturer définitivement le poste actif';
+    if(button){button.disabled=true;button.textContent='Clôture QG en cours...';}
+    try{
+      // Relecture autoritaire juste avant écriture : évite une double clôture si l'agent vient de terminer lui-même.
+      const [latestShiftSnap,missionSnap]=await Promise.all([
+        getDoc(docRef('shifts',shiftKey)).catch(()=>null),
+        getDoc(docRef('missions',latestMission.id)).catch(()=>null)
+      ]);
+      if(!latestShiftSnap?.exists?.()) throw new Error('Le poste actif n’existe plus.');
+      const liveShift={id:latestShiftSnap.id,...latestShiftSnap.data()};
+      const liveMission=missionSnap?.exists?.()?{id:missionSnap.id,...missionSnap.data()}:latestMission;
+      if(liveShift.status==='completed' && liveMission.status!=='completed'){
+        // Réparation d'un éventuel échec réseau entre l'écriture autoritaire du shift et celle de la mission.
+        await updateDoc(docRef('missions',liveMission.id),{
+          status:'completed',actualEnd:liveShift.completedAt||Timestamp.fromDate(endAt),completedBy:currentUser.uid,completedByRole:'qg',
+          qgClosed:true,qgClosedAt:serverTimestamp(),qgClosedBy:currentUser.uid,qgClosedByNom:qgClosureAdminName(),qgClosureReason:reason,
+          qgClosureEffectiveAt:liveShift.completedAt||Timestamp.fromDate(endAt),updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+        });
+        closeModal();toast('Mission synchronisée avec le poste déjà clôturé.','success');return;
+      }
+      if(liveShift.status==='completed' && liveMission.status==='completed'){
+        closeModal();toast('Mission déjà terminée. Aucune double clôture créée.','success');return;
+      }
+      if(liveMission.status==='completed' && liveShift.status==='active') throw new Error('La mission est déjà marquée terminée mais le poste est encore actif. Vérification QG requise avant toute action.');
+      if(liveShift.status!=='active' || String(liveShift.missionId||'')!==String(liveMission.id)) throw new Error('Le poste actif ne correspond plus à cette mission. Aucune modification effectuée.');
+
+      // Comme dans la clôture agent, les compteurs sont obligatoires : une panne de lecture stoppe la clôture avant toute écriture.
+      const [reportsSnap,roundsSnap]=await Promise.all([
+        getDocs(query(collectionRef('reports'),where('shiftId','==',shiftKey))),
+        getDocs(query(collectionRef('rounds'),where('shiftId','==',shiftKey)))
+      ]);
+      const existingReports=reportsSnap.docs.map(d=>({id:d.id,...d.data()}));
+      const reportsCount=Number(reportsSnap.size ?? existingReports.length ?? 0);
+      const roundsCount=Number(roundsSnap.size ?? roundsSnap.docs?.length ?? 0);
+      const incidentsCount=existingReports.filter(r=>['Incident','Intervention','Anomalie'].includes(r.category)||['Important','Critique'].includes(r.severity)).length;
+      const score=computeConformityScore({shift:liveShift,reportsCount,roundsCount,incidentsCount});
+      const endTimestamp=Timestamp.fromDate(endAt);
+      const qgName=qgClosureAdminName();
+      const handoverBase=String(liveShift.handoverNote||'').trim();
+      const qgHandover=`Clôture QG : ${reason}`;
+      const handoverNote=handoverBase?`${handoverBase}\n${qgHandover}`:qgHandover;
+      const alreadyHasEnd=existingReports.some(r=>String(r.eventType||'')==='shift_end');
+      let finalReportsCount=reportsCount;
+
+      if(!alreadyHasEnd){
+        await addDoc(collectionRef('reports'),{
+          agentId:liveShift.agentId||liveMission.agentId,agentNom:liveShift.agentNom||liveMission.agentNom,
+          siteId:liveShift.siteId||liveMission.siteId,siteNom:liveShift.siteNom||liveMission.siteNom,
+          shiftId:shiftKey,missionId:liveMission.id,
+          category:'Fin de service',severity:'Normal',
+          message:`Clôture effectuée par le QG — ${reason}`,
+          status:'new',isLocked:true,systemGenerated:true,eventType:'shift_end',qgClosure:true,
+          qgClosedBy:currentUser.uid,qgClosedByNom:qgName,qgClosureReason:reason,occurredAt:endTimestamp,
+          createdAt:endTimestamp,recordedAt:serverTimestamp(),createdBy:currentUser.uid
+        });
+        finalReportsCount+=1;
+      }
+
+      await updateDoc(docRef('shifts',shiftKey),{
+        completedAt:endTimestamp,status:'completed',reportsCount:finalReportsCount,roundsCount,incidentsCount,conformityScore:score,
+        handoverNote,signatureStatement:false,qgClosed:true,qgClosedAt:serverTimestamp(),qgClosedBy:currentUser.uid,qgClosedByNom:qgName,
+        qgClosureReason:reason,qgClosureEffectiveAt:endTimestamp,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+      });
+      await updateDoc(docRef('missions',liveMission.id),{
+        status:'completed',actualEnd:endTimestamp,reportsCount:finalReportsCount,roundsCount,incidentsCount,conformityScore:score,
+        completedBy:currentUser.uid,completedByRole:'qg',qgClosed:true,qgClosedAt:serverTimestamp(),qgClosedBy:currentUser.uid,qgClosedByNom:qgName,
+        qgClosureReason:reason,qgClosureEffectiveAt:endTimestamp,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+      });
+
+      // Ne passe l'agent hors poste que s'il n'a réellement aucun autre shift actif au moment de la vérification.
+      if(liveShift.agentId){
+        const remaining=await getDocs(query(collectionRef('shifts'),where('agentId','==',liveShift.agentId),where('status','==','active'),limit(2))).catch(()=>null);
+        if(remaining && remaining.docs.length===0){
+          await updateDoc(docRef('users',liveShift.agentId),{statut:'hors_poste',siteActuel:null,siteActuelNom:null,lastSeen:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:currentUser.uid}).catch(error=>console.warn('Profil agent non rafraîchi après clôture QG',error));
+        }
+      }
+
+      await addAudit('qg_shift_force_closed',{
+        missionId:liveMission.id,shiftId:shiftKey,agentId:liveShift.agentId||liveMission.agentId||null,siteId:liveShift.siteId||liveMission.siteId||null,
+        effectiveEnd:endAt.toISOString(),reason,reportsCount:finalReportsCount,roundsCount,incidentsCount,conformityScore:score,endReportAlreadyPresent:alreadyHasEnd
+      }).catch(()=>{});
+
+      // Recrée/met à jour le même document stable : jamais de doublon de rapport de mission.
+      const [finalReportsSnap,finalShiftSnap,finalMissionSnap]=await Promise.all([
+        getDocs(query(collectionRef('reports'),where('shiftId','==',shiftKey))).catch(()=>({docs:[]})),
+        getDoc(docRef('shifts',shiftKey)).catch(()=>null),
+        getDoc(docRef('missions',liveMission.id)).catch(()=>null)
+      ]);
+      const finalShift=finalShiftSnap?.exists?.()?{id:finalShiftSnap.id,...finalShiftSnap.data()}:{...liveShift,status:'completed',completedAt:endTimestamp,handoverNote};
+      const finalMission=finalMissionSnap?.exists?.()?{id:finalMissionSnap.id,...finalMissionSnap.data()}:{...liveMission,status:'completed',actualEnd:endTimestamp};
+      const pdfData=missionPdfData({mission:finalMission,shift:finalShift,reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()}))});
+      const stableSource=String(pdfData.missionId||shiftKey).replace(/[^a-zA-Z0-9_-]/g,'-');
+      const documentId=`mission-${stableSource}`.slice(0,120);
+      await archivePdfDocument(pdfData,{silent:true,documentId}).catch(error=>console.warn('Rapport PDF après clôture QG non actualisé',error));
+
+      closeModal();
+      toast('Mission clôturée par le QG · agent libéré · rapport actualisé','success');
+    }catch(error){
+      console.error('Erreur clôture QG',error);
+      toast(userFriendlyError(error,'Impossible de clôturer cette mission depuis le QG.'),'error');
+      if(button&&button.isConnected){button.disabled=false;button.textContent=original;}
+    }finally{
+      qgEndShiftSubmissionLocks.delete(shiftKey);
+    }
+  });
+}
+
 function openPlanningMissionModal(missionId){
   const m = qgPlanningState.missions.find(x=>x.id===missionId) || qgMissionsCache.find(x=>x.id===missionId);
   if (!m) return toast('Mission introuvable.', 'warning');
@@ -2442,12 +2637,13 @@ function openPlanningMissionModal(missionId){
     <div class="mission-detail-head"><div><h3>${safe(m.siteNom || 'Site')}</h3><p>${safe(m.agentNom || 'Agent')} · ${safe(m.type || 'Mission')}</p></div><span class="pill ${missionStatusColor(m.status)}">${missionStatusLabel(m.status)}</span></div>
     <div class="mission-detail-grid"><div><strong>Début</strong><span>${dateText(m.scheduledStart)}</span></div><div><strong>Fin</strong><span>${dateText(m.scheduledEnd)}</span></div><div><strong>Durée</strong><span>${durationDays > 1 ? `${durationDays} jours` : hoursText(missionDurationMinutes(m))}</span></div><div><strong>Lecture agent</strong><span>${acknowledged?`Confirmée ${dateText(m.acknowledgedAt)}`:'À confirmer'}</span></div></div>
     <div class="setup-box"><strong>Consignes :</strong><br>${safe(m.instructions || 'Aucune consigne spécifique.').replace(/\n/g,'<br>')}</div>
-    <div class="grid cols-2"><button class="btn primary" id="mission-detail-edit">Modifier la vacation</button><button class="btn" id="mission-detail-pdf">Rapport PDF</button><button class="btn" id="mission-detail-duplicate-month">Dupliquer sur le mois</button><button class="btn" id="mission-detail-duplicate-day">Dupliquer demain</button>${!['completed','cancelled'].includes(m.status)?`<button class="btn danger" id="mission-detail-cancel">Annuler mission</button>`:''}${isStrictAdmin()?`<button class="btn ghost" id="mission-detail-delete">Supprimer définitivement</button>`:''}</div>
+    <div class="grid cols-2"><button class="btn primary" id="mission-detail-edit">Modifier la vacation</button><button class="btn" id="mission-detail-pdf">Rapport PDF</button><button class="btn" id="mission-detail-duplicate-month">Dupliquer sur le mois</button><button class="btn" id="mission-detail-duplicate-day">Dupliquer demain</button>${m.status==='active'&&roleAllowedAdmin()?`<button class="btn danger" id="mission-detail-qg-close">Clôturer pour l’agent</button>`:''}${!['completed','cancelled'].includes(m.status)?`<button class="btn danger" id="mission-detail-cancel">Annuler mission</button>`:''}${isStrictAdmin()?`<button class="btn ghost" id="mission-detail-delete">Supprimer définitivement</button>`:''}</div>
   </div>`, 'wide');
   document.querySelector('#mission-detail-edit')?.addEventListener('click', () => openPlanningMissionEditModal(m));
   document.querySelector('#mission-detail-pdf')?.addEventListener('click', () => printMissionById(m.id));
   document.querySelector('#mission-detail-duplicate-month')?.addEventListener('click', () => duplicateMissionAcrossMonth(m));
   document.querySelector('#mission-detail-duplicate-day')?.addEventListener('click', () => duplicateMissionWithOffset(m, 1));
+  document.querySelector('#mission-detail-qg-close')?.addEventListener('click', () => openQGEndShiftModal(m));
   document.querySelector('#mission-detail-cancel')?.addEventListener('click', async () => {
     if (!confirm('Annuler cette mission ?')) return;
     await updateDoc(docRef('missions', m.id), { status:'cancelled', planningRevision:missionRevision(m)+1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
