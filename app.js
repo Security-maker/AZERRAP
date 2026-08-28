@@ -35,6 +35,7 @@ let sosArming = false;
 let sosTriggered = false;
 let activeShiftCache = null;
 let takeShiftSubmissionLock = false;
+const checkInPhotoRecoveryLocks = new Set(); // V5.10.13 · reprise photo sans recréer de vacation
 const endShiftSubmissionLocks = new Set();
 const qgEndShiftSubmissionLocks = new Set(); // V5.10.10 · clôture QG d'une vacation active
 let lastSitesCache = [];
@@ -1012,12 +1013,24 @@ function dateOnlyKey(value){ const d=timestampToDate(value); return d?`${d.getFu
 
 async function renderAgentHome(){
   currentRoute = 'home';
-  const shift = await findActiveShift().catch(error => {
+  let shift = await findActiveShift().catch(error => {
     console.warn('Lecture du poste actif impossible', error);
     return navigator.onLine ? null : (activeShiftCache || null);
   });
+  // V5.10.13 : la présence réelle de la preuve est vérifiée dans reports.
+  // Cela corrige aussi un ancien shift marqué photo=true alors que l'upload avait échoué.
+  if (shift && navigator.onLine) shift = await reconcileActiveShiftPhotoState(shift);
   activeShiftCache = shift;
   const isWorking = !!shift;
+  // V5.10.12 : réconciliation douce après rechargement. Si un shift est réellement
+  // actif, l'interface agent doit immédiatement refléter "En poste" même si le
+  // champ secondaire du profil n'avait pas été synchronisé lors du démarrage.
+  if (shift && currentProfile?.statut !== 'en_poste') {
+    currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:shift.siteId || currentProfile.siteActuel || null, siteActuelNom:shift.siteNom || currentProfile.siteActuelNom || null };
+    updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel:shift.siteId || null, siteActuelNom:shift.siteNom || null, lastSeen:serverTimestamp() })
+      .then(()=>addAudit('agent_working_status_reconciled', { shiftId:shift.id, siteId:shift.siteId || null }).catch(()=>{}))
+      .catch(error=>console.warn('Réconciliation statut agent impossible — shift actif conservé comme référence', error));
+  }
   const body = `
     <section class="grid cols-3">
       <div class="card stat ${isWorking?'green':'orange'}"><div class="stat-label">Statut agent</div><div class="stat-value">${isWorking?'En poste':'Hors poste'}</div><div class="muted">${safe(currentProfile.prenom || '')} ${safe(currentProfile.nom || '')}</div></div>
@@ -1042,7 +1055,7 @@ async function renderAgentHome(){
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
-      ${isWorking ? shiftSummary(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer ma mission</button>` : takeShiftForm()}
+      ${isWorking ? shiftSummary(shift) + shiftPhotoRecoveryHtml(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer ma mission</button>` : takeShiftForm()}
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-title"><div><h2>Derniers rapports envoyés</h2><p>Flux personnel</p></div></div>
@@ -1057,6 +1070,203 @@ async function renderAgentHome(){
   });
   if (shift) loadAgentHandoverCard(shift);
   listenAgentRecentReports();
+}
+
+async function getShiftStartPhotoReports(shiftId){
+  if (!shiftId) return [];
+  const snap = await getDocs(query(collectionRef('reports'), where('shiftId','==',shiftId), limit(80)));
+  return (snap.docs || []).map(d => ({id:d.id, ...d.data()})).filter(r =>
+    r.eventType === 'shift_start' || r.eventType === 'shift_start_photo_recovery' || r.category === 'Prise de service'
+  );
+}
+function shiftStartReportHasPhoto(report){
+  return Boolean(report && (report.photoUrl || report.photoStoragePath || report.photoAvailable));
+}
+async function reconcileActiveShiftPhotoState(shift){
+  if (!shift?.id) return shift;
+  try {
+    const reports = await getShiftStartPhotoReports(shift.id);
+    const proofReport = reports.find(r => String(r.id||'') === String(shift.checkInPhotoReportId||'') && shiftStartReportHasPhoto(r))
+      || reports.find(r => r.eventType === 'shift_start_photo_recovery' && shiftStartReportHasPhoto(r))
+      || reports.find(r => r.eventType === 'shift_start' && shiftStartReportHasPhoto(r))
+      || reports.find(shiftStartReportHasPhoto)
+      || null;
+    if (proofReport) {
+      if (!shift.checkInPhotoAvailable || String(shift.checkInPhotoReportId||'') !== String(proofReport.id||'')) {
+        await updateDoc(docRef('shifts', shift.id), {
+          checkInPhotoAvailable:true,
+          checkInPhotoSource:proofReport.eventType === 'shift_start_photo_recovery' ? 'report_recovered' : 'report',
+          checkInPhotoReportId:proofReport.id,
+          proofStorageError:null,
+          updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+        }).catch(error => console.warn('Réconciliation preuve photo shift impossible', error));
+      }
+      return {...shift, checkInPhotoAvailable:true, checkInPhotoReportId:proofReport.id, checkInPhotoSource:proofReport.eventType === 'shift_start_photo_recovery' ? 'report_recovered' : 'report'};
+    }
+    if (shift.checkInPhotoAvailable) {
+      await updateDoc(docRef('shifts', shift.id), {
+        checkInPhotoAvailable:false, checkInPhotoSource:'missing_report',
+        updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+      }).catch(error => console.warn('Correction indicateur photo shift impossible', error));
+      return {...shift, checkInPhotoAvailable:false, checkInPhotoSource:'missing_report'};
+    }
+  } catch(error) {
+    // Une panne de lecture ne doit jamais dégrader un shift valide ni bloquer l'agent.
+    console.warn('Vérification preuve photo indisponible — état du shift conservé', error);
+  }
+  return shift;
+}
+function shiftPhotoRecoveryHtml(shift){
+  if (!shift || shift.checkInPhotoAvailable) return '';
+  return `<div class="setup-box warning-copy" style="margin-top:12px">
+    <strong>⚠️ Photo de prise de poste à finaliser</strong><br>
+    Ta vacation est bien active. La preuve photo n'a pas été enregistrée. <strong>Ne reprends pas un nouveau poste.</strong>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="resume-checkin-photo-btn" type="button">📷 Reprendre la photo</button></div>
+  </div>`;
+}
+async function recoverActiveShiftPhoto(shift, checkInPhoto){
+  const shiftKey = String(shift?.id || '');
+  if (!shiftKey || !checkInPhoto?.dataUrl) throw new Error('Photo ou vacation introuvable.');
+  if (checkInPhotoRecoveryLocks.has(shiftKey)) return null;
+  checkInPhotoRecoveryLocks.add(shiftKey);
+  try {
+    const latestSnap = await getDoc(docRef('shifts', shiftKey));
+    if (!latestSnap?.exists?.()) throw new Error('La vacation active est introuvable.');
+    const latest = {id:latestSnap.id, ...latestSnap.data()};
+    if (latest.status !== 'active') throw new Error('Cette vacation n’est plus active. Recharge l’application.');
+
+    // Si la preuve existe déjà mais que le flag du shift était simplement désynchronisé,
+    // on réutilise la preuve : aucune nouvelle MCI et aucun doublon.
+    const existingReports = await getShiftStartPhotoReports(shiftKey);
+    let proofReport = existingReports.find(r => String(r.id||'') === String(latest.checkInPhotoReportId||'') && shiftStartReportHasPhoto(r))
+      || existingReports.find(r => r.eventType === 'shift_start_photo_recovery' && shiftStartReportHasPhoto(r))
+      || existingReports.find(r => r.eventType === 'shift_start' && shiftStartReportHasPhoto(r))
+      || existingReports.find(shiftStartReportHasPhoto)
+      || null;
+
+    if (!proofReport) {
+      const hadStartEntry = existingReports.some(r => r.eventType === 'shift_start' || r.category === 'Prise de service');
+      const recoveryEventType = hadStartEntry ? 'shift_start_photo_recovery' : 'shift_start';
+      const agentNom = latest.agentNom || `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
+      const createdProofRef = await addDoc(collectionRef('reports'), {
+        agentId:currentUser.uid, agentNom,
+        siteId:latest.siteId, siteNom:latest.siteNom,
+        shiftId:shiftKey, missionId:latest.missionId || null,
+        category:hadStartEntry ? 'Information' : 'Prise de service', severity:'Normal',
+        message:hadStartEntry
+          ? `Preuve photographique de prise de poste régularisée sur ${latest.siteNom || 'le site'} après un incident de synchronisation.`
+          : `Prise de poste confirmée sur ${latest.siteNom || 'le site'}. Preuve photographique régularisée après un incident de synchronisation.`,
+        photoUrl:checkInPhoto.dataUrl, photoAvailable:true, photoProofAvailable:true,
+        photoBytes:Number(checkInPhoto.bytes||0), photoMimeType:checkInPhoto.mimeType||'image/jpeg',
+        photoWidth:Number(checkInPhoto.width||0), photoHeight:Number(checkInPhoto.height||0),
+        photoCapturedAt:checkInPhoto.capturedAt||new Date().toISOString(),
+        gps:latest.positionGPS || null,
+        status:'new', isLocked:true, systemGenerated:true,
+        eventType:recoveryEventType,
+        recoveryOfShiftStart:Boolean(hadStartEntry),
+        occurredAt:latest.startTime || serverTimestamp(),
+        createdAt:serverTimestamp(), createdBy:currentUser.uid
+      });
+      proofReport = {
+        id:createdProofRef.id,
+        eventType:recoveryEventType,
+        photoCapturedAt:checkInPhoto.capturedAt || new Date().toISOString(),
+        photoBytes:Number(checkInPhoto.bytes||0),
+        photoAvailable:true
+      };
+    }
+
+    await updateDoc(docRef('shifts', shiftKey), {
+      checkInPhotoAvailable:true,
+      checkInPhotoSource:proofReport?.eventType === 'shift_start_photo_recovery' ? 'report_recovered' : 'report',
+      checkInPhotoReportId:proofReport.id,
+      checkInPhotoCapturedAt:proofReport.photoCapturedAt || latest.checkInPhotoCapturedAt || null,
+      checkInPhotoBytes:Number(proofReport.photoBytes||latest.checkInPhotoBytes||0),
+      proofStorageError:null,
+      updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+    });
+
+    // Le shift reste l'autorité. On répare seulement les états secondaires qui ont pu
+    // ne pas être écrits après l'échec photo initial, sans réouvrir une mission terminée.
+    if (latest.missionId) {
+      const missionSnap = await getDoc(docRef('missions', latest.missionId)).catch(()=>null);
+      const missionData = missionSnap?.exists?.() ? missionSnap.data() : null;
+      if (missionData && !['completed','cancelled'].includes(String(missionData.status||''))) {
+        await updateDoc(docRef('missions', latest.missionId), {
+          status:'active', actualStart:latest.startTime || missionData.actualStart || serverTimestamp(), shiftId:shiftKey,
+          updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+        }).catch(error => console.warn('Réconciliation mission après reprise photo impossible', error));
+      }
+    }
+    try {
+      await updateDoc(docRef('users', currentUser.uid), {
+        statut:'en_poste', siteActuel:latest.siteId || null, siteActuelNom:latest.siteNom || null, lastSeen:serverTimestamp()
+      });
+    } catch(error) {
+      console.warn('Réconciliation profil après reprise photo différée', error);
+    }
+    currentProfile = {...currentProfile, statut:'en_poste', siteActuel:latest.siteId || null, siteActuelNom:latest.siteNom || null};
+    activeShiftCache = {...latest, checkInPhotoAvailable:true, checkInPhotoReportId:proofReport.id, checkInPhotoSource:proofReport?.eventType === 'shift_start_photo_recovery' ? 'report_recovered' : 'report'};
+    await addAudit('shift_start_photo_recovered', {shiftId:shiftKey, siteId:latest.siteId||null, missionId:latest.missionId||null, reportId:proofReport.id}).catch(()=>{});
+    return activeShiftCache;
+  } finally {
+    checkInPhotoRecoveryLocks.delete(shiftKey);
+  }
+}
+function openCheckInPhotoRecovery(shift){
+  if (!shift?.id) return toast('Vacation active introuvable.', 'error');
+  showModal('Finaliser la photo de prise de poste', `<form id="recover-checkin-photo-form" class="take-shift-flow">
+    <div class="setup-box warning-copy"><strong>Ta vacation est déjà ouverte.</strong><br>Cette action ajoute uniquement la preuve photo manquante. Elle ne crée pas une deuxième prise de poste.</div>
+    <section class="shift-step camera-checkin">
+      <div class="shift-step-head"><span class="shift-step-number">📷</span><div><h3>Nouvelle photo de contrôle</h3><p>Prends une photo actuelle du poste, de l'accès principal ou de ta présence sur site.</p></div></div>
+      <label class="camera-trigger" for="recover-checkin-photo-input"><span>📷 Ouvrir l’appareil photo</span><small>La photo sera rattachée à la vacation déjà active</small></label>
+      <input id="recover-checkin-photo-input" type="file" accept="image/*" capture="environment" hidden>
+      <div id="recover-checkin-photo-preview" class="camera-preview"><span>Aucune photo sélectionnée</span></div>
+      <div class="checkline camera-consent"><input type="checkbox" id="recover-checkin-photo-confirm" disabled> <span>Je confirme que cette photo correspond à mon poste actuel.</span></div>
+    </section>
+    <button class="btn primary full" id="recover-checkin-photo-submit" type="submit" disabled>Enregistrer la photo manquante</button>
+  </form>`);
+  const form = document.querySelector('#recover-checkin-photo-form');
+  const input = document.querySelector('#recover-checkin-photo-input');
+  const preview = document.querySelector('#recover-checkin-photo-preview');
+  const confirm = document.querySelector('#recover-checkin-photo-confirm');
+  const submit = document.querySelector('#recover-checkin-photo-submit');
+  let photo = null;
+  const sync = () => { if (submit) submit.disabled = !(photo && confirm?.checked) || checkInPhotoRecoveryLocks.has(String(shift.id)); };
+  input?.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (preview) preview.innerHTML = '<span>Compression et sécurisation de la photo...</span>';
+    try {
+      photo = await compressCheckInPhoto(file);
+      if (preview) preview.innerHTML = `<img src="${safe(photo.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo prête</strong><span>${Math.round(photo.bytes / 1024)} Ko · ${photo.width}×${photo.height}</span></div>`;
+      if (confirm) { confirm.disabled=false; confirm.checked=true; }
+    } catch(error) {
+      photo=null;
+      if (confirm) { confirm.disabled=true; confirm.checked=false; }
+      if (preview) preview.innerHTML = `<span>${safe(error.message || 'Photo impossible à traiter.')}</span>`;
+      toast(error.message || 'Photo impossible à traiter.', 'error');
+    }
+    sync();
+  });
+  confirm?.addEventListener('change', sync);
+  form?.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!isOnline()) return toast('Réseau indisponible — impossible d’enregistrer la photo.', 'error');
+    if (!photo || !confirm?.checked) return toast('La photo est obligatoire.', 'warning');
+    if (submit) { submit.disabled=true; submit.textContent='Enregistrement de la preuve...'; }
+    try {
+      await recoverActiveShiftPhoto(shift, photo);
+      closeModal();
+      toast('Photo de prise de poste enregistrée · vacation inchangée', 'success');
+      await renderAgentHome();
+    } catch(error) {
+      console.error(error);
+      toast(userFriendlyError(error, 'La photo n’a pas pu être enregistrée. Réessaie sans reprendre un nouveau poste.'), 'error');
+      if (submit) { submit.textContent='Réessayer l’enregistrement'; }
+      sync();
+    }
+  });
 }
 
 function shiftSummary(shift){
@@ -1183,6 +1393,7 @@ async function bindAgentHome(shift){
     refreshElapsed();
     const elapsedTimer = setInterval(refreshElapsed, 60000);
     unsubscribeList.push(() => clearInterval(elapsedTimer));
+    document.querySelector('#resume-checkin-photo-btn')?.addEventListener('click', () => openCheckInPhotoRecovery(shift));
     document.querySelector('#end-shift-btn')?.addEventListener('click', () => endShift(shift));
   }
 }
@@ -1221,7 +1432,8 @@ async function takeShift(site, mission=null, checkInPhoto=null){
       missionId: mission?.id || null, missionTitle: mission ? `${mission.siteNom || site.name} · ${dateText(mission.scheduledStart)}` : null,
       scheduledStart: mission?.scheduledStart || null, scheduledEnd: mission?.scheduledEnd || null, shiftType: mission?.type || 'Mission libre', missionInstructions: mission?.instructions || null,
       startTime: serverTimestamp(), positionGPS: gps, status:'active', handoverAcknowledged:false,
-      checkInPhotoAvailable:true, checkInPhotoCapturedAt:checkInPhoto.capturedAt, checkInPhotoBytes:checkInPhoto.bytes,
+      // V5.10.13 : la preuve passe à true uniquement après persistance réelle du rapport + Storage.
+      checkInPhotoAvailable:false, checkInPhotoSource:'pending', checkInPhotoCapturedAt:checkInPhoto.capturedAt, checkInPhotoBytes:checkInPhoto.bytes,
       createdAt: serverTimestamp(), createdBy: currentUser.uid
     });
     // V5.8.8.6 : la preuve de prise de poste est stockée dans le rapport automatique
@@ -1249,10 +1461,43 @@ async function takeShift(site, mission=null, checkInPhoto=null){
         checkInPhotoAvailable:false, checkInPhotoSource:'failed', proofStorageError:String(proofError?.message||proofError||'Erreur Storage'),
         updatedAt:serverTimestamp(), updatedBy:currentUser.uid
       }).catch(()=>{});
-      throw new Error(`La photo de prise de poste n’a pas pu être enregistrée : ${userFriendlyError(proofError, 'erreur Supabase Storage')}`);
+
+      // V5.10.13 : le shift existe déjà et reste l'autorité opérationnelle.
+      // On ne renvoie plus l'agent vers une deuxième prise de poste : on finalise les
+      // états secondaires et l'accueil lui propose de reprendre uniquement la photo.
+      if (mission?.id) await updateDoc(docRef('missions', mission.id), {
+        status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id,
+        updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+      }).catch(error => console.warn('Mission active non synchronisée après échec photo', error));
+      try {
+        await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name, lastSeen:serverTimestamp() });
+      } catch(profileSyncError) {
+        console.warn('Synchronisation statut agent différée — poste actif conservé', profileSyncError);
+      }
+      currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
+      activeShiftCache = {
+        id:shiftDoc.id, agentId:currentUser.uid, agentNom, siteId:site.id, siteNom:site.name,
+        missionId:mission?.id || null, scheduledStart:mission?.scheduledStart || null, scheduledEnd:mission?.scheduledEnd || null,
+        shiftType:mission?.type || 'Mission libre', startTime:new Date(), positionGPS:gps, status:'active',
+        checkInPhotoAvailable:false, checkInPhotoSource:'failed'
+      };
+      await addAudit('shift_start_photo_pending', { shiftId:shiftDoc.id, siteId:site.id, missionId:mission?.id || null, error:String(proofError?.message||proofError||'storage_error') }).catch(()=>{});
+      const startPushResult = await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()}).catch(error=>({ok:false,error:String(error?.message||error||'push_failed')}));
+      await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed',photoProof:false}).catch(()=>{});
+      toast('Poste démarré · photo non enregistrée. Utilise « Reprendre la photo » sans reprendre un nouveau poste.', 'warning');
+      await renderAgentHome();
+      return;
     }
     if (mission?.id) await updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
-    await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() });
+    // V5.10.12 : le shift actif est la source de vérité opérationnelle.
+    // Une erreur secondaire de synchronisation du profil ne doit jamais faire croire
+    // à l'agent que sa prise de poste a échoué après création du shift + preuve MCI.
+    try {
+      await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() });
+    } catch(profileSyncError) {
+      console.warn('Synchronisation statut agent différée — poste actif conservé', profileSyncError);
+      addAudit('agent_working_status_sync_failed', { shiftId:shiftDoc.id, siteId:site.id, missionId:mission?.id || null, error:String(profileSyncError?.message || profileSyncError || 'unknown') }).catch(()=>{});
+    }
     currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
     syncNativePushIdentity().catch(() => {});
     await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
@@ -1860,12 +2105,15 @@ async function showAgentOperationalDetails(shift, lat, lng){
     const [userSnap, proofSnap, startReportsSnap] = await Promise.all([
       shift.agentId ? getDoc(docRef('users', shift.agentId)).catch(()=>null) : Promise.resolve(null),
       shift.checkInPhotoAvailable ? getDoc(docRef('shiftProofs', shift.id)).catch(()=>null) : Promise.resolve(null),
-      shift.checkInPhotoAvailable ? getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id), orderBy('createdAt','asc'), limit(20))).catch(()=>({docs:[]})) : Promise.resolve({docs:[]})
+      getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id), orderBy('createdAt','asc'), limit(20))).catch(()=>({docs:[]}))
     ]);
     const user = userSnap?.exists?.() ? userSnap.data() : {};
     const legacyProof = proofSnap?.exists?.() ? proofSnap.data() : {};
     const startReports = (startReportsSnap?.docs || []).map(d => ({id:d.id, ...d.data()}));
-    const startReport = startReports.find(r => String(r.id||'')===String(shift.checkInPhotoReportId||''))
+    const startReport = startReports.find(r => String(r.id||'')===String(shift.checkInPhotoReportId||'') && shiftStartReportHasPhoto(r))
+      || startReports.find(r => r.eventType==='shift_start_photo_recovery' && shiftStartReportHasPhoto(r))
+      || startReports.find(r => r.eventType==='shift_start' && shiftStartReportHasPhoto(r))
+      || startReports.find(r => r.category==='Prise de service' && shiftStartReportHasPhoto(r))
       || startReports.find(r => r.eventType==='shift_start')
       || startReports.find(r => r.category==='Prise de service');
     const proof = legacyProof?.imageDataUrl ? legacyProof : {
@@ -1902,14 +2150,17 @@ async function showAgentOperationalDetails(shift, lat, lng){
 }
 
 function listenQGStats(){
-  const usersQ = query(collectionRef('users'));
+  // V5.10.12 : même source de vérité que la fenêtre "Agents en poste" et la carte QG.
+  // On compte les shifts réellement actifs, pas le champ secondaire users.statut.
+  const workingQ = query(collectionRef('shifts'), where('status','==','active'));
   const alertsQ = query(collectionRef('alerts'), where('statut','==','active'));
   const reportsQ = query(collectionRef('reports'), orderBy('createdAt','desc'), limit(200));
   const missionsQ = query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(200));
-  unsubscribeList.push(onSnapshot(usersQ, snap => {
-    const users = snap.docs.map(d=>d.data());
-    const working = users.filter(u => u.statut === 'en_poste').length;
-    setText('#stat-working', working);
+  unsubscribeList.push(onSnapshot(workingQ, snap => {
+    setText('#stat-working', snap.size);
+  }, error => {
+    console.warn('Compteur postes actifs QG indisponible', error);
+    setText('#stat-working', '—');
   }));
   unsubscribeList.push(onSnapshot(alertsQ, snap => setText('#stat-alerts', snap.size)));
   unsubscribeList.push(onSnapshot(reportsQ, snap => {
