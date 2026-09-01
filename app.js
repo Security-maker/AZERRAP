@@ -2008,17 +2008,21 @@ function dashboardDetailItem({title='', meta='', badge='', badgeClass='blue', ac
   return `<article class="dashboard-detail-item"><div class="dashboard-detail-main"><div class="dashboard-detail-title">${safe(title)}</div><div class="dashboard-detail-meta">${meta}</div></div><div class="dashboard-detail-side">${badge ? `<span class="pill ${safe(badgeClass)}">${safe(badge)}</span>` : ''}${actions}</div></article>`;
 }
 function dashboardMissionStatusLabel(status){
-  return ({planned:'Planifiée', active:'En cours', completed:'Terminée', cancelled:'Annulée', late:'En retard'}[status] || status || 'Planifiée');
+  return ({planned:'Planifiée', assigned:'Planifiée', active:'En cours', completed:'Terminée', cancelled:'Annulée', late:'En retard'}[status] || status || 'Planifiée');
 }
 function missionStatusClass(status){
-  return ({active:'green', completed:'blue', cancelled:'red', late:'red', planned:'orange'}[status] || 'blue');
+  return ({active:'green', completed:'blue', cancelled:'red', late:'red', planned:'orange', assigned:'orange'}[status] || 'blue');
+}
+function dashboardMissionIsCurrent(mission){
+  const status=String(mission?.status || 'planned');
+  return ['planned','assigned','active'].includes(status);
 }
 async function showQGDashboardDetail(type){
   const config = {
     working:{ title:'Agents en poste', subtitle:'Présence terrain en temps réel' },
     alerts:{ title:'Alertes actives', subtitle:'Alertes nécessitant une prise en charge' },
     incidents:{ title:'Incidents des dernières 24h', subtitle:'Incidents et interventions déclarés' },
-    missions:{ title:'Missions du jour', subtitle:'Planning opérationnel de la journée' }
+    missions:{ title:'Missions du jour', subtitle:'Missions planifiées ou en cours qui commencent aujourd’hui' }
   }[type];
   if (!config) return;
   showModal(config.title, `<div class="dashboard-detail-head"><p>${safe(config.subtitle)}</p><span class="dashboard-detail-live">Mise à jour à ${safe(new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}))}</span></div><div id="dashboard-detail-content" class="dashboard-detail-list"><div class="empty">Chargement...</div></div>`, 'wide');
@@ -2081,11 +2085,11 @@ async function showQGDashboardDetail(type){
       const snap = await getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(400)));
       const today = startOfDay(new Date());
       const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => {
-        if(missionIsDraft(row)) return false;
+        if(missionIsDraft(row) || !dashboardMissionIsCurrent(row)) return false;
         return missionStartsOnLocalDay(row, today);
       }).sort((a,b) => (timestampToDate(a.scheduledStart)?.getTime() || 0) - (timestampToDate(b.scheduledStart)?.getTime() || 0));
-      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission ne commence aujourd’hui.');
-      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} commençant aujourd’hui</span></div>` + rows.map(row => dashboardDetailItem({
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission planifiée ou en cours ne commence aujourd’hui.');
+      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} planifiée${rows.length>1?'s':''} ou en cours commençant aujourd’hui</span></div>` + rows.map(row => dashboardDetailItem({
         title:row.siteNom || row.title || 'Mission',
         meta:`Agent : <strong>${safe(row.agentNom || 'Non affecté')}</strong><br>${safe(dateText(row.scheduledStart))} → ${safe(dateText(row.scheduledEnd))}<br>${safe(row.type || row.missionType || 'Mission de sécurité')}`,
         badge:dashboardMissionStatusLabel(row.status), badgeClass:missionStatusClass(row.status),
@@ -2184,7 +2188,7 @@ function listenQGStats(){
   unsubscribeList.push(onSnapshot(missionsQ, snap => {
     const today = startOfDay(new Date());
     const rows = snap.docs.map(d=>d.data());
-    setText('#stat-missions', rows.filter(m => !missionIsDraft(m) && missionStartsOnLocalDay(m, today)).length);
+    setText('#stat-missions', rows.filter(m => !missionIsDraft(m) && dashboardMissionIsCurrent(m) && missionStartsOnLocalDay(m, today)).length);
   }, () => setText('#stat-missions', '0')));
 }
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
@@ -2314,8 +2318,8 @@ async function renderQGMissions(){
       <form id="mission-form">
         <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" id="mission-agent" required></select></div><div class="field"><label>Site</label><select class="select" name="siteId" id="mission-site" required></select></div></div>
         <div class="form-grid"><div class="field"><label>Début prévu</label><input class="input" type="datetime-local" name="scheduledStart" required></div><div class="field"><label>Fin prévue</label><input class="input" type="datetime-local" name="scheduledEnd" required></div></div>
-        <div class="form-grid"><div class="field"><label>Type de mission</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div><div class="field"><label>Répétition</label><select class="select" name="repeatMode" id="mission-repeat"><option value="none">Aucune</option><option value="daily">Tous les jours</option><option value="weekly">Chaque semaine</option></select></div></div>
-        <div class="field repeat-count-wrap" style="display:none"><label>Nombre de missions à créer</label><input class="input" type="number" name="repeatCount" min="2" max="31" value="2"></div>
+        <div class="form-grid"><div class="field"><label>Type de mission</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div><div class="field"><label>Répétition</label><select class="select" name="repeatMode" id="mission-repeat">${planningRepeatOptionsHtml()}</select></div></div>
+        <div class="setup-box" id="mission-repeat-preview">1 mission sera créée à la date choisie.</div>
         <div class="field"><label>Consignes mission</label><textarea class="textarea" name="instructions" placeholder="Consignes spécifiques pour cette vacation..."></textarea></div>
         <button class="btn primary full" type="submit">Planifier la mission</button>
       </form>
@@ -2362,14 +2366,16 @@ async function renderQGMissions(){
     sessionStorage.removeItem('sentinellePlanningAgentId');
   }
   qgPlanningState.collaboratorMonth = document.querySelector('#collaborator-planning-month')?.value || localMonthValue(today);
-  document.querySelector('#mission-repeat')?.addEventListener('change', e => {
-    const wrap = document.querySelector('.repeat-count-wrap');
-    if (wrap) wrap.style.display = e.target.value === 'none' ? 'none' : 'block';
-  });
-  document.querySelector('#mission-form').addEventListener('submit', async e => {
+  const missionForm = document.querySelector('#mission-form');
+  const updateMissionRepeatPreview = () => updatePlanningRepeatPreview(missionForm, '#mission-repeat-preview');
+  missionForm?.querySelector('[name="repeatMode"]')?.addEventListener('change', updateMissionRepeatPreview);
+  missionForm?.querySelector('[name="scheduledStart"]')?.addEventListener('input', updateMissionRepeatPreview);
+  missionForm?.querySelector('[name="scheduledEnd"]')?.addEventListener('input', updateMissionRepeatPreview);
+  updateMissionRepeatPreview();
+  missionForm?.addEventListener('submit', async e => {
     e.preventDefault();
     const result = await createMissionFromForm(new FormData(e.currentTarget));
-    if (result?.ok) { e.currentTarget.reset(); document.querySelector('.repeat-count-wrap')?.style.setProperty('display','none'); }
+    if (result?.ok) { e.currentTarget.reset(); updateMissionRepeatPreview(); }
   });
   bindPlanningControls();
   bindCollaboratorPlanningControls();
@@ -2613,6 +2619,52 @@ function movePlanningDate(offsetDays){
   if (input) input.value = planningLocalDateKey(next);
   renderPlanningBoard();
 }
+function planningRepeatOptionsHtml(){
+  return `<option value="none">Une seule mission</option>
+    <option value="month_daily">Tous les jours jusqu’à la fin du mois</option>
+    <option value="month_weekday_1">Tous les lundis jusqu’à la fin du mois</option>
+    <option value="month_weekday_2">Tous les mardis jusqu’à la fin du mois</option>
+    <option value="month_weekday_3">Tous les mercredis jusqu’à la fin du mois</option>
+    <option value="month_weekday_4">Tous les jeudis jusqu’à la fin du mois</option>
+    <option value="month_weekday_5">Tous les vendredis jusqu’à la fin du mois</option>
+    <option value="month_weekday_6">Tous les samedis jusqu’à la fin du mois</option>
+    <option value="month_weekday_0">Tous les dimanches jusqu’à la fin du mois</option>`;
+}
+function planningRepeatOccurrences(startValue,endValue,repeatMode='none'){
+  const start=timestampToDate(startValue), end=timestampToDate(endValue);
+  if(!start||!end||end<=start) return [];
+  if(repeatMode==='none') return [{start:new Date(start),end:new Date(end)}];
+  const month=start.getMonth(), year=start.getFullYear();
+  const baseDay=startOfDay(start);
+  const out=[];
+  let wantedWeekday=null;
+  if(String(repeatMode).startsWith('month_weekday_')) wantedWeekday=Number(String(repeatMode).split('_').pop());
+  for(let offset=0; offset<31; offset++){
+    const day=addDays(baseDay,offset);
+    if(day.getMonth()!==month||day.getFullYear()!==year) break;
+    if(repeatMode==='month_daily'||(Number.isInteger(wantedWeekday)&&day.getDay()===wantedWeekday)){
+      out.push({start:addDays(start,offset),end:addDays(end,offset)});
+    }
+  }
+  return out;
+}
+function planningRepeatPreviewText(startValue,endValue,repeatMode='none'){
+  const rows=planningRepeatOccurrences(startValue,endValue,repeatMode);
+  if(!rows.length) return 'Aucune occurrence ne correspond à ce choix avant la fin du mois.';
+  if(rows.length===1&&repeatMode==='none') return '1 mission sera créée à la date choisie.';
+  const fmt=d=>d.toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit',year:'numeric'});
+  return `${rows.length} mission${rows.length>1?'s':''} seront créées · du ${fmt(rows[0].start)} au ${fmt(rows.at(-1).start)}. La répétition s’arrête automatiquement à la fin du mois.`;
+}
+function updatePlanningRepeatPreview(form,selector){
+  if(!form) return;
+  const box=document.querySelector(selector);
+  if(!box) return;
+  const start=fromLocalInputValue(form.querySelector('[name="scheduledStart"]')?.value || '');
+  const end=fromLocalInputValue(form.querySelector('[name="scheduledEnd"]')?.value || '');
+  const mode=form.querySelector('[name="repeatMode"]')?.value || 'none';
+  box.textContent=planningRepeatPreviewText(start?.toDate?.(),end?.toDate?.(),mode);
+}
+
 async function createMissionFromForm(fd, options={}){
   const siteId = fd.get('siteId') || options.siteId;
   const agentId = fd.get('agentId') || options.agentId;
@@ -2623,18 +2675,18 @@ async function createMissionFromForm(fd, options={}){
   if (!site || !agent || !scheduledStart || !scheduledEnd) { toast('Mission incomplète.', 'warning'); return { ok:false }; }
   if ((scheduledEnd.toDate?.()?.getTime() || 0) <= (scheduledStart.toDate?.()?.getTime() || 0)) { toast('La fin doit être après le début.', 'warning'); return { ok:false }; }
   const repeatMode = fd.get('repeatMode') || 'none';
-  const repeatCount = repeatMode === 'none' ? 1 : Math.max(2, Math.min(31, Number(fd.get('repeatCount') || 2)));
-  const interval = repeatMode === 'weekly' ? 7 : 1;
+  const proposed = planningRepeatOccurrences(scheduledStart.toDate(),scheduledEnd.toDate(),repeatMode);
+  const repeatCount = proposed.length;
+  if(!repeatCount){ toast('Aucune occurrence ne correspond à cette répétition avant la fin du mois.', 'warning'); return { ok:false }; }
   const seriesId = repeatCount > 1 ? `serie_${id()}` : null;
-  const proposed = Array.from({length:repeatCount},(_,i)=>({start:addDays(scheduledStart.toDate(),i*interval),end:addDays(scheduledEnd.toDate(),i*interval)}));
   const conflicts = proposed.flatMap(period=>missionConflicts(agent.id,period.start,period.end));
   if (conflicts.length && !confirm(`${conflicts.length} conflit(s) de planning détecté(s) pour cet agent. Enregistrer quand même ?`)) return { ok:false };
   if (typeof options.onBeforeWrite === 'function') options.onBeforeWrite({ site, agent, repeatCount });
   const created = [], publishedCreated=[];
   const publicationByMonth=new Map();
   for (let i=0; i<repeatCount; i++){
-    const startDate = addDays(scheduledStart.toDate(), i * interval);
-    const endDate = addDays(scheduledEnd.toDate(), i * interval);
+    const startDate = proposed[i].start;
+    const endDate = proposed[i].end;
     const month=localMonthValue(startDate);
     if(!publicationByMonth.has(month)) publicationByMonth.set(month,await getMonthlyPlanningPublication(month));
     const isDraft=publicationByMonth.get(month)?.status==='draft';
@@ -2691,16 +2743,18 @@ function openPlanningQuickMissionModal({ resourceId='', date=null, forceMode='',
     <div class="setup-box">Création rapide depuis le planning. Les missions de plusieurs jours seront affichées en barre continue sur toutes les cases concernées.</div>
     <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" required>${agentOptions}</select></div><div class="field"><label>Site</label><select class="select" name="siteId" required>${siteOptions}</select></div></div>
     <div class="form-grid"><div class="field"><label>Début prévu</label><input class="input" type="datetime-local" name="scheduledStart" value="${toLocalInputValue(start)}" required></div><div class="field"><label>Fin prévue</label><input class="input" type="datetime-local" name="scheduledEnd" value="${toLocalInputValue(end)}" required></div></div>
-    <div class="form-grid"><div class="field"><label>Type</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div><div class="field"><label>Répétition</label><select class="select" name="repeatMode" id="quick-repeat"><option value="none">Aucune</option><option value="daily">Tous les jours</option><option value="weekly">Chaque semaine</option></select></div></div>
-    <div class="field quick-repeat-count" style="display:none"><label>Nombre de missions à créer</label><input class="input" type="number" name="repeatCount" min="2" max="31" value="2"></div>
+    <div class="form-grid"><div class="field"><label>Type</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div><div class="field"><label>Répétition</label><select class="select" name="repeatMode" id="quick-repeat">${planningRepeatOptionsHtml()}</select></div></div>
+    <div class="setup-box" id="quick-repeat-preview">1 mission sera créée à la date choisie.</div>
     <div class="field"><label>Consignes</label><textarea class="textarea" name="instructions" placeholder="Consignes spécifiques..."></textarea></div>
     <button class="btn primary full" type="submit">Créer la mission</button>
   </form>`, 'wide');
-  document.querySelector('#quick-repeat')?.addEventListener('change', e => {
-    const wrap = document.querySelector('.quick-repeat-count');
-    if (wrap) wrap.style.display = e.target.value === 'none' ? 'none' : 'block';
-  });
-  document.querySelector('#planning-quick-form')?.addEventListener('submit', async e => {
+  const quickForm=document.querySelector('#planning-quick-form');
+  const updateQuickRepeatPreview=()=>updatePlanningRepeatPreview(quickForm,'#quick-repeat-preview');
+  quickForm?.querySelector('[name="repeatMode"]')?.addEventListener('change',updateQuickRepeatPreview);
+  quickForm?.querySelector('[name="scheduledStart"]')?.addEventListener('input',updateQuickRepeatPreview);
+  quickForm?.querySelector('[name="scheduledEnd"]')?.addEventListener('input',updateQuickRepeatPreview);
+  updateQuickRepeatPreview();
+  quickForm?.addEventListener('submit', async e => {
     e.preventDefault();
     if (planningQuickCreateLocked) return;
     const fd = new FormData(e.currentTarget);
