@@ -36,6 +36,34 @@ let sosTriggered = false;
 let activeShiftCache = null;
 let takeShiftSubmissionLock = false;
 const checkInPhotoRecoveryLocks = new Set(); // V5.10.13 · reprise photo sans recréer de vacation
+const CHECKIN_DRAFT_KEY = 'sentinelle_checkin_draft_v51020'; // V5.10.20 · survit à un rechargement Android après appareil photo
+function loadCheckInDraft(){
+  try {
+    const raw = sessionStorage.getItem(CHECKIN_DRAFT_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw);
+    if (!draft || draft.agentId !== currentUser?.uid || !draft.savedAt || Date.now()-Number(draft.savedAt) > 30*60*1000) {
+      sessionStorage.removeItem(CHECKIN_DRAFT_KEY);
+      return null;
+    }
+    return draft;
+  } catch(error) { console.warn('Brouillon prise de poste illisible', error); return null; }
+}
+function saveCheckInDraft({photo=null, missionId='', siteId=''}={}){
+  try {
+    if (!currentUser?.uid) return;
+    const previous = loadCheckInDraft() || {};
+    const payload = {
+      agentId: currentUser.uid,
+      missionId: String(missionId ?? previous.missionId ?? ''),
+      siteId: String(siteId ?? previous.siteId ?? ''),
+      photo: photo || previous.photo || null,
+      savedAt: Date.now()
+    };
+    sessionStorage.setItem(CHECKIN_DRAFT_KEY, JSON.stringify(payload));
+  } catch(error) { console.warn('Brouillon prise de poste non mémorisé', error); }
+}
+function clearCheckInDraft(){ try { sessionStorage.removeItem(CHECKIN_DRAFT_KEY); } catch(_) {} }
 const endShiftSubmissionLocks = new Set();
 const qgEndShiftSubmissionLocks = new Set(); // V5.10.10 · clôture QG d'une vacation active
 let lastSitesCache = [];
@@ -1321,6 +1349,7 @@ async function bindAgentHome(shift){
     const submitButton = document.querySelector('#take-shift-submit');
     const shiftErrorBox = document.querySelector('#take-shift-error');
     let checkInPhoto = null;
+    const restoredCheckInDraft = loadCheckInDraft();
     const clearShiftError = () => {
       if (!shiftErrorBox) return;
       shiftErrorBox.style.display = 'none';
@@ -1341,6 +1370,7 @@ async function bindAgentHome(shift){
         clearShiftError();
         const m = missions.find(x => x.id === missionSelect.value);
         if (m && select) select.value = m.siteId;
+        saveCheckInDraft({ photo:checkInPhoto, missionId:missionSelect.value || '', siteId:select?.value || '' });
         renderTakeShiftInfo(sites.find(s => s.id === (m?.siteId || select?.value)), m);
         syncSubmitState();
       });
@@ -1348,10 +1378,19 @@ async function bindAgentHome(shift){
         missionSelect.value = pendingMissionSelectionId;
         pendingMissionSelectionId = null;
         missionSelect.dispatchEvent(new Event('change'));
+      } else if (restoredCheckInDraft?.missionId && missions.some(m => m.id === restoredCheckInDraft.missionId)) {
+        missionSelect.value = restoredCheckInDraft.missionId;
+        const restoredMission = missions.find(m => m.id === restoredCheckInDraft.missionId);
+        if (select && restoredMission?.siteId) select.value = restoredMission.siteId;
+        renderTakeShiftInfo(sites.find(s => s.id === (restoredMission?.siteId || select?.value)), restoredMission);
+      } else if (restoredCheckInDraft?.siteId && sites.some(site => site.id === restoredCheckInDraft.siteId)) {
+        if (select) select.value = restoredCheckInDraft.siteId;
+        renderTakeShiftInfo(sites.find(site => site.id === restoredCheckInDraft.siteId), null);
       }
     }
     if (select) select.addEventListener('change', () => {
       clearShiftError();
+      saveCheckInDraft({ photo:checkInPhoto, missionId:missionSelect?.value || '', siteId:select.value || '' });
       renderTakeShiftInfo(sites.find(s => s.id === select.value), missions.find(m => m.id === missionSelect?.value));
       syncSubmitState();
     });
@@ -1364,6 +1403,9 @@ async function bindAgentHome(shift){
         checkInPhoto = await compressCheckInPhoto(file);
         if (photoPreview) photoPreview.innerHTML = `<img src="${safe(checkInPhoto.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo prête</strong><span>${Math.round(checkInPhoto.bytes / 1024)} Ko · ${checkInPhoto.width}×${checkInPhoto.height}</span></div>`;
         if (photoConfirm) { photoConfirm.disabled = false; photoConfirm.checked = true; }
+        // V5.10.20 : Android peut recharger la PWA en revenant de l'appareil photo.
+        // On mémorise immédiatement la photo compressée et la sélection pour restaurer le formulaire.
+        saveCheckInDraft({ photo:checkInPhoto, missionId:missionSelect?.value || '', siteId:select?.value || '' });
         toast('Photo de prise de poste enregistrée.', 'success');
       } catch(error) {
         console.error(error);
@@ -1374,7 +1416,17 @@ async function bindAgentHome(shift){
       }
       syncSubmitState();
     });
-    photoConfirm?.addEventListener('change', syncSubmitState);
+    if (restoredCheckInDraft?.photo?.dataUrl) {
+      checkInPhoto = restoredCheckInDraft.photo;
+      if (photoPreview) photoPreview.innerHTML = `<img src="${safe(checkInPhoto.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo restaurée</strong><span>${Math.round(Number(checkInPhoto.bytes||0) / 1024)} Ko · ${Number(checkInPhoto.width||0)}×${Number(checkInPhoto.height||0)}</span></div>`;
+      if (photoConfirm) { photoConfirm.disabled = false; photoConfirm.checked = true; }
+      syncSubmitState();
+      setTimeout(() => toast('Photo restaurée après le rechargement Android · tu peux démarrer la mission.', 'success'), 250);
+    }
+    photoConfirm?.addEventListener('change', () => {
+      saveCheckInDraft({ photo:checkInPhoto, missionId:missionSelect?.value || '', siteId:select?.value || '' });
+      syncSubmitState();
+    });
     const form = document.querySelector('#take-shift-form');
     form?.addEventListener('submit', async e => {
       e.preventDefault();
@@ -1467,7 +1519,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
   let shiftDoc = null;
   try {
     const existing = await findActiveShift();
-    if (existing) return toast('Un poste est déjà ouvert. Termine-le avant d’en ouvrir un autre.', 'warning');
+    if (existing) { clearCheckInDraft(); return toast('Un poste est déjà ouvert. Termine-le avant d’en ouvrir un autre.', 'warning'); }
     if (!checkInPhoto?.dataUrl) return toast('La photo de prise de poste est obligatoire.', 'warning');
     const gps = await getGPS({ enableHighAccuracy:true, timeout:12000, maximumAge:0 });
     const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
@@ -1528,6 +1580,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
       await addAudit('shift_start_photo_pending', { shiftId:shiftDoc.id, siteId:site.id, missionId:mission?.id || null, error:String(proofError?.message||proofError||'storage_error') }).catch(()=>{});
       const startPushResult = await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()}).catch(error=>({ok:false,error:String(error?.message||error||'push_failed')}));
       await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed',photoProof:false}).catch(()=>{});
+      clearCheckInDraft();
       toast('Poste démarré · photo non enregistrée. Utilise « Reprendre la photo » sans reprendre un nouveau poste.', 'warning');
       await renderAgentHome();
       return true;
@@ -1547,6 +1600,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
     const startPushResult = await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()});
     await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed'}).catch(()=>{});
+    clearCheckInDraft();
     toast(startPushResult?.ok ? 'Prise de poste confirmée · QG notifié' : 'Prise de poste confirmée', 'success');
     await renderAgentHome();
     return true;
@@ -1557,6 +1611,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     if (isDuplicateActiveShiftError(error)) {
       const existing = await findActiveShift().catch(()=>null);
       activeShiftCache = existing || activeShiftCache;
+      clearCheckInDraft();
       toast('Prise de poste déjà enregistrée · aucun doublon créé', 'success');
       await renderAgentHome();
       return true;
@@ -1569,6 +1624,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     if (shiftDoc && existingAfterError) {
       activeShiftCache = existingAfterError;
       currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:existingAfterError.siteId || site?.id || null, siteActuelNom:existingAfterError.siteNom || site?.name || null };
+      clearCheckInDraft();
       toast('Poste bien ouvert · une étape secondaire n’a pas pu être synchronisée.', 'warning');
       await renderAgentHome();
       return true;
