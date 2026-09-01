@@ -1295,6 +1295,7 @@ function takeShiftForm(){
       <div class="shift-step-head"><span class="shift-step-number">2</span><div><h3>Lire les consignes</h3><p>Les informations critiques du site sont mises en avant.</p></div></div>
       <div id="site-info" class="empty">Sélectionne une mission ou un site pour afficher les consignes.</div>
     </section>
+    <div id="take-shift-error" class="setup-box" style="display:none;border-color:rgba(255,82,92,.5);background:rgba(255,82,92,.08);color:#ffd9dc" role="alert" aria-live="assertive"></div>
     <section class="shift-step camera-checkin">
       <div class="shift-step-head"><span class="shift-step-number">3</span><div><h3>Photo de prise de poste</h3><p>Prends une photo du poste, de l’accès principal ou de ta présence sur site.</p></div></div>
       <label class="camera-trigger" for="checkin-photo-input"><span>📷 Ouvrir l’appareil photo</span><small>Obligatoire pour démarrer la mission</small></label>
@@ -1318,7 +1319,13 @@ async function bindAgentHome(shift){
     const photoPreview = document.querySelector('#checkin-photo-preview');
     const photoConfirm = document.querySelector('#checkin-photo-confirm');
     const submitButton = document.querySelector('#take-shift-submit');
+    const shiftErrorBox = document.querySelector('#take-shift-error');
     let checkInPhoto = null;
+    const clearShiftError = () => {
+      if (!shiftErrorBox) return;
+      shiftErrorBox.style.display = 'none';
+      shiftErrorBox.innerHTML = '';
+    };
     const selectedSite = () => {
       const mission = missions.find(m => m.id === missionSelect?.value) || null;
       return sites.find(s => s.id === (mission?.siteId || select?.value)) || null;
@@ -1331,6 +1338,7 @@ async function bindAgentHome(shift){
     if (missionSelect) {
       missionSelect.innerHTML = `<option value="">Prise de poste libre</option>` + missions.map(m => `<option value="${safe(m.id)}">${safe(m.siteNom || 'Site')} · ${dateText(m.scheduledStart)}</option>`).join('');
       missionSelect.addEventListener('change', () => {
+        clearShiftError();
         const m = missions.find(x => x.id === missionSelect.value);
         if (m && select) select.value = m.siteId;
         renderTakeShiftInfo(sites.find(s => s.id === (m?.siteId || select?.value)), m);
@@ -1343,10 +1351,12 @@ async function bindAgentHome(shift){
       }
     }
     if (select) select.addEventListener('change', () => {
+      clearShiftError();
       renderTakeShiftInfo(sites.find(s => s.id === select.value), missions.find(m => m.id === missionSelect?.value));
       syncSubmitState();
     });
     photoInput?.addEventListener('change', async () => {
+      clearShiftError();
       const file = photoInput.files?.[0];
       if (!file) return;
       if (photoPreview) photoPreview.innerHTML = '<span>Compression et sécurisation de la photo...</span>';
@@ -1377,6 +1387,7 @@ async function bindAgentHome(shift){
       const site = sites.find(s => s.id === (mission?.siteId || fd.get('siteId')));
       if (!site) return toast('Sélectionne un site.', 'warning');
       if (!checkInPhoto || !photoConfirm?.checked) return toast('La photo de prise de poste est obligatoire.', 'warning');
+      clearShiftError();
       takeShiftSubmissionLock = true;
       submitButton.disabled = true;
       submitButton.textContent = 'Prise de poste en cours...';
@@ -1384,6 +1395,12 @@ async function bindAgentHome(shift){
         await takeShift(site, mission, checkInPhoto);
       } finally {
         takeShiftSubmissionLock = false;
+        // V5.10.19 : si le démarrage a échoué avant création du shift,
+        // on reste sur le formulaire et on rend le bouton utilisable pour une nouvelle tentative.
+        if (document.body.contains(form) && submitButton) {
+          submitButton.textContent = 'Réessayer la prise de poste';
+          syncSubmitState();
+        }
       }
     });
   } else {
@@ -1415,6 +1432,32 @@ function renderTakeShiftInfo(site, mission){
     <section class="site-instructions"><span>CONSIGNES OPÉRATIONNELLES</span><p>${instructions}</p></section>
   </article>`;
 }
+function showTakeShiftPersistentError(error){
+  const box = document.querySelector('#take-shift-error');
+  if (!box) return;
+  const code = String(error?.code || '').trim();
+  const raw = String(error?.message || error || 'Erreur inconnue').trim();
+  const low = `${code} ${raw}`.toLowerCase();
+  let title = 'Prise de poste impossible';
+  let advice = 'Vérifie la connexion puis appuie sur « Réessayer la prise de poste ». Si le problème persiste, fais une capture de ce message et préviens le QG.';
+  if (low.includes('row-level security') || code === '42501') {
+    title = 'Autorisation Supabase refusée';
+    advice = 'La vacation n’a pas été ouverte. Ne multiplie pas les tentatives : transmets cette erreur au QG.';
+  } else if (low.includes('jwt') || low.includes('session') || low.includes('refresh token') || low.includes('not authenticated')) {
+    title = 'Session de connexion invalide';
+    advice = 'Déconnecte-toi puis reconnecte-toi à Sentinelle avant de réessayer.';
+  } else if (low.includes('location') || low.includes('géoloc') || low.includes('geoloc') || low.includes('permission denied') || code === '1') {
+    title = 'Localisation non disponible';
+    advice = 'Autorise la localisation pour Sentinelle dans les réglages du téléphone puis réessaie.';
+  } else if (low.includes('network') || low.includes('fetch') || low.includes('offline') || low.includes('réseau')) {
+    title = 'Connexion réseau insuffisante';
+    advice = 'La vacation n’a pas été ouverte. Vérifie Internet puis réessaie une seule fois.';
+  }
+  box.style.display = 'block';
+  box.innerHTML = `<strong style="display:block;font-size:16px;margin-bottom:6px">❌ ${safe(title)}</strong><div>${safe(advice)}</div><div style="margin-top:10px;font-size:12px;opacity:.85;word-break:break-word"><strong>Détail technique :</strong> ${safe(code ? `[${code}] ${raw}` : raw)}</div>`;
+  box.scrollIntoView?.({behavior:'smooth', block:'center'});
+}
+
 function isDuplicateActiveShiftError(error){
   const code = String(error?.code || '');
   const text = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
@@ -1487,7 +1530,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
       await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed',photoProof:false}).catch(()=>{});
       toast('Poste démarré · photo non enregistrée. Utilise « Reprendre la photo » sans reprendre un nouveau poste.', 'warning');
       await renderAgentHome();
-      return;
+      return true;
     }
     if (mission?.id) await updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
     // V5.10.12 : le shift actif est la source de vérité opérationnelle.
@@ -1506,6 +1549,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed'}).catch(()=>{});
     toast(startPushResult?.ok ? 'Prise de poste confirmée · QG notifié' : 'Prise de poste confirmée', 'success');
     await renderAgentHome();
+    return true;
   } catch(error){
     console.error(error);
     // V5.8.8.6 : le garde-fou SQL est l'autorité finale contre les démarrages
@@ -1515,10 +1559,26 @@ async function takeShift(site, mission=null, checkInPhoto=null){
       activeShiftCache = existing || activeShiftCache;
       toast('Prise de poste déjà enregistrée · aucun doublon créé', 'success');
       await renderAgentHome();
-      return;
+      return true;
     }
-    toast(error.message || 'Erreur prise de poste. Vérifie les RLS Supabase.', 'error');
-    await renderAgentHome();
+
+    // V5.10.19 : avant d'afficher un échec, on vérifie qu'aucun shift n'a
+    // réellement été créé. Une erreur tardive (push, synchronisation secondaire...)
+    // ne doit jamais inviter l'agent à recommencer une prise de poste déjà ouverte.
+    const existingAfterError = shiftDoc ? (await findActiveShift().catch(()=>null)) : null;
+    if (shiftDoc && existingAfterError) {
+      activeShiftCache = existingAfterError;
+      currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:existingAfterError.siteId || site?.id || null, siteActuelNom:existingAfterError.siteNom || site?.name || null };
+      toast('Poste bien ouvert · une étape secondaire n’a pas pu être synchronisée.', 'warning');
+      await renderAgentHome();
+      return true;
+    }
+
+    // Échec réel AVANT création du shift : on ne quitte plus l'écran.
+    // L'erreur reste visible et le bouton devient « Réessayer la prise de poste ».
+    showTakeShiftPersistentError(error);
+    toast(error.message || 'Prise de poste impossible.', 'error');
+    return false;
   }
 }
 async function loadAgentHandoverCard(shift){
