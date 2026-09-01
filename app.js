@@ -2319,6 +2319,7 @@ async function renderQGMissions(){
         <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" id="mission-agent" required></select></div><div class="field"><label>Site</label><select class="select" name="siteId" id="mission-site" required></select></div></div>
         <div class="form-grid"><div class="field"><label>Début prévu</label><input class="input" type="datetime-local" name="scheduledStart" required></div><div class="field"><label>Fin prévue</label><input class="input" type="datetime-local" name="scheduledEnd" required></div></div>
         <div class="form-grid"><div class="field"><label>Type de mission</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div><div class="field"><label>Répétition</label><select class="select" name="repeatMode" id="mission-repeat">${planningRepeatOptionsHtml()}</select></div></div>
+        ${planningRepeatMonthlyControlsHtml('mission')}
         <div class="setup-box" id="mission-repeat-preview">1 mission sera créée à la date choisie.</div>
         <div class="field"><label>Consignes mission</label><textarea class="textarea" name="instructions" placeholder="Consignes spécifiques pour cette vacation..."></textarea></div>
         <button class="btn primary full" type="submit">Planifier la mission</button>
@@ -2367,10 +2368,12 @@ async function renderQGMissions(){
   }
   qgPlanningState.collaboratorMonth = document.querySelector('#collaborator-planning-month')?.value || localMonthValue(today);
   const missionForm = document.querySelector('#mission-form');
-  const updateMissionRepeatPreview = () => updatePlanningRepeatPreview(missionForm, '#mission-repeat-preview');
+  const updateMissionRepeatPreview = () => updatePlanningRepeatPreview(missionForm, '#mission-repeat-preview', 'mission');
   missionForm?.querySelector('[name="repeatMode"]')?.addEventListener('change', updateMissionRepeatPreview);
   missionForm?.querySelector('[name="scheduledStart"]')?.addEventListener('input', updateMissionRepeatPreview);
   missionForm?.querySelector('[name="scheduledEnd"]')?.addEventListener('input', updateMissionRepeatPreview);
+  missionForm?.querySelector('[name="repeatMonth"]')?.addEventListener('input', updateMissionRepeatPreview);
+  missionForm?.querySelectorAll('[name="repeatWeekdays"]').forEach(el=>el.addEventListener('change', updateMissionRepeatPreview));
   updateMissionRepeatPreview();
   missionForm?.addEventListener('submit', async e => {
     e.preventDefault();
@@ -2621,48 +2624,84 @@ function movePlanningDate(offsetDays){
 }
 function planningRepeatOptionsHtml(){
   return `<option value="none">Une seule mission</option>
-    <option value="month_daily">Tous les jours jusqu’à la fin du mois</option>
-    <option value="month_weekday_1">Tous les lundis jusqu’à la fin du mois</option>
-    <option value="month_weekday_2">Tous les mardis jusqu’à la fin du mois</option>
-    <option value="month_weekday_3">Tous les mercredis jusqu’à la fin du mois</option>
-    <option value="month_weekday_4">Tous les jeudis jusqu’à la fin du mois</option>
-    <option value="month_weekday_5">Tous les vendredis jusqu’à la fin du mois</option>
-    <option value="month_weekday_6">Tous les samedis jusqu’à la fin du mois</option>
-    <option value="month_weekday_0">Tous les dimanches jusqu’à la fin du mois</option>`;
+    <option value="month_daily">Tous les jours du mois</option>
+    <option value="month_custom">Jours personnalisés du mois</option>`;
 }
-function planningRepeatOccurrences(startValue,endValue,repeatMode='none'){
+function planningRepeatMonthlyControlsHtml(prefix){
+  const days=[['1','Lundi'],['2','Mardi'],['3','Mercredi'],['4','Jeudi'],['5','Vendredi'],['6','Samedi'],['0','Dimanche']];
+  return `<div class="setup-box hidden" id="${prefix}-repeat-monthly" style="margin-top:10px">
+    <div class="form-grid" style="align-items:end"><div class="field"><label>Mois concerné</label><input class="input" type="month" name="repeatMonth" id="${prefix}-repeat-month"></div><div class="field"><div style="font-size:.88rem;opacity:.82;padding-bottom:10px">Les horaires de la mission modèle seront repris sur chaque date sélectionnée.</div></div></div>
+    <div class="hidden" id="${prefix}-repeat-weekdays"><label style="display:block;margin-bottom:8px;font-weight:800">Jours à créer chaque semaine</label><div style="display:flex;flex-wrap:wrap;gap:8px">
+      ${days.map(([value,label])=>`<label style="display:flex;align-items:center;gap:7px;padding:9px 12px;border:1px solid rgba(148,163,184,.35);border-radius:999px;cursor:pointer;background:rgba(15,23,42,.35)"><input type="checkbox" name="repeatWeekdays" value="${value}"> <span>${label}</span></label>`).join('')}
+    </div></div>
+  </div>`;
+}
+function planningRepeatConfigFromForm(form){
+  return {
+    repeatMonth: form?.querySelector('[name="repeatMonth"]')?.value || '',
+    weekdays: [...(form?.querySelectorAll('[name="repeatWeekdays"]:checked') || [])].map(el=>Number(el.value)).filter(Number.isInteger)
+  };
+}
+function syncPlanningRepeatControls(form,prefix){
+  if(!form) return;
+  const mode=form.querySelector('[name="repeatMode"]')?.value || 'none';
+  const monthly=form.querySelector(`#${prefix}-repeat-monthly`);
+  const weekdayBox=form.querySelector(`#${prefix}-repeat-weekdays`);
+  monthly?.classList.toggle('hidden',mode==='none');
+  weekdayBox?.classList.toggle('hidden',mode!=='month_custom');
+  const monthInput=form.querySelector('[name="repeatMonth"]');
+  if(mode!=='none'&&monthInput&&!monthInput.value){
+    const start=fromLocalInputValue(form.querySelector('[name="scheduledStart"]')?.value || '');
+    const d=start?.toDate?.();
+    if(d) monthInput.value=localMonthValue(d);
+  }
+}
+function planningRepeatOccurrences(startValue,endValue,repeatMode='none',config={}){
   const start=timestampToDate(startValue), end=timestampToDate(endValue);
   if(!start||!end||end<=start) return [];
   if(repeatMode==='none') return [{start:new Date(start),end:new Date(end)}];
-  const month=start.getMonth(), year=start.getFullYear();
-  const baseDay=startOfDay(start);
+  const monthMatch=String(config.repeatMonth||'').match(/^(\d{4})-(\d{2})$/);
+  const year=monthMatch?Number(monthMatch[1]):start.getFullYear();
+  const month=monthMatch?Number(monthMatch[2])-1:start.getMonth();
+  if(!Number.isInteger(year)||!Number.isInteger(month)||month<0||month>11) return [];
+  const weekdays=[...new Set((config.weekdays||[]).map(Number).filter(n=>Number.isInteger(n)&&n>=0&&n<=6))];
+  if(repeatMode==='month_custom'&&!weekdays.length) return [];
+  const calendarDayOffset=Math.round((Date.UTC(end.getFullYear(),end.getMonth(),end.getDate())-Date.UTC(start.getFullYear(),start.getMonth(),start.getDate()))/86400000);
   const out=[];
-  let wantedWeekday=null;
-  if(String(repeatMode).startsWith('month_weekday_')) wantedWeekday=Number(String(repeatMode).split('_').pop());
-  for(let offset=0; offset<31; offset++){
-    const day=addDays(baseDay,offset);
-    if(day.getMonth()!==month||day.getFullYear()!==year) break;
-    if(repeatMode==='month_daily'||(Number.isInteger(wantedWeekday)&&day.getDay()===wantedWeekday)){
-      out.push({start:addDays(start,offset),end:addDays(end,offset)});
-    }
+  const lastDay=new Date(year,month+1,0).getDate();
+  for(let dayNumber=1;dayNumber<=lastDay;dayNumber++){
+    const day=new Date(year,month,dayNumber,12,0,0,0);
+    const matches=repeatMode==='month_daily'||(repeatMode==='month_custom'&&weekdays.includes(day.getDay()));
+    if(!matches) continue;
+    const occurrenceStart=new Date(year,month,dayNumber,start.getHours(),start.getMinutes(),start.getSeconds(),start.getMilliseconds());
+    const occurrenceEnd=new Date(year,month,dayNumber+calendarDayOffset,end.getHours(),end.getMinutes(),end.getSeconds(),end.getMilliseconds());
+    out.push({start:occurrenceStart,end:occurrenceEnd});
   }
   return out;
 }
-function planningRepeatPreviewText(startValue,endValue,repeatMode='none'){
-  const rows=planningRepeatOccurrences(startValue,endValue,repeatMode);
-  if(!rows.length) return 'Aucune occurrence ne correspond à ce choix avant la fin du mois.';
+function planningRepeatPreviewText(startValue,endValue,repeatMode='none',config={}){
+  if(repeatMode==='month_custom'&&!(config.weekdays||[]).length) return 'Coche au moins un jour de la semaine pour afficher les missions à créer.';
+  const rows=planningRepeatOccurrences(startValue,endValue,repeatMode,config);
+  if(!rows.length) return 'Aucune occurrence ne correspond à ce choix.';
   if(rows.length===1&&repeatMode==='none') return '1 mission sera créée à la date choisie.';
   const fmt=d=>d.toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit',year:'numeric'});
-  return `${rows.length} mission${rows.length>1?'s':''} seront créées · du ${fmt(rows[0].start)} au ${fmt(rows.at(-1).start)}. La répétition s’arrête automatiquement à la fin du mois.`;
+  const monthLabel=rows[0].start.toLocaleDateString('fr-FR',{month:'long',year:'numeric'});
+  if(repeatMode==='month_custom'){
+    const dates=rows.map(r=>String(r.start.getDate()).padStart(2,'0')).join(', ');
+    return `${rows.length} mission${rows.length>1?'s':''} seront créées en ${monthLabel} · dates : ${dates}.`;
+  }
+  return `${rows.length} mission${rows.length>1?'s':''} seront créées sur tout le mois de ${monthLabel} · du ${fmt(rows[0].start)} au ${fmt(rows.at(-1).start)}.`;
 }
-function updatePlanningRepeatPreview(form,selector){
+function updatePlanningRepeatPreview(form,selector,prefix=''){
   if(!form) return;
+  if(prefix) syncPlanningRepeatControls(form,prefix);
   const box=document.querySelector(selector);
   if(!box) return;
   const start=fromLocalInputValue(form.querySelector('[name="scheduledStart"]')?.value || '');
   const end=fromLocalInputValue(form.querySelector('[name="scheduledEnd"]')?.value || '');
   const mode=form.querySelector('[name="repeatMode"]')?.value || 'none';
-  box.textContent=planningRepeatPreviewText(start?.toDate?.(),end?.toDate?.(),mode);
+  const config=planningRepeatConfigFromForm(form);
+  box.textContent=planningRepeatPreviewText(start?.toDate?.(),end?.toDate?.(),mode,config);
 }
 
 async function createMissionFromForm(fd, options={}){
@@ -2675,9 +2714,11 @@ async function createMissionFromForm(fd, options={}){
   if (!site || !agent || !scheduledStart || !scheduledEnd) { toast('Mission incomplète.', 'warning'); return { ok:false }; }
   if ((scheduledEnd.toDate?.()?.getTime() || 0) <= (scheduledStart.toDate?.()?.getTime() || 0)) { toast('La fin doit être après le début.', 'warning'); return { ok:false }; }
   const repeatMode = fd.get('repeatMode') || 'none';
-  const proposed = planningRepeatOccurrences(scheduledStart.toDate(),scheduledEnd.toDate(),repeatMode);
+  const repeatConfig = { repeatMonth:fd.get('repeatMonth') || '', weekdays:fd.getAll('repeatWeekdays').map(Number).filter(Number.isInteger) };
+  if(repeatMode==='month_custom'&&!repeatConfig.weekdays.length){ toast('Sélectionne au moins un jour de la semaine.', 'warning'); return { ok:false }; }
+  const proposed = planningRepeatOccurrences(scheduledStart.toDate(),scheduledEnd.toDate(),repeatMode,repeatConfig);
   const repeatCount = proposed.length;
-  if(!repeatCount){ toast('Aucune occurrence ne correspond à cette répétition avant la fin du mois.', 'warning'); return { ok:false }; }
+  if(!repeatCount){ toast('Aucune occurrence ne correspond à cette répétition.', 'warning'); return { ok:false }; }
   const seriesId = repeatCount > 1 ? `serie_${id()}` : null;
   const conflicts = proposed.flatMap(period=>missionConflicts(agent.id,period.start,period.end));
   if (conflicts.length && !confirm(`${conflicts.length} conflit(s) de planning détecté(s) pour cet agent. Enregistrer quand même ?`)) return { ok:false };
@@ -2695,6 +2736,7 @@ async function createMissionFromForm(fd, options={}){
       siteColor: normalizeHexColor(site.planningColor) || planningColorForSite(site.id), hourlyRate: Number(site.hourlyRate || 0),
       scheduledStart: Timestamp.fromDate(startDate), scheduledEnd: Timestamp.fromDate(endDate), type:fd.get('type') || 'Surveillance', instructions:fd.get('instructions') || '', status:'planned',
       planningRevision:1, acknowledgedAt:null, acknowledgedBy:null, acknowledgedRevision:0, seriesId, repeatMode: repeatMode === 'none' ? null : repeatMode,
+      repeatMonth: repeatMode === 'none' ? null : (repeatConfig.repeatMonth || localMonthValue(startDate)), repeatWeekdays: repeatMode === 'month_custom' ? repeatConfig.weekdays : [],
       planningMonth:month, publicationStatus:isDraft?'draft':'published', monthlyPlanning:isDraft,
       createdAt:serverTimestamp(), createdBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
     };
@@ -2744,15 +2786,18 @@ function openPlanningQuickMissionModal({ resourceId='', date=null, forceMode='',
     <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" required>${agentOptions}</select></div><div class="field"><label>Site</label><select class="select" name="siteId" required>${siteOptions}</select></div></div>
     <div class="form-grid"><div class="field"><label>Début prévu</label><input class="input" type="datetime-local" name="scheduledStart" value="${toLocalInputValue(start)}" required></div><div class="field"><label>Fin prévue</label><input class="input" type="datetime-local" name="scheduledEnd" value="${toLocalInputValue(end)}" required></div></div>
     <div class="form-grid"><div class="field"><label>Type</label><select class="select" name="type"><option>Surveillance</option><option>Ronde</option><option>Gardiennage</option><option>Événementiel</option><option>Levée de doute</option><option>Astreinte intervention</option></select></div><div class="field"><label>Répétition</label><select class="select" name="repeatMode" id="quick-repeat">${planningRepeatOptionsHtml()}</select></div></div>
+    ${planningRepeatMonthlyControlsHtml('quick')}
     <div class="setup-box" id="quick-repeat-preview">1 mission sera créée à la date choisie.</div>
     <div class="field"><label>Consignes</label><textarea class="textarea" name="instructions" placeholder="Consignes spécifiques..."></textarea></div>
     <button class="btn primary full" type="submit">Créer la mission</button>
   </form>`, 'wide');
   const quickForm=document.querySelector('#planning-quick-form');
-  const updateQuickRepeatPreview=()=>updatePlanningRepeatPreview(quickForm,'#quick-repeat-preview');
+  const updateQuickRepeatPreview=()=>updatePlanningRepeatPreview(quickForm,'#quick-repeat-preview','quick');
   quickForm?.querySelector('[name="repeatMode"]')?.addEventListener('change',updateQuickRepeatPreview);
   quickForm?.querySelector('[name="scheduledStart"]')?.addEventListener('input',updateQuickRepeatPreview);
   quickForm?.querySelector('[name="scheduledEnd"]')?.addEventListener('input',updateQuickRepeatPreview);
+  quickForm?.querySelector('[name="repeatMonth"]')?.addEventListener('input',updateQuickRepeatPreview);
+  quickForm?.querySelectorAll('[name="repeatWeekdays"]').forEach(el=>el.addEventListener('change',updateQuickRepeatPreview));
   updateQuickRepeatPreview();
   quickForm?.addEventListener('submit', async e => {
     e.preventDefault();
