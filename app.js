@@ -772,7 +772,7 @@ function agentPlanningCalendarHtml(missions, sitesById, monthValue){
       const color = normalizeHexColor(m.siteColor)||normalizeHexColor(site.planningColor)||'#64D0FF';
       return `<button class="agent-month-chip" style="--mission-color:${color}" data-agent-mission-open="${safe(m.id)}"><strong>${safe(timeOnlyText(m.scheduledStart))}</strong><span>${safe(m.siteNom||site.name||'Site')}</span></button>`;
     }).join('');
-    cells.push(`<div class="agent-month-cell ${isToday(date)?'today':''}"><div class="agent-month-day"><strong>${day}</strong><span>${safe(date.toLocaleDateString('fr-FR',{weekday:'short'}).replace('.',''))}</span></div>${chips}${dayMissions.length>3?`<button class="agent-month-more" data-agent-day-open="${date.toISOString().slice(0,10)}">+${dayMissions.length-3}</button>`:''}</div>`);
+    cells.push(`<div class="agent-month-cell ${isToday(date)?'today':''}"><div class="agent-month-day"><strong>${day}</strong><span>${safe(date.toLocaleDateString('fr-FR',{weekday:'short'}).replace('.',''))}</span></div>${chips}${dayMissions.length>3?`<button class="agent-month-more" data-agent-day-open="${dateOnlyKey(date)}">+${dayMissions.length-3}</button>`:''}</div>`);
   }
   return `<div class="agent-month-weekdays">${['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'].map(x=>`<span>${x}</span>`).join('')}</div><div class="agent-month-grid">${cells.join('')}</div>`;
 }
@@ -782,7 +782,7 @@ function agentPlanningListHtml(missions, sitesById, monthValue){
   if(!rows.length) return '<div class="empty">Aucune mission sur ce mois.</div>';
   const groups = new Map();
   rows.forEach(m=>{
-    const d=timestampToDate(m.scheduledStart); const key=d?d.toISOString().slice(0,10):'sans-date';
+    const d=timestampToDate(m.scheduledStart); const key=d?dateOnlyKey(d):'sans-date';
     if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(m);
   });
   return [...groups.entries()].map(([key,list])=>{
@@ -1709,8 +1709,9 @@ function mciForm(shift){
     <div class="field"><label>Modèle rapide</label><select class="select" id="mci-template"><option value="">Écrire librement</option>${templates.map(t=>`<option value="${safe(t)}">${safe(t.slice(0,72))}${t.length>72?'…':''}</option>`).join('')}</select></div>
     <div class="field"><label>Niveau</label><select class="select" name="severity"><option>Normal</option><option>À surveiller</option><option>Important</option><option>Critique</option></select></div>
     <div class="field"><label>Rapport</label><textarea class="textarea" name="message" required placeholder="Décrire l’événement de manière factuelle..."></textarea></div>
-    <div class="btn-row"><button type="button" class="btn" id="voice-btn">🎙️ Micro</button><label class="btn" for="mci-photo-input">📷 Photo</label><button type="button" class="btn" id="gps-btn">◎ GPS</button></div>
+    <div class="btn-row"><button type="button" class="btn" id="voice-btn">🎙️ Micro</button><label class="btn" for="mci-photo-input">📷 Prendre une photo</label><label class="btn" for="mci-photo-import-input">🖼️ Importer une photo</label><button type="button" class="btn" id="gps-btn">◎ GPS</button></div>
     <input id="mci-photo-input" type="file" accept="image/*" capture="environment" style="display:none">
+    <input id="mci-photo-import-input" type="file" accept="image/*" style="display:none">
     <div class="camera-preview" id="mci-photo-preview" style="display:none"></div>
     <input type="hidden" name="gpsRequested" value="false">
     <div id="voice-state" class="muted" style="margin:12px 0;font-size:12px"></div>
@@ -1721,7 +1722,9 @@ function bindMCIForm(shift){
   const form = document.querySelector('#mci-form');
   let pendingMciPhoto = null;
   const photoInput = document.querySelector('#mci-photo-input');
+  const photoImportInput = document.querySelector('#mci-photo-import-input');
   const photoPreview = document.querySelector('#mci-photo-preview');
+  let pendingMciPhotoOrigin = null;
   const refreshPhotoPreview = () => {
     if (!photoPreview) return;
     if (!pendingMciPhoto?.dataUrl) {
@@ -1730,10 +1733,13 @@ function bindMCIForm(shift){
       return;
     }
     photoPreview.style.display = 'flex';
-    photoPreview.innerHTML = `<img src="${safe(pendingMciPhoto.dataUrl)}" alt="Photo jointe à la main courante"><div><strong>Photo prête</strong><span>${Math.max(1,Math.round(Number(pendingMciPhoto.bytes || 0)/1024))} Ko · compression automatique</span><button type="button" class="btn small ghost" id="mci-photo-remove">Retirer</button></div>`;
+    const originText = pendingMciPhotoOrigin === 'import' ? 'Photo importée depuis l’appareil' : 'Photo prise maintenant';
+    photoPreview.innerHTML = `<img src="${safe(pendingMciPhoto.dataUrl)}" alt="Photo jointe à la main courante"><div><strong>Photo prête</strong><span>${safe(originText)} · ${Math.max(1,Math.round(Number(pendingMciPhoto.bytes || 0)/1024))} Ko · compression automatique</span><button type="button" class="btn small ghost" id="mci-photo-remove">Retirer</button></div>`;
     document.querySelector('#mci-photo-remove')?.addEventListener('click', () => {
       pendingMciPhoto = null;
+      pendingMciPhotoOrigin = null;
       if (photoInput) photoInput.value = '';
+      if (photoImportInput) photoImportInput.value = '';
       refreshPhotoPreview();
     });
   };
@@ -1755,22 +1761,29 @@ function bindMCIForm(shift){
     }, 900);
   });
   document.querySelector('#gps-btn')?.addEventListener('click', () => { form.gpsRequested.value = 'true'; toast('Position GPS demandée pour ce rapport.', 'success'); });
-  photoInput?.addEventListener('change', async event => {
+  const handleMciPhotoSelection = async (event, origin='camera') => {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      toast('Compression de la photo...', 'info');
+      toast(origin === 'import' ? 'Import et compression de la photo...' : 'Compression de la photo...', 'info');
       pendingMciPhoto = await compressCheckInPhoto(file);
+      pendingMciPhotoOrigin = origin;
+      // Une seule photo jointe à la MCI : choisir une nouvelle photo remplace la précédente.
+      if (origin === 'camera' && photoImportInput) photoImportInput.value = '';
+      if (origin === 'import' && photoInput) photoInput.value = '';
       refreshPhotoPreview();
-      toast('Photo ajoutée à la main courante.', 'success');
+      toast(origin === 'import' ? 'Photo importée et ajoutée à la main courante.' : 'Photo ajoutée à la main courante.', 'success');
     } catch(error) {
       console.error(error);
       pendingMciPhoto = null;
+      pendingMciPhotoOrigin = null;
       event.target.value = '';
       refreshPhotoPreview();
       toast(userFriendlyError(error, 'Photo impossible.'), 'error');
     }
-  });
+  };
+  photoInput?.addEventListener('change', event => handleMciPhotoSelection(event, 'camera'));
+  photoImportInput?.addEventListener('change', event => handleMciPhotoSelection(event, 'import'));
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -1803,6 +1816,9 @@ function bindMCIForm(shift){
       form.reset();
       form.category.value = 'Ronde';
       pendingMciPhoto = null;
+      pendingMciPhotoOrigin = null;
+      if (photoInput) photoInput.value = '';
+      if (photoImportInput) photoImportInput.value = '';
       refreshPhotoPreview();
       document.querySelectorAll('.cat-btn').forEach((btn,index) => btn.classList.toggle('active', index===0));
       toast(onlineAtSubmission ? 'Rapport envoyé au QG' : 'Rapport enregistré hors ligne. Il sera transmis au retour du réseau.', onlineAtSubmission ? 'success' : 'warning');
@@ -2063,16 +2079,13 @@ async function showQGDashboardDetail(type){
     }
     if (type === 'missions') {
       const snap = await getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(400)));
-      const today = new Date(); today.setHours(0,0,0,0);
-      const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
+      const today = startOfDay(new Date());
       const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => {
         if(missionIsDraft(row)) return false;
-        const start = timestampToDate(row.scheduledStart)?.getTime() || 0;
-        const end = timestampToDate(row.scheduledEnd)?.getTime() || start;
-        return start < tomorrow.getTime() && end >= today.getTime();
+        return missionStartsOnLocalDay(row, today);
       }).sort((a,b) => (timestampToDate(a.scheduledStart)?.getTime() || 0) - (timestampToDate(b.scheduledStart)?.getTime() || 0));
-      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission planifiée aujourd’hui.');
-      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} couvrant la journée</span></div>` + rows.map(row => dashboardDetailItem({
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission ne commence aujourd’hui.');
+      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} commençant aujourd’hui</span></div>` + rows.map(row => dashboardDetailItem({
         title:row.siteNom || row.title || 'Mission',
         meta:`Agent : <strong>${safe(row.agentNom || 'Non affecté')}</strong><br>${safe(dateText(row.scheduledStart))} → ${safe(dateText(row.scheduledEnd))}<br>${safe(row.type || row.missionType || 'Mission de sécurité')}`,
         badge:dashboardMissionStatusLabel(row.status), badgeClass:missionStatusClass(row.status),
@@ -2169,10 +2182,9 @@ function listenQGStats(){
     setText('#stat-incidents', rows.filter(r => ['Incident','Intervention'].includes(r.category) && (r.createdAt?.toDate?.()?.getTime() || 0) > since).length);
   }));
   unsubscribeList.push(onSnapshot(missionsQ, snap => {
-    const today = new Date(); today.setHours(0,0,0,0);
-    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
+    const today = startOfDay(new Date());
     const rows = snap.docs.map(d=>d.data());
-    setText('#stat-missions', rows.filter(m => { const start=timestampToDate(m.scheduledStart)?.getTime() || 0; const end=timestampToDate(m.scheduledEnd)?.getTime() || start; return !missionIsDraft(m) && start<tomorrow.getTime() && end>=today.getTime(); }).length);
+    setText('#stat-missions', rows.filter(m => !missionIsDraft(m) && missionStartsOnLocalDay(m, today)).length);
   }, () => setText('#stat-missions', '0')));
 }
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
@@ -2296,7 +2308,7 @@ function listenQGMissionsPreview(){
 async function renderQGMissions(){
   currentRoute = 'missions';
   const today = new Date();
-  const defaultDate = today.toISOString().slice(0,10);
+  const defaultDate = planningLocalDateKey(today);
   const body = `<section class="grid cols-2 mission-admin-grid planning-admin-zone">
     <div class="card"><div class="card-title"><div><h2>Créer une mission</h2><p>Planification rapide agent / site / horaires</p></div></div>
       <form id="mission-form">
@@ -2339,7 +2351,7 @@ async function renderQGMissions(){
   const agents = usersSnap.docs.map(d=>({id:d.id,...d.data()}));
   qgPlanningState.sites = sites;
   qgPlanningState.agents = agents;
-  qgPlanningState.startDate = startOfDay(new Date(defaultDate));
+  qgPlanningState.startDate = startOfDay(planningDateFromKey(defaultDate));
   document.querySelector('#mission-site').innerHTML = `<option value="">Choisir un site</option>` + sites.map(s=>`<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
   document.querySelector('#mission-agent').innerHTML = `<option value="">Choisir un agent</option>` + agents.map(a=>`<option value="${safe(a.id)}">${safe((a.prenom||'')+' '+(a.nom||''))}</option>`).join('');
   const collaboratorSelect = document.querySelector('#collaborator-planning-agent');
@@ -2387,14 +2399,14 @@ function bindPlanningControls(){
   });
   document.querySelector('#planning-status')?.addEventListener('change', e => { qgPlanningState.status = e.target.value || ''; renderPlanningBoard(); });
   document.querySelector('#planning-search')?.addEventListener('input', renderPlanningBoard);
-  document.querySelector('#planning-date')?.addEventListener('change', e => { qgPlanningState.startDate = startOfDay(new Date(e.target.value)); renderPlanningBoard(); });
+  document.querySelector('#planning-date')?.addEventListener('change', e => { qgPlanningState.startDate = startOfDay(planningDateFromKey(e.target.value)); renderPlanningBoard(); });
   document.querySelector('#planning-prev')?.addEventListener('click', () => movePlanningDate(-qgPlanningState.days));
   document.querySelector('#planning-next')?.addEventListener('click', () => movePlanningDate(qgPlanningState.days));
   document.querySelector('#planning-today')?.addEventListener('click', () => {
     const next = startOfDay(new Date());
     qgPlanningState.startDate = next;
     const input = document.querySelector('#planning-date');
-    if (input) input.value = next.toISOString().slice(0,10);
+    if (input) input.value = planningLocalDateKey(next);
     renderPlanningBoard();
   });
   document.querySelector('#planning-quick-create')?.addEventListener('click', () => openPlanningQuickMissionModal({}));
@@ -2494,7 +2506,7 @@ function bindCollaboratorPlanningControls(){
   document.querySelector('#collaborator-planning-add')?.addEventListener('click',()=>{
     if(!qgPlanningState.collaboratorAgentId) return toast('Choisis d’abord un collaborateur.','warning');
     const range=monthRange(qgPlanningState.collaboratorMonth||localMonthValue());
-    openPlanningQuickMissionModal({resourceId:qgPlanningState.collaboratorAgentId,date:range.start.toISOString().slice(0,10),forceMode:'agents'});
+    openPlanningQuickMissionModal({resourceId:qgPlanningState.collaboratorAgentId,date:planningLocalDateKey(range.start),forceMode:'agents'});
   });
   document.querySelector('#collaborator-planning-print')?.addEventListener('click',()=>{
     if(!qgPlanningState.collaboratorAgentId) return toast('Choisis d’abord un collaborateur.','warning');
@@ -2548,7 +2560,7 @@ function collaboratorCellHtml(site,day,missions,agent){
     const m=seg.mission; const ack=missionIsAcknowledged(m);
     return `<button class="collaborator-shift ${m.status==='cancelled'?'cancelled':''} ${missionIsDraft(m)?'planning-draft':''}" data-mission-open="${safe(m.id)}" title="${safe(m.siteNom||site.name)} · ${safe(m.agentNom||'')}" style="--mission-color:${normalizeHexColor(m.siteColor)||planningColorForSite(site.id)}"><strong>${safe(timeOnlyText(seg.start))}</strong><span>${safe(timeOnlyText(seg.end))}${seg.end.getDate()!==seg.start.getDate()?' +1':''}</span>${!ack&&m.status!=='cancelled'?'<i title="Non confirmée"></i>':''}</button>`;
   }).join('');
-  return `<div class="collaborator-cell ${isToday(date)?'today':''}"><button class="collaborator-cell-add" data-collab-cell="1" data-agent-id="${safe(agent.id)}" data-site-id="${safe(site.id)}" data-date="${date.toISOString().slice(0,10)}" title="Ajouter une vacation">+</button>${chips}</div>`;
+  return `<div class="collaborator-cell ${isToday(date)?'today':''}"><button class="collaborator-cell-add" data-collab-cell="1" data-agent-id="${safe(agent.id)}" data-site-id="${safe(site.id)}" data-date="${planningLocalDateKey(date)}" title="Ajouter une vacation">+</button>${chips}</div>`;
 }
 function renderCollaboratorPlanning(){
   const board=document.querySelector('#collaborator-planning-board');
@@ -2598,7 +2610,7 @@ function movePlanningDate(offsetDays){
   const next = addDays(base, offsetDays);
   qgPlanningState.startDate = next;
   const input = document.querySelector('#planning-date');
-  if (input) input.value = next.toISOString().slice(0,10);
+  if (input) input.value = planningLocalDateKey(next);
   renderPlanningBoard();
 }
 async function createMissionFromForm(fd, options={}){
@@ -2617,6 +2629,7 @@ async function createMissionFromForm(fd, options={}){
   const proposed = Array.from({length:repeatCount},(_,i)=>({start:addDays(scheduledStart.toDate(),i*interval),end:addDays(scheduledEnd.toDate(),i*interval)}));
   const conflicts = proposed.flatMap(period=>missionConflicts(agent.id,period.start,period.end));
   if (conflicts.length && !confirm(`${conflicts.length} conflit(s) de planning détecté(s) pour cet agent. Enregistrer quand même ?`)) return { ok:false };
+  if (typeof options.onBeforeWrite === 'function') options.onBeforeWrite({ site, agent, repeatCount });
   const created = [], publishedCreated=[];
   const publicationByMonth=new Map();
   for (let i=0; i<repeatCount; i++){
@@ -2648,9 +2661,26 @@ async function createMissionFromForm(fd, options={}){
   refreshMonthlyPublicationPanel();
   return { ok:true, created, push:planningPush, draftCount };
 }
+let planningQuickCreateLocked = false;
+function showPlanningQuickCreateLock(){
+  document.querySelector('#planning-create-lock')?.remove();
+  const div = document.createElement('div');
+  div.className = 'modal-backdrop';
+  div.id = 'planning-create-lock';
+  div.innerHTML = `<div class="modal" role="status" aria-live="polite" aria-busy="true">
+    <div class="setup-box"><strong>Création de la mission en cours…</strong><br>Sentinelle enregistre la vacation. Merci de patienter quelques secondes.</div>
+    <div class="loader-line" aria-hidden="true"><span></span></div>
+  </div>`;
+  document.body.appendChild(div);
+  lockModalViewport();
+}
+function hidePlanningQuickCreateLock(){
+  document.querySelector('#planning-create-lock')?.remove();
+  unlockModalViewport();
+}
 function openPlanningQuickMissionModal({ resourceId='', date=null, forceMode='', siteId='' }={}){
   const mode = forceMode || qgPlanningState.mode || 'sites';
-  const clickedDate = date ? startOfDay(new Date(date)) : (qgPlanningState.startDate || startOfDay(new Date()));
+  const clickedDate = date ? startOfDay(planningDateFromKey(date)) : (qgPlanningState.startDate || startOfDay(new Date()));
   const start = new Date(clickedDate); start.setHours(8,0,0,0);
   const end = new Date(clickedDate); end.setHours(18,0,0,0);
   const prefilledSite = siteId || (mode === 'sites' ? resourceId : '');
@@ -2672,8 +2702,26 @@ function openPlanningQuickMissionModal({ resourceId='', date=null, forceMode='',
   });
   document.querySelector('#planning-quick-form')?.addEventListener('submit', async e => {
     e.preventDefault();
-    const result = await createMissionFromForm(new FormData(e.currentTarget));
-    if (result?.ok) closeModal();
+    if (planningQuickCreateLocked) return;
+    const fd = new FormData(e.currentTarget);
+    let lockShown = false;
+    try {
+      const result = await createMissionFromForm(fd, {
+        onBeforeWrite: () => {
+          planningQuickCreateLocked = true;
+          lockShown = true;
+          closeModal();
+          showPlanningQuickCreateLock();
+        }
+      });
+      if (result?.ok) return;
+    } catch(error) {
+      console.error(error);
+      toast(userFriendlyError(error,'Création de la mission impossible.'),'error');
+    } finally {
+      if (lockShown) hidePlanningQuickCreateLock();
+      planningQuickCreateLocked = false;
+    }
   });
 }
 function missionConflicts(agentId,startValue,endValue,excludeId=''){
@@ -3077,6 +3125,21 @@ function startOfDay(d){
   x.setHours(0,0,0,0);
   return x;
 }
+function planningLocalDateKey(value){
+  const d = value instanceof Date ? value : timestampToDate(value);
+  if (!d || Number.isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+function planningDateFromKey(value){
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return new Date(value);
+  return new Date(Number(match[1]), Number(match[2])-1, Number(match[3]), 12, 0, 0, 0);
+}
+function missionStartsOnLocalDay(mission, date){
+  const start = timestampToDate(mission?.scheduledStart);
+  return !!start && planningLocalDateKey(start) === planningLocalDateKey(date);
+}
 function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
 function endOfDay(d){ const x = startOfDay(d); x.setHours(23,59,59,999); return x; }
 function planningDateLabel(d){ return d.toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' }); }
@@ -3128,7 +3191,7 @@ function planningResourceRow({ res, mode, dates, start, end, days, rangeMissions
   const items = missions.map(m => planningMissionSpan(m, start, days)).filter(Boolean);
   assignPlanningTracks(items);
   const tracks = Math.max(1, ...items.map(i=>i.track + 1));
-  const cells = dates.map((d,i)=>`<button type="button" class="planning-bg-cell ${isToday(d)?'today':''}" style="grid-column:${i+1};grid-row:1 / span ${tracks}" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${d.toISOString().slice(0,10)}" title="Créer une mission le ${planningDateLabel(d)}"><span>+</span></button>`).join('');
+  const cells = dates.map((d,i)=>`<button type="button" class="planning-bg-cell ${isToday(d)?'today':''}" style="grid-column:${i+1};grid-row:1 / span ${tracks}" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${planningLocalDateKey(d)}" title="Créer une mission le ${planningDateLabel(d)}"><span>+</span></button>`).join('');
   const bars = items.map(item => planningMissionBar(item, mode)).join('');
   return `<div class="planning-row-v46" style="--days:${days};--tracks:${tracks}"><div class="planning-resource planning-resource-v46"><strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane" style="--days:${days};--tracks:${tracks}">${cells}${bars}</div></div>`;
 }
@@ -3138,7 +3201,7 @@ function planningSiteSummaryRow({ res, dates, days, missions }){
   const cells = dates.map((date,index) => {
     const dayMissions = planningMissionsForDay(missions, date);
     if (!dayMissions.length) {
-      return `<button type="button" class="planning-bg-cell planning-summary-empty ${isToday(date)?'today':''}" style="grid-column:${index+1};grid-row:1" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${date.toISOString().slice(0,10)}" title="Créer une mission le ${planningDateLabel(date)}"><span>+</span></button>`;
+      return `<button type="button" class="planning-bg-cell planning-summary-empty ${isToday(date)?'today':''}" style="grid-column:${index+1};grid-row:1" data-planning-cell="1" data-resource-id="${safe(res.id)}" data-date="${planningLocalDateKey(date)}" title="Créer une mission le ${planningDateLabel(date)}"><span>+</span></button>`;
     }
     const agentKeys = new Set(dayMissions.map(m => String(m.agentId || m.agentNom || m.id || '')).filter(Boolean));
     const agentCount = Math.max(1, agentKeys.size);
@@ -3147,18 +3210,15 @@ function planningSiteSummaryRow({ res, dates, days, missions }){
     const anyDraft = dayMissions.some(m=>missionIsDraft(m));
     const allCompleted = dayMissions.every(m=>m.status==='completed');
     const accessible = `${agentCount} agent${agentCount>1?'s':''} prévu${agentCount>1?'s':''} le ${planningDateLabel(date)}. Survoler pour le détail.`;
-    return `<button type="button" class="planning-day-summary site-color ${isToday(date)?'today':''} ${anyLate?'late':''} ${anyDraft?'has-draft':''} ${allCompleted?'status-completed':''}" style="grid-column:${index+1};grid-row:1;--site-color:${siteColor};--site-text:${textColor}" data-planning-day-summary="1" data-resource-id="${safe(res.id)}" data-date="${date.toISOString().slice(0,10)}" data-mission-ids="${safe(missionIds)}" aria-label="${safe(accessible)}"><strong>${agentCount}</strong><span>agent${agentCount>1?'s':''}</span></button>`;
+    return `<button type="button" class="planning-day-summary site-color ${isToday(date)?'today':''} ${anyLate?'late':''} ${anyDraft?'has-draft':''} ${allCompleted?'status-completed':''}" style="grid-column:${index+1};grid-row:1;--site-color:${siteColor};--site-text:${textColor}" data-planning-day-summary="1" data-resource-id="${safe(res.id)}" data-date="${planningLocalDateKey(date)}" data-mission-ids="${safe(missionIds)}" aria-label="${safe(accessible)}"><strong>${agentCount}</strong><span>agent${agentCount>1?'s':''}</span></button>`;
   }).join('');
   const totalAgents = new Set(missions.map(m=>String(m.agentId || m.agentNom || '')).filter(Boolean)).size;
   return `<div class="planning-row-v46 planning-row-summary" style="--days:${days};--tracks:1"><div class="planning-resource planning-resource-v46 planning-resource-summary" style="--resource-color:${siteColor}"><i class="planning-resource-color" style="background:${siteColor}"></i><strong>${safe(res.label)}</strong><span>${safe(res.sub || '—')}</span><em>${totalAgents} agent${totalAgents>1?'s':''} · ${missions.length} mission${missions.length>1?'s':''}</em></div><div class="planning-lane planning-lane-summary" style="--days:${days};--tracks:1">${cells}</div></div>`;
 }
 function planningMissionsForDay(missions, date){
-  const dayStart = startOfDay(date).getTime();
-  const nextDayStart = addDays(startOfDay(date),1).getTime();
-  return missions.filter(m => {
-    const start = missionStartMs(m), end = missionEndMs(m);
-    return start && end && start < nextDayStart && end > dayStart;
-  }).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+  return missions
+    .filter(m => missionStartsOnLocalDay(m, date))
+    .sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
 }
 function planningMissionTimeLabel(m){
   const start = m.scheduledStart?.toDate?.();
