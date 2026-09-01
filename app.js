@@ -627,7 +627,7 @@ async function getAgentPlannedMissions(){
   const snap = await getDocs(query(collectionRef('missions'), where('agentId','==',currentUser.uid))).catch(()=>({docs:[]}));
   const now = Date.now();
   return snap.docs.map(d => ({ id:d.id, ...d.data() }))
-    .filter(m => !missionIsDraft(m) && (['planned','assigned'].includes(m.status || 'planned') || ((m.scheduledEnd?.toDate?.()?.getTime() || 0) > now && m.status !== 'completed')))
+    .filter(m => !missionIsRemovedFromPlanning(m) && !missionIsDraft(m) && (['planned','assigned'].includes(m.status || 'planned') || ((m.scheduledEnd?.toDate?.()?.getTime() || 0) > now && m.status !== 'completed')))
     .sort((a,b)=>(a.scheduledStart?.toDate?.()?.getTime() || 0) - (b.scheduledStart?.toDate?.()?.getTime() || 0));
 }
 function toLocalInputValue(value){
@@ -693,6 +693,7 @@ function hoursText(minutes){
 }
 function missionRevision(mission){ return Math.max(1, Number(mission?.planningRevision || 1)); }
 function missionIsDraft(mission){ return String(mission?.publicationStatus || '').toLowerCase() === 'draft'; }
+function missionIsRemovedFromPlanning(mission){ return mission?.planningHidden===true || mission?.hiddenFromPlanning===true || mission?.archivedFromPlanning===true; }
 function planningMonthForValue(value){ const d=timestampToDate(value); return d?localMonthValue(d):localMonthValue(); }
 function planningPublicationDocId(monthValue){ return String(monthValue || localMonthValue()).replace(/[^0-9-]/g,''); }
 async function getMonthlyPlanningPublication(monthValue,{force=false}={}){
@@ -964,7 +965,7 @@ async function renderAgentPlanning(){
   document.querySelector('#agent-planning-month')?.addEventListener('change',async e=>{state.month=e.target.value||localMonthValue();state.monthlyAck=null;redraw();await loadAgentMonthlyAcknowledgement(state);});
   document.querySelector('#agent-planning-download')?.addEventListener('click',()=>downloadCollaboratorPlanningPdf(currentUser.uid,state.month,{agentView:true}));
   const q=query(collectionRef('missions'),where('agentId','==',currentUser.uid));
-  unsubscribeList.push(onSnapshot(q,async snap=>{state.missions=snap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>!missionIsDraft(m)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));redraw();await loadAgentMonthlyAcknowledgement(state);},()=>{const box=document.querySelector('#agent-planning-content');if(box)box.innerHTML='<div class="empty error">Planning indisponible.</div>';}));
+  unsubscribeList.push(onSnapshot(q,async snap=>{state.missions=snap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>!missionIsRemovedFromPlanning(m)&&!missionIsDraft(m)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));redraw();await loadAgentMonthlyAcknowledgement(state);},()=>{const box=document.querySelector('#agent-planning-content');if(box)box.innerHTML='<div class="empty error">Planning indisponible.</div>';}));
 }
 async function loadAgentMonthlyAcknowledgement(state){
   if(!currentUser?.uid||!state?.month) return;
@@ -2085,7 +2086,7 @@ async function showQGDashboardDetail(type){
       const snap = await getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(400)));
       const today = startOfDay(new Date());
       const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => {
-        if(missionIsDraft(row) || !dashboardMissionIsCurrent(row)) return false;
+        if(missionIsRemovedFromPlanning(row) || missionIsDraft(row) || !dashboardMissionIsCurrent(row)) return false;
         return missionStartsOnLocalDay(row, today);
       }).sort((a,b) => (timestampToDate(a.scheduledStart)?.getTime() || 0) - (timestampToDate(b.scheduledStart)?.getTime() || 0));
       if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission planifiée ou en cours ne commence aujourd’hui.');
@@ -2188,7 +2189,7 @@ function listenQGStats(){
   unsubscribeList.push(onSnapshot(missionsQ, snap => {
     const today = startOfDay(new Date());
     const rows = snap.docs.map(d=>d.data());
-    setText('#stat-missions', rows.filter(m => !missionIsDraft(m) && dashboardMissionIsCurrent(m) && missionStartsOnLocalDay(m, today)).length);
+    setText('#stat-missions', rows.filter(m => !missionIsRemovedFromPlanning(m) && !missionIsDraft(m) && dashboardMissionIsCurrent(m) && missionStartsOnLocalDay(m, today)).length);
   }, () => setText('#stat-missions', '0')));
 }
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
@@ -2304,7 +2305,7 @@ function listenQGMissionsPreview(){
   const box = document.querySelector('#qg-missions-preview'); if (!box) return;
   const q = query(collectionRef('missions'), orderBy('scheduledStart','asc'), limit(8));
   unsubscribeList.push(onSnapshot(q, snap => {
-    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m => !missionIsDraft(m) && !['completed','cancelled'].includes(m.status));
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m => !missionIsRemovedFromPlanning(m) && !missionIsDraft(m) && !['completed','cancelled'].includes(m.status));
     box.innerHTML = rows.length ? rows.slice(0,5).map(missionItem).join('') : `<div class="empty">Aucune mission à venir.</div>`;
   }, () => box.innerHTML = `<div class="empty">Planning indisponible. Vérifie les RLS Supabase.</div>`));
 }
@@ -2334,7 +2335,7 @@ async function renderQGMissions(){
       <div class="field compact-field"><label>Affichage</label><select class="select" id="planning-days"><option value="7">7 jours</option><option value="14" selected>14 jours</option><option value="31">Mois</option></select></div>
       <div class="field compact-field"><label>Statut</label><select class="select" id="planning-status"><option value="">Tous</option><option value="planned">Planifiées</option><option value="active">En cours</option><option value="completed">Terminées</option><option value="cancelled">Annulées</option></select></div>
       <div class="field compact-field"><label>Recherche</label><input class="input" id="planning-search" placeholder="Site, agent, client..."></div>
-      <button class="btn primary" id="planning-quick-create" type="button">+ Mission rapide</button>
+      <button class="btn primary" id="planning-quick-create" type="button">+ Mission rapide</button>${isStrictAdmin()?`<button class="btn danger" id="planning-bulk-remove" type="button">Supprimer plusieurs</button>`:'' }
     </div>
     <div class="planning-helpbar"><span>Lecture compacte : chaque case colorée indique le nombre d’agents prévus sur la journée. Survole-la pour voir leurs noms et horaires, ou clique dessus pour ouvrir le détail. Clique sur une case vide pour créer une mission.</span></div>
     <div id="planning-site-legend" class="planning-site-legend"></div>
@@ -2419,6 +2420,7 @@ function bindPlanningControls(){
     renderPlanningBoard();
   });
   document.querySelector('#planning-quick-create')?.addEventListener('click', () => openPlanningQuickMissionModal({}));
+  document.querySelector('#planning-bulk-remove')?.addEventListener('click', openMissionBulkRemovalModal);
 }
 
 async function refreshMonthlyPublicationPanel(){
@@ -3026,6 +3028,137 @@ async function openQGEndShiftModal(mission){
   });
 }
 
+
+async function assessMissionRemoval(mission){
+  if(!mission?.id) throw new Error('Mission introuvable.');
+  if(!navigator.onLine) throw new Error('Connexion internet requise pour supprimer une mission.');
+  const active=String(mission.status||'planned')==='active';
+  if(active) return {active:true,hardDelete:false,hasHistory:true,shifts:0,reports:0,document:false};
+  const stablePart=stableGeneratedDocumentSegment(mission.id);
+  const stableId=`mission-${stablePart}`.slice(0,120);
+  const [shiftsSnap,reportsSnap,documentSnap]=await Promise.all([
+    getDocs(query(collectionRef('shifts'),where('missionId','==',mission.id),limit(10))),
+    getDocs(query(collectionRef('reports'),where('missionId','==',mission.id),limit(10))),
+    getDoc(docRef('generatedDocuments',stableId))
+  ]);
+  const shiftCount=shiftsSnap.size||0;
+  const reportCount=reportsSnap.size||0;
+  const hasDocument=Boolean(documentSnap?.exists?.());
+  const startedByFields=Boolean(mission.actualStart||mission.actualEnd);
+  const completed=String(mission.status||'')==='completed';
+  const hasHistory=completed||startedByFields||shiftCount>0||reportCount>0||hasDocument;
+  return {active:false,hardDelete:!hasHistory,hasHistory,shifts:shiftCount,reports:reportCount,document:hasDocument};
+}
+async function removeMissionSafely(mission,{assessment=null}={}){
+  if(!isStrictAdmin()) return {ok:false,error:new Error('Action réservée à l’administrateur.')};
+  const check=assessment||await assessMissionRemoval(mission);
+  if(check.active) return {ok:false,protected:true,error:new Error('Mission actuellement en cours. Clôture-la avant toute suppression.')};
+  if(check.hardDelete){
+    let pushResult={ok:false,skipped:true,reason:'Mission déjà annulée ou brouillon'};
+    if(!missionIsDraft(mission)&&String(mission.status||'planned')!=='cancelled'){
+      pushResult=await spNotifyMissionCancelled({...mission,status:'cancelled'}).catch(error=>({ok:false,error:String(error?.message||error)}));
+    }
+    await addAudit('mission_deleted_safe',{
+      missionId:mission.id,agentId:mission.agentId||null,siteId:mission.siteId||null,status:mission.status||'planned',
+      verification:{shifts:check.shifts,reports:check.reports,document:check.document},
+      pushStatus:pushResult?.ok?'sent':pushResult?.reason||pushResult?.error||'skipped'
+    });
+    await deleteDoc(docRef('missions',mission.id));
+    return {ok:true,mode:'deleted'};
+  }
+  await updateDoc(docRef('missions',mission.id),{
+    planningHidden:true,
+    planningHiddenAt:serverTimestamp(),
+    planningHiddenBy:currentUser.uid,
+    planningHiddenReason:'qg_manual_removal',
+    updatedAt:serverTimestamp(),
+    updatedBy:currentUser.uid
+  });
+  await addAudit('mission_hidden_from_planning',{
+    missionId:mission.id,agentId:mission.agentId||null,siteId:mission.siteId||null,status:mission.status||null,
+    preservedHistory:{shifts:check.shifts,reports:check.reports,document:check.document}
+  });
+  return {ok:true,mode:'hidden'};
+}
+function missionBulkRemovalCandidates(){
+  const start=startOfDay(qgPlanningState.startDate||new Date());
+  const end=addDays(start,Math.max(1,Number(qgPlanningState.days||14)));
+  const statusFilter=qgPlanningState.status||'';
+  const term=(document.querySelector('#planning-search')?.value||'').trim().toLowerCase();
+  return (qgPlanningState.missions||[]).filter(m=>{
+    if(missionIsRemovedFromPlanning(m)) return false;
+    const ms=missionStartMs(m)||0;
+    if(ms<start.getTime()||ms>=end.getTime()) return false;
+    if(statusFilter&&String(m.status||'planned')!==statusFilter) return false;
+    if(term&&!`${m.siteNom||''} ${m.agentNom||''} ${m.type||''}`.toLowerCase().includes(term)) return false;
+    return true;
+  }).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+}
+function openMissionBulkRemovalModal(){
+  if(!isStrictAdmin()) return;
+  const rows=missionBulkRemovalCandidates();
+  if(!rows.length) return toast('Aucune mission visible dans la période actuelle.','warning');
+  const items=rows.map(m=>{
+    const active=String(m.status||'planned')==='active';
+    const label=active?'Protégée · en cours':String(m.status||'planned')==='completed'?'Historique · sera masquée':'Suppression sécurisée';
+    return `<label class="item mission-bulk-row" style="cursor:${active?'not-allowed':'pointer'};align-items:flex-start">
+      <input type="checkbox" data-bulk-mission="${safe(m.id)}" ${active?'disabled':''} style="margin-top:5px;transform:scale(1.15)">
+      <div class="item-main"><div class="item-title">${safe(m.siteNom||'Site')} · ${safe(m.agentNom||'Agent')} <span class="pill ${missionStatusColor(m.status)}">${safe(missionStatusLabel(m.status))}</span></div>
+      <div class="item-meta">${safe(dateText(m.scheduledStart))} → ${safe(dateText(m.scheduledEnd))}<br>${safe(m.type||'Mission')} · ${safe(label)}</div></div>
+    </label>`;
+  }).join('');
+  showModal('Supprimer plusieurs missions',`
+    <div class="setup-box"><strong>Suppression sécurisée</strong><br>Une mission jamais commencée sera supprimée définitivement. Si elle possède déjà un poste, une MCI, un rapport ou un PDF, elle sera seulement retirée du planning afin de conserver la traçabilité. Une mission actuellement en cours est toujours protégée.</div>
+    <div class="btn-row" style="margin:12px 0"><button class="btn small" type="button" id="bulk-mission-select-all">Sélectionner tout supprimable</button><button class="btn small ghost" type="button" id="bulk-mission-clear">Tout désélectionner</button></div>
+    <div class="list" style="max-height:420px;overflow:auto">${items}</div>
+    <div class="setup-box" style="margin-top:14px"><strong id="bulk-mission-count">0 mission sélectionnée</strong><div class="field" style="margin-top:10px"><label>Pour confirmer, écris SUPPRIMER</label><input class="input" id="bulk-mission-confirm" autocomplete="off" placeholder="SUPPRIMER"></div></div>
+    <button class="btn danger full" type="button" id="bulk-mission-submit" disabled>Supprimer / retirer la sélection</button>
+  `,'wide');
+  const checks=()=>[...document.querySelectorAll('[data-bulk-mission]')];
+  const count=()=>checks().filter(c=>c.checked&&!c.disabled).length;
+  const refresh=()=>{
+    const n=count(),word=n>1?'missions sélectionnées':'mission sélectionnée';
+    const counter=document.querySelector('#bulk-mission-count');
+    if(counter) counter.textContent=`${n} ${word}`;
+    const submit=document.querySelector('#bulk-mission-submit');
+    const confirmInput=document.querySelector('#bulk-mission-confirm');
+    if(submit) submit.disabled=!(n>0&&String(confirmInput?.value||'').trim().toUpperCase()==='SUPPRIMER');
+  };
+  checks().forEach(c=>c.addEventListener('change',refresh));
+  document.querySelector('#bulk-mission-confirm')?.addEventListener('input',refresh);
+  document.querySelector('#bulk-mission-select-all')?.addEventListener('click',()=>{checks().forEach(c=>{if(!c.disabled)c.checked=true;});refresh();});
+  document.querySelector('#bulk-mission-clear')?.addEventListener('click',()=>{checks().forEach(c=>c.checked=false);refresh();});
+  document.querySelector('#bulk-mission-submit')?.addEventListener('click',async()=>{
+    const selectedIds=checks().filter(c=>c.checked&&!c.disabled).map(c=>c.dataset.bulkMission);
+    if(!selectedIds.length) return;
+    const button=document.querySelector('#bulk-mission-submit');
+    if(button){button.disabled=true;button.textContent='Vérification et suppression...';}
+    let deleted=0,hidden=0,protectedCount=0,failed=0;
+    for(const missionId of selectedIds){
+      const mission=rows.find(m=>m.id===missionId);
+      if(!mission) continue;
+      try{
+        const result=await removeMissionSafely(mission);
+        if(result?.mode==='deleted') deleted++;
+        else if(result?.mode==='hidden') hidden++;
+        else if(result?.protected) protectedCount++;
+        else failed++;
+      }catch(error){
+        console.error('Suppression multiple mission',missionId,error);
+        failed++;
+      }
+    }
+    closeModal();
+    const parts=[];
+    if(deleted) parts.push(`${deleted} supprimée${deleted>1?'s':''}`);
+    if(hidden) parts.push(`${hidden} retirée${hidden>1?'s':''} du planning`);
+    if(protectedCount) parts.push(`${protectedCount} protégée${protectedCount>1?'s':''}`);
+    if(failed) parts.push(`${failed} échec${failed>1?'s':''}`);
+    toast(parts.join(' · ')||'Aucune mission modifiée.',failed?'warning':'success');
+  });
+  refresh();
+}
+
 function openPlanningMissionModal(missionId){
   const m = qgPlanningState.missions.find(x=>x.id===missionId) || qgMissionsCache.find(x=>x.id===missionId);
   if (!m) return toast('Mission introuvable.', 'warning');
@@ -3035,7 +3168,7 @@ function openPlanningMissionModal(missionId){
     <div class="mission-detail-head"><div><h3>${safe(m.siteNom || 'Site')}</h3><p>${safe(m.agentNom || 'Agent')} · ${safe(m.type || 'Mission')}</p></div><span class="pill ${missionStatusColor(m.status)}">${missionStatusLabel(m.status)}</span></div>
     <div class="mission-detail-grid"><div><strong>Début</strong><span>${dateText(m.scheduledStart)}</span></div><div><strong>Fin</strong><span>${dateText(m.scheduledEnd)}</span></div><div><strong>Durée</strong><span>${durationDays > 1 ? `${durationDays} jours` : hoursText(missionDurationMinutes(m))}</span></div><div><strong>Lecture agent</strong><span>${acknowledged?`Confirmée ${dateText(m.acknowledgedAt)}`:'À confirmer'}</span></div></div>
     <div class="setup-box"><strong>Consignes :</strong><br>${safe(m.instructions || 'Aucune consigne spécifique.').replace(/\n/g,'<br>')}</div>
-    <div class="grid cols-2"><button class="btn primary" id="mission-detail-edit">Modifier la vacation</button><button class="btn" id="mission-detail-pdf">Rapport PDF</button><button class="btn" id="mission-detail-duplicate-month">Dupliquer sur le mois</button><button class="btn" id="mission-detail-duplicate-day">Dupliquer demain</button>${m.status==='active'&&roleAllowedAdmin()?`<button class="btn danger" id="mission-detail-qg-close">Clôturer pour l’agent</button>`:''}${!['completed','cancelled'].includes(m.status)?`<button class="btn danger" id="mission-detail-cancel">Annuler mission</button>`:''}${isStrictAdmin()?`<button class="btn ghost" id="mission-detail-delete">Supprimer définitivement</button>`:''}</div>
+    <div class="grid cols-2"><button class="btn primary" id="mission-detail-edit">Modifier la vacation</button><button class="btn" id="mission-detail-pdf">Rapport PDF</button><button class="btn" id="mission-detail-duplicate-month">Dupliquer sur le mois</button><button class="btn" id="mission-detail-duplicate-day">Dupliquer demain</button>${m.status==='active'&&roleAllowedAdmin()?`<button class="btn danger" id="mission-detail-qg-close">Clôturer pour l’agent</button>`:''}${!['completed','cancelled'].includes(m.status)?`<button class="btn danger" id="mission-detail-cancel">Annuler mission</button>`:''}${isStrictAdmin()?`<button class="btn ghost" id="mission-detail-delete">Supprimer / retirer du planning</button>`:''}</div>
   </div>`, 'wide');
   document.querySelector('#mission-detail-edit')?.addEventListener('click', () => openPlanningMissionEditModal(m));
   document.querySelector('#mission-detail-pdf')?.addEventListener('click', () => printMissionById(m.id));
@@ -3050,10 +3183,32 @@ function openPlanningMissionModal(missionId){
     closeModal(); toast('Mission annulée', 'warning');
   });
   document.querySelector('#mission-detail-delete')?.addEventListener('click', async()=>{
-    if(!isStrictAdmin()||!confirm('Supprimer définitivement cette mission ?')) return;
-    await addAudit('mission_deleted',{missionId:m.id,agentId:m.agentId,siteId:m.siteId});
-    await deleteDoc(docRef('missions',m.id));
-    closeModal();toast('Mission supprimée.','success');
+    if(!isStrictAdmin()) return;
+    const button=document.querySelector('#mission-detail-delete');
+    if(button){button.disabled=true;button.textContent='Vérification...';}
+    try{
+      const assessment=await assessMissionRemoval(m);
+      if(assessment.active){
+        toast('Mission en cours : clôture-la d’abord. Aucune suppression effectuée.','warning');
+        if(button&&button.isConnected){button.disabled=false;button.textContent='Supprimer / retirer du planning';}
+        return;
+      }
+      const detail=assessment.hardDelete
+        ? 'Cette mission n’a jamais commencé et ne possède aucune donnée opérationnelle liée. Elle sera supprimée définitivement.'
+        : 'Cette mission possède un historique (poste, MCI, rapport ou document). Elle sera masquée du planning, mais toutes les preuves opérationnelles resteront conservées.';
+      if(!confirm(`${detail}\n\nContinuer ?`)){
+        if(button&&button.isConnected){button.disabled=false;button.textContent='Supprimer / retirer du planning';}
+        return;
+      }
+      const result=await removeMissionSafely(m,{assessment});
+      if(!result.ok) throw result.error||new Error('Suppression impossible.');
+      closeModal();
+      toast(result.mode==='deleted'?'Mission supprimée définitivement.':'Mission retirée du planning. Historique conservé.','success');
+    }catch(error){
+      console.error('Suppression mission impossible',error);
+      toast(userFriendlyError(error,'Impossible de retirer cette mission.'),'error');
+      if(button&&button.isConnected){button.disabled=false;button.textContent='Supprimer / retirer du planning';}
+    }
   });
 }
 function openPlanningMissionEditModal(m){
@@ -3209,7 +3364,7 @@ async function duplicateMissionWithOffset(m, days=7){
 function listenPlanningBoard(){
   const q = query(collectionRef('missions'), orderBy('scheduledStart','asc'), limit(1200));
   unsubscribeList.push(onSnapshot(q, snap => {
-    qgPlanningState.missions = snap.docs.map(d=>({id:d.id,...d.data()}));
+    qgPlanningState.missions = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>!missionIsRemovedFromPlanning(m));
     renderPlanningBoard();
     renderCollaboratorPlanning();
     refreshMonthlyPublicationPanel();
@@ -3475,7 +3630,7 @@ function listenMissionsList(selector){
   const box = document.querySelector(selector); if (!box) return;
   const q = query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(100));
   unsubscribeList.push(onSnapshot(q, snap => {
-    const rows = snap.docs.map(d=>({id:d.id,...d.data()}));
+    const rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>!missionIsRemovedFromPlanning(m));
     qgMissionsCache = rows;
     const today = startOfDay(new Date()).getTime();
     const tomorrow = endOfDay(new Date()).getTime();
@@ -3623,7 +3778,7 @@ function buildQGNotifications(state){
     });
   });
   state.alerts.filter(a => ['active','taken'].includes(a.statut)).forEach(a => rows.push({id:`alert_${a.id}`,level:'red',eventAt:qgNotificationEventMs(a.createdAt||a.heure),title:`SOS/PTI actif · ${a.agentNom || 'Agent'}`, meta:`${a.siteActuelNom || 'Site'} · ${dateText(a.createdAt || a.heure)}`, body:a.message || 'Alerte critique en cours'}));
-  state.missions.filter(m=>!missionIsDraft(m)).forEach(m => {
+  state.missions.filter(m=>!missionIsRemovedFromPlanning(m)&&!missionIsDraft(m)).forEach(m => {
     const start = qgNotificationEventMs(m.scheduledStart); const end = qgNotificationEventMs(m.scheduledEnd);
     if (start && now > start + 10*60000 && !['active','completed','cancelled'].includes(m.status)) rows.push({id:`mission_late_${m.id}`,level:'red',eventAt:start,title:`Prise de poste en retard · ${m.agentNom}`, meta:`${m.siteNom} · prévu ${dateText(m.scheduledStart)}`, body:'Mission non démarrée dans le délai prévu.'});
     if (end && now > end + 15*60000 && m.status === 'active') rows.push({id:`mission_open_${m.id}`,level:'orange',eventAt:end,title:`Mission non clôturée · ${m.agentNom}`, meta:`${m.siteNom} · fin prévue ${dateText(m.scheduledEnd)}`, body:'La mission dépasse son horaire de fin sans clôture.'});
@@ -6253,7 +6408,7 @@ async function downloadCollaboratorPlanningPdf(agentId,monthValue,{agentView=fal
     const sites=siteSnap.docs.map(d=>({id:d.id,...d.data()}));
     const siteMap=new Map(sites.map(x=>[x.id,x]));
     const range=monthRange(monthValue||localMonthValue());
-    const missions=missionSnap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>(!agentView||!missionIsDraft(m))&&missionOverlapsRange(m,range.start,range.end)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
+    const missions=missionSnap.docs.map(d=>({id:d.id,...d.data()})).filter(m=>!missionIsRemovedFromPlanning(m)&&(!agentView||!missionIsDraft(m))&&missionOverlapsRange(m,range.start,range.end)).sort((a,b)=>(missionStartMs(a)||0)-(missionStartMs(b)||0));
     const segments=missions.filter(m=>m.status!=='cancelled').flatMap(m=>missionSegmentsByDay(m,range.start,range.end));
     const jsPDF=getJsPDF(); if(!jsPDF) throw new Error('Bibliothèque PDF indisponible.');
     const doc=new jsPDF({unit:'mm',format:'a4',orientation:'landscape'});
