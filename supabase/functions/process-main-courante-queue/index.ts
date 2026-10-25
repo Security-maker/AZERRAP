@@ -55,14 +55,14 @@ function buildMainCouranteEmail(doc:any, recipient:{email:string,display_name:st
         </tr>
         <tr>
           <td style="padding:34px 30px 8px 30px;">
-            <div style="font-size:12px;line-height:18px;font-weight:800;letter-spacing:1.2px;color:#1589b8;text-transform:uppercase;">Main courante disponible</div>
+            <div style="font-size:12px;line-height:18px;font-weight:800;letter-spacing:1.2px;color:#1589b8;text-transform:uppercase;">${doc?.type==='intervention'?'Bon d’intervention disponible':'Main courante disponible'}</div>
             <h1 style="margin:8px 0 10px 0;font-size:28px;line-height:34px;color:#141c25;font-weight:800;">Votre rapport opérationnel est prêt</h1>
             <p style="margin:0;font-size:16px;line-height:25px;color:#5d6a78;">${hello}</p>
           </td>
         </tr>
         <tr>
           <td style="padding:16px 30px 0 30px;">
-            <p style="margin:0 0 18px 0;font-size:15px;line-height:24px;color:#384656;">La main courante correspondant à votre mission est disponible. Le PDF officiel est joint à cet e-mail et reste accessible depuis votre espace client Sentinelle Pro.</p>
+            <p style="margin:0 0 18px 0;font-size:15px;line-height:24px;color:#384656;">${doc?.type==='intervention'?'Le bon correspondant à votre intervention est disponible.':'La main courante correspondant à votre mission est disponible.'} Le PDF officiel est joint à cet e-mail et reste accessible depuis votre espace client Sentinelle Pro.</p>
             <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f7fafc;border:1px solid #e2eaf1;border-radius:16px;">
               <tr><td style="padding:18px 20px;">
                 <div style="font-size:11px;line-height:16px;font-weight:800;letter-spacing:1px;color:#7b8998;text-transform:uppercase;">Document</div>
@@ -94,7 +94,7 @@ function buildMainCouranteEmail(doc:any, recipient:{email:string,display_name:st
             </table>
           </td>
         </tr>
-        <tr><td style="background:#eef3f7;padding:16px 24px;text-align:center;font-size:11px;line-height:17px;color:#7d8996;">Cet e-mail est généré automatiquement à la suite de la clôture de mission. Pour toute question opérationnelle, contactez votre interlocuteur habituel chez Azzera Protect.</td></tr>
+        <tr><td style="background:#eef3f7;padding:16px 24px;text-align:center;font-size:11px;line-height:17px;color:#7d8996;">Cet e-mail est généré automatiquement à la suite de la clôture ${doc?.type==='intervention'?'de l’intervention':'de mission'}. Pour toute question opérationnelle, contactez votre interlocuteur habituel chez Azzera Protect.</td></tr>
       </table>
     </td></tr>
   </table>
@@ -103,7 +103,7 @@ function buildMainCouranteEmail(doc:any, recipient:{email:string,display_name:st
 function buildMainCouranteText(doc:any, recipient:{email:string,display_name:string|null}){
   const client=mainCouranteClient(doc)
   const date=formatEmailDate(doc?.created_at)
-  return `${recipient?.display_name ? `Bonjour ${recipient.display_name},` : 'Bonjour,'}\n\nVotre main courante est disponible.\n\nDocument : ${String(doc?.title || 'Main courante')}\nClient : ${String(client?.name || 'Client')}${date ? `\nDate : ${date}` : ''}\n\nLe PDF officiel est joint à cet e-mail et reste accessible dans votre espace client Sentinelle Pro : ${SENTINELLE_CLIENT_URL}\n\nAzzera Protect\nService Exploitation · Sécurité privée\nDocument transmis via Sentinelle Pro.`
+  return `${recipient?.display_name ? `Bonjour ${recipient.display_name},` : 'Bonjour,'}\n\n${doc?.type==='intervention'?'Votre bon d’intervention est disponible.':'Votre main courante est disponible.'}\n\nDocument : ${String(doc?.title || 'Main courante')}\nClient : ${String(client?.name || 'Client')}${date ? `\nDate : ${date}` : ''}\n\nLe PDF officiel est joint à cet e-mail et reste accessible dans votre espace client Sentinelle Pro : ${SENTINELLE_CLIENT_URL}\n\nAzzera Protect\nService Exploitation · Sécurité privée\nDocument transmis via Sentinelle Pro.`
 }
 
 function bytesToBase64(bytes: Uint8Array){
@@ -194,12 +194,12 @@ export async function deliverMainCourante(args:{
           headers:{idempotencyKey:reservation.key},
           sender:{email:senderEmail,name:senderName},
           to:[{email:recipient.email,name:recipient.display_name||recipient.email}],
-          subject:`Azzera Protect — Main courante — ${normalizeEmailSubject(doc.title)}`,
+          subject:`Azzera Protect — ${doc.type==='intervention'?'Bon d’intervention':'Main courante'} — ${normalizeEmailSubject(doc.title)}`,
           htmlContent:buildMainCouranteEmail(doc,recipient),
           textContent:buildMainCouranteText(doc,recipient),
           replyTo:{email:senderEmail,name:senderName},
           attachment:[{name:cleanFilename(doc.title),content:pdfBase64}],
-          tags:['sentinelle-pro','main-courante']
+          tags:['sentinelle-pro',doc.type==='intervention'?'intervention':'main-courante']
         })
       })
       const payload=await response.json().catch(()=>null)
