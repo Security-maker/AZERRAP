@@ -22,6 +22,9 @@ const supabase = createClient(stagingConfig.supabaseUrl, stagingConfig.supabaseP
 
 let compatUserCache = null;
 let profileCache = null;
+let operationalMode = false;
+export function setOperationalMode(value){ operationalMode=Boolean(value && ['admin','superviseur'].includes(profileCache?.role)); }
+const usesOperationalProjection=()=>profileCache?.role==='agent'||operationalMode;
 let identityEpoch = 0;
 let nativeIdentity = null;
 
@@ -274,7 +277,7 @@ export async function createUserWithEmailAndPassword(){
   throw new Error('Utilise la fonction Edge admin-manage-user de Sentinelle Pro.');
 }
 export async function signOut(){
-  identityEpoch++;nativeIdentity=null;compatUserCache=null;profileCache=null;signedUrlCache.clear();
+  identityEpoch++;nativeIdentity=null;compatUserCache=null;profileCache=null;operationalMode=false;signedUrlCache.clear();
   const { error }=await supabase.auth.signOut();
   if(error) throw error;
 }
@@ -375,7 +378,7 @@ async function readRows(path){
     if(error) throw error;
     return (data||[]).map(row=>({id:row.external_id,data:revive(row.payload)}));
   }
-  if(['sites','missions'].includes(path) && profileCache?.role==='agent'){
+  if(['sites','missions'].includes(path) && usesOperationalProjection()){
     const {data,error}=await supabase.rpc(path==='sites'?'sentinelle_agent_sites':'sentinelle_agent_missions');
     if(error) throw error;
     return (data||[]).map(row=>({id:row.firebase_id,data:decodeCore(path,row)}));
@@ -396,7 +399,7 @@ async function readOne(path,id){
     if(error) throw error;
     return data?.[0]?revive(data[0].payload):null;
   }
-  if(['sites','missions'].includes(path) && profileCache?.role==='agent'){
+  if(['sites','missions'].includes(path) && usesOperationalProjection()){
     const {data,error}=await supabase.rpc(path==='sites'?'sentinelle_agent_sites':'sentinelle_agent_missions',path==='sites'?{p_site:id}:{p_mission:id});
     if(error) throw error;
     return data?.[0]?decodeCore(path,data[0]):null;
@@ -467,7 +470,7 @@ async function updateOwnOperationalProfile(id,data){
 }
 
 async function existingCoreRow(path,id){
-  if(['sites','missions'].includes(path) && profileCache?.role==='agent'){
+  if(['sites','missions'].includes(path) && usesOperationalProjection()){
     const {data,error}=await supabase.rpc(path==='sites'?'sentinelle_agent_sites':'sentinelle_agent_missions',path==='sites'?{p_site:id}:{p_mission:id});
     if(error) throw error;
     return data?.[0]||null;
@@ -506,7 +509,13 @@ async function buildCoreRecord(path,id,data,{merge=false}={}){
   throw new Error(`Collection core non prise en charge : ${path}`);
 }
 async function writeCore(path,id,data,{merge=false,insertOnly=false}={}){
-  if(path==='missions' && profileCache?.role==='agent'){
+  if(path==='shifts' && operationalMode){
+    const {data:confirmed,error}=await supabase.rpc('sentinelle_field_shift',{p_id:id,p_patch:plain(data),p_create:insertOnly});
+    if(error) throw error;
+    if(confirmed?.firebase_id!==id) throw new Error('Poste non confirmé. Vérifie son état serveur avant de réessayer.');
+    return makeDoc(path,id);
+  }
+  if(path==='missions' && usesOperationalProjection()){
     if(insertOnly) throw new Error('Création de mission planifiée réservée au QG.');
     const {error}=await supabase.rpc('sentinelle_agent_update_mission',{p_mission:id,p_patch:plain(data)});
     if(error) throw error;

@@ -1,11 +1,12 @@
+import { createInterventionModule } from './interventions.js?v=phase2-20261025-r1';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=online-20261025-r1';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=phase2-20261025-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
-  orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient
-} from './supabase-compat.js?v=online-20261025-r1';
+  orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
+} from './supabase-compat.js?v=phase2-20261025-r1';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -51,7 +52,28 @@ let qgPlanningState = { missions: [], sites: [], agents: [], startDate: null, mo
 let pendingMissionSelectionId = null;
 let passwordRecoveryMode = new URLSearchParams(location.search).get('recovery') === '1';
 
-const rolePortal = role => role === 'agent' ? 'agent' : 'qg';
+let interventionModule = null;
+function renderInterventions(){
+  interventionModule ||= createInterventionModule({client:getSupabaseClient(),safe,date:dateText,toast,page,render,
+    isQG:()=>rolePortal(currentProfile?.role)==='qg',isCurrent:()=>currentRoute==='interventions',
+    compress:compressCheckInPhoto,makePdf:createInterventionPdfBlob});
+  return interventionModule.show();
+}
+let fieldMode = false;
+const canUseFieldMode = () => ['admin','superviseur'].includes(currentProfile?.role);
+const rolePortal = role => role === 'agent' || (fieldMode && ['admin','superviseur'].includes(role)) ? 'agent' : 'qg';
+function fieldModeKey(){ return `sentinelle-field-mode:${currentUser?.supabaseUid||''}`; }
+function restoreFieldMode(){
+  try { fieldMode=canUseFieldMode() && sessionStorage.getItem(fieldModeKey())==='agent'; } catch(_){fieldMode=false;}
+  setOperationalMode(fieldMode);
+}
+function switchOperationalMode(){
+  if(!canUseFieldMode() || !confirmLeavingMciDraft()) return;
+  fieldMode=!fieldMode;
+  try {sessionStorage.setItem(fieldModeKey(),fieldMode?'agent':'qg');} catch(_){}
+  setOperationalMode(fieldMode);lastSitesCache=[];
+  navigate('home');startFlashListener();
+}
 const nowText = () => new Date().toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
 const dateText = value => {
   if (!value) return '—';
@@ -306,6 +328,7 @@ function page(title, subtitle, body, options={}){
             <div class="page-title"><h1>${safe(title)}</h1><p>${safe(subtitle || '')}</p></div>
           </div>
           <div class="top-actions">
+            ${canUseFieldMode()?`<button class="btn mode-switch" data-action="switch-mode">${fieldMode?"Retourner au QG":"Passer en mode Agent"}</button>`:""}
             ${gpsPill}
             <span class="pill ${navigator.onLine ? 'green':'red'}">${navigator.onLine ? 'En ligne':'Hors ligne'}</span>
             <span class="pill blue" id="clock-pill">${nowText()}</span>
@@ -323,12 +346,12 @@ function navBtn(route, icon, label){
 }
 function agentNav(){
   return [
-    navBtn('home','⌂','Accueil'), navBtn('planning','◷','Planning'), navBtn('badge','▣','Badge'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('intel','◌','Veille')
+    navBtn('home','⌂','Accueil'), navBtn('planning','◷','Planning'), navBtn('badge','▣','Badge'), navBtn('interventions','↗','Interventions'), navBtn('mci','▤','MCI'), navBtn('round','◎','Ronde'), navBtn('docs','▣','Docs'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('intel','◌','Veille')
   ].join('');
 }
 function qgNav(){
   const items = [
-    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents')
+    navBtn('home','⌂','Dashboard'), navBtn('missions','◷','Missions'), navBtn('interventions','↗','Interventions'), navBtn('notifications','◆','Notif'), navBtn('reports','▤','MCI'), navBtn('documents','▣','Documents')
   ];
   if (isStrictAdmin()) items.push(navBtn('clients','◇','Clients'), navBtn('billing','€','Facturation'));
   items.push(navBtn('intel','◌','Veille'), navBtn('device','◉','Dispositif'), navBtn('sites','▦','Sites'), navBtn('agents','☷','Agents'), navBtn('alerts','!','SOS'), navBtn('flash','⚡','Flash'), navBtn('pushsetup','🔔','Push'), navBtn('history','⇩','Exports'));
@@ -380,6 +403,7 @@ function boot(){
     clearSubs();
     currentUser = user;
     currentProfile = null;
+    fieldMode=false;setOperationalMode(false);interventionModule?.dispose();interventionModule=null;
     activeShiftCache = null;
     lastSitesCache=[];qgReportMissionGroups=[];qgNotificationsCache=[];qgMissionsCache=[];qgAllSitesCache=[];qgAllAgentsCache=[];qgInvoicesCache=[];billingProfileCache=null;
     qgPlanningState.publications.clear();qgPlanningState.missions=[];qgPlanningState.sites=[];qgPlanningState.agents=[];
@@ -405,14 +429,15 @@ async function loadProfile(user){
     }
     if(currentUser!==user) return;
     currentProfile = { uid:user.uid, ...profileData };
+    restoreFieldMode();
     saveOfflineProfile(currentProfile);
     if (navigator.onLine) {
       updateDoc(docRef('users', user.uid), { lastSeen: serverTimestamp(), isOnline: true }).catch(() => {});
     }
     const requestedRoute = new URLSearchParams(location.search).get('route') || 'home';
     const portal = rolePortal(currentProfile.role);
-    const allowedAgentRoutes = ['home','planning','badge','mci','round','docs','flash','pushsetup','intel'];
-    const allowedQGRoutes = ['home','missions','notifications','reports','documents','clients','billing','intel','device','sites','agents','alerts','flash','pushsetup','history'];
+    const allowedAgentRoutes = ['home','interventions','planning','badge','mci','round','docs','flash','pushsetup','intel'];
+    const allowedQGRoutes = ['home','interventions','missions','notifications','reports','documents','clients','billing','intel','device','sites','agents','alerts','flash','pushsetup','history'];
     currentRoute = portal === 'agent' && allowedAgentRoutes.includes(requestedRoute) ? requestedRoute : portal === 'qg' && allowedQGRoutes.includes(requestedRoute) ? requestedRoute : 'home';
     navigate(currentRoute);
     if (navigator.onLine) {
@@ -455,6 +480,7 @@ function render(html){
 }
 
 function bindGlobalEvents(){
+  document.querySelectorAll('[data-action="switch-mode"]').forEach(btn=>btn.addEventListener('click',switchOperationalMode));
   const layout = document.querySelector('.layout');
   const openMenu = () => {
     layout?.classList.add('drawer-open');
@@ -487,15 +513,15 @@ function navigate(route){
   clearSubs();
   const portal = rolePortal(currentProfile.role);
   if (portal === 'agent') {
-    ({ home:renderAgentHome, planning:renderAgentPlanning, badge:renderAgentBadge, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, pushsetup:renderPushSetup, intel:renderAgentIntel }[route] || renderAgentHome)();
+    ({ interventions:renderInterventions, home:renderAgentHome, planning:renderAgentPlanning, badge:renderAgentBadge, mci:renderAgentMCI, round:renderAgentRound, docs:renderAgentDocs, flash:renderAgentFlash, pushsetup:renderPushSetup, intel:renderAgentIntel }[route] || renderAgentHome)();
   } else {
-    ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, clients:renderQGClients, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
+    ({ interventions:renderInterventions, home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, clients:renderQGClients, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
   }
 }
 
 function hasUnsentMciDraft(){
   const form = document.querySelector('#mci-form');
-  return Boolean(form && (form.message?.value?.trim() || document.querySelector('#mci-photo-preview img')));
+  return Boolean(interventionModule?.hasDraft()) || Boolean(form && (form.message?.value?.trim() || document.querySelector('#mci-photo-preview img')));
 }
 function confirmLeavingMciDraft(){
   return !hasUnsentMciDraft() || window.confirm('Ce brouillon n’est pas confirmé sur le serveur. Quitter cet écran peut perdre le texte et la photo. Quitter quand même ?');
@@ -2565,7 +2591,7 @@ async function renderQGMissions(){
   render(page('Missions', 'Planning opérationnel et preuve d’exécution', body));
   const [sitesSnap, usersSnap] = await Promise.all([
     getDocs(query(collectionRef('sites'), where('isActive','==',true))).catch(()=>({docs:[]})),
-    getDocs(query(collectionRef('users'), where('role','==','agent'))).catch(()=>({docs:[]}))
+    getDocs(query(collectionRef('users'), where('role','in',['agent','admin','superviseur']))).catch(()=>({docs:[]}))
   ]);
   const sites = sitesSnap.docs.map(d=>({id:d.id,...d.data()}));
   const agents = usersSnap.docs.map(d=>({id:d.id,...d.data()}));
@@ -5130,7 +5156,7 @@ function isoDateValue(value){
   const d = value.toDate ? value.toDate() : new Date(value);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
-function documentTypeLabel(type){ return ({mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI', invoice:'Facture'}[type] || type || 'Document'); }
+function documentTypeLabel(type){ return ({intervention:'Bon d’intervention', mci:'Main courante MCI', mission:'Rapport de mission', rounds:'Rapport de rondes', alerts:'Rapport SOS / PTI', invoice:'Facture'}[type] || type || 'Document'); }
 function compactReport(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', missionId:r.missionId||'', shiftId:r.shiftId||'', category:r.category||'', severity:r.severity||'', message:r.message||'', status:r.status||'new', supervisorNote:r.supervisorNote||'', photoUrl:r.photoUrl||'', photoAvailable:Boolean(r.photoAvailable||r.photoUrl||r.photoStoragePath), photoStorageBucket:r.photoStorageBucket||'', photoStoragePath:r.photoStoragePath||'', photoBytes:Number(r.photoBytes||0), photoMimeType:r.photoMimeType||'', photoWidth:Number(r.photoWidth||0), photoHeight:Number(r.photoHeight||0), photoCapturedAt:isoDateValue(r.photoCapturedAt)||null, gps:r.gps||null }; }
 function compactRound(r){ return { id:r.id||'', scannedAt:isoDateValue(r.scannedAt), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteId||'', siteNom:r.siteNom||'', checkpointName:r.checkpointName||'', scanMethod:r.scanMethod||'', isValid:r.isValid !== false }; }
 function compactAlert(r){ return { id:r.id||'', createdAt:isoDateValue(r.createdAt || r.heure), agentId:r.agentId||'', agentNom:r.agentNom||'', siteId:r.siteActuel||r.siteId||'', siteNom:r.siteActuelNom||r.siteNom||'', typeAlerte:r.typeAlerte||'SOS/PTI', statut:r.statut||'', niveau:r.niveau||'', message:r.message||'', closeReason:r.closeReason||r.closureReason||'' }; }
@@ -5201,6 +5227,7 @@ function generatedDocumentMeta(d){
   return [`Type : ${documentTypeLabel(d.type)}`, `Site : ${d.siteNom || 'Tous sites'}`, `Lignes : ${d.rowCount || generatedDocumentRows(d).length}`];
 }
 async function downloadGeneratedPdf(d, { silent=false }={}){
+  if(d.type==='intervention')return openArchivedInterventionPdf(d,true);
   try {
     const prepared = await prepareGeneratedDocumentPhotos(d);
     const doc = createGeneratedDocumentPdf(prepared);
@@ -5299,7 +5326,7 @@ async function renderQGDocuments(){
       </form>
       <div class="setup-box" style="margin-top:14px">Métadonnées et PDF privé sont archivés dans Supabase. Pour les clients ayant « e-mail auto » activé, le rapport de mission est envoyé automatiquement après archivage avec relances serveur en cas d’échec.</div>
     </div>
-    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, rondes, SOS et factures</p></div><div class="btn-row">${isStrictAdmin()?`<button class="btn small" type="button" id="repair-historical-pdfs">Réparer PDF historiques</button>`:''}<div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div></div>${isStrictAdmin()?`<div id="documents-bulk-toolbar" class="setup-box" style="margin-bottom:12px"><div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap"><div><strong id="documents-selected-count">0 document sélectionné</strong><div class="muted" style="margin-top:3px;font-size:.86rem">Sélection multiple réservée à l’admin. Les documents récents ou en cours d’envoi sont protégés.</div></div><div class="btn-row"><button class="btn small" type="button" id="documents-select-all">Sélectionner tout (affichés)</button><button class="btn small ghost" type="button" id="documents-clear-selection" disabled>Tout désélectionner</button><button class="btn small danger" type="button" id="documents-delete-selected" disabled>Supprimer la sélection</button></div></div></div>`:''}<div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
+    <div class="card"><div class="card-title"><div><h2>Documents archivés</h2><p>MCI, missions, interventions, rondes, SOS et factures</p></div><div class="btn-row">${isStrictAdmin()?`<button class="btn small" type="button" id="repair-historical-pdfs">Réparer PDF historiques</button>`:''}<div class="field compact-field"><select class="select" id="documents-filter"><option value="">Tous</option><option value="mci">MCI</option><option value="mission">Missions</option><option value="intervention">Interventions</option><option value="rounds">Rondes</option><option value="alerts">SOS</option><option value="invoice">Factures</option></select></div></div></div>${isStrictAdmin()?`<div id="documents-bulk-toolbar" class="setup-box" style="margin-bottom:12px"><div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap"><div><strong id="documents-selected-count">0 document sélectionné</strong><div class="muted" style="margin-top:3px;font-size:.86rem">Sélection multiple réservée à l’admin. Les documents récents ou en cours d’envoi sont protégés.</div></div><div class="btn-row"><button class="btn small" type="button" id="documents-select-all">Sélectionner tout (affichés)</button><button class="btn small ghost" type="button" id="documents-clear-selection" disabled>Tout désélectionner</button><button class="btn small danger" type="button" id="documents-delete-selected" disabled>Supprimer la sélection</button></div></div></div>`:''}<div id="generated-documents-list" class="list"><div class="empty">Chargement...</div></div></div>
   </section>`;
   render(page('Documents', 'Génération, archivage et téléchargement opérationnel', body));
   const [sitesSnap, missionsSnap] = await Promise.all([
@@ -5436,7 +5463,7 @@ function generatedDeliveryStatusMeta(status){
 }
 
 async function hydrateGeneratedDeliveryStatuses(rows){
-  const missionIds=(rows||[]).filter(d=>d.type==='mission'&&d.id).map(d=>String(d.id));
+  const missionIds=(rows||[]).filter(d=>['mission','intervention'].includes(d.type)&&d.id).map(d=>String(d.id));
   if(!missionIds.length||!navigator.onLine)return rows;
   try{
     const sb=getSupabaseClient();
@@ -5458,6 +5485,7 @@ async function hydrateGeneratedDeliveryStatuses(rows){
 }
 
 function generatedDocumentDeleteLocked(d){
+  if(d?.type==='intervention')return true; // Immutable archive; use withdrawal in Interventions.
   const status=String(d?.deliveryStatus||'');
   const activeStatuses=new Set(['pending','email_queued','waiting_pdf','retry_pending','bridge_failed']);
   const createdMs=timestampToDate(d?.createdAt)?.getTime?.()||0;
@@ -5550,7 +5578,7 @@ function listenGeneratedDocuments(){
       const locked=generatedDocumentDeleteLocked(d);
       const checked=selectedIds.has(String(d.id));
       const selector=isStrictAdmin()?`<label style="display:flex;align-items:flex-start;padding:5px 8px 0 0;min-width:34px" title="${locked?'Document protégé pendant son traitement':'Sélectionner ce document'}"><input type="checkbox" data-select-generated-doc="${safe(d.id)}" ${checked?'checked':''} ${locked?'disabled':''} style="width:19px;height:19px;accent-color:#32b8ff"></label>`:'';
-      return `<div class="item document-item pdf-document">${selector}<div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span>${d.type==='mission'?` <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>`:''}${locked&&isStrictAdmin()?` <span class="pill orange">Protégé</span>`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${d.type==='mission'&&d.deliveryStatus!=='sent'?`<button class="btn small" data-retry-generated-email="${safe(d.id)}">Relancer envoi</button>`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}" ${locked?'disabled title="Disponible après archivage complet"':''}>Supprimer</button>`:''}</div></div>`;
+      return `<div class="item document-item pdf-document">${selector}<div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span>${['mission','intervention'].includes(d.type)?` <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>`:''}${locked&&isStrictAdmin()?` <span class="pill orange">Protégé</span>`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${['mission','intervention'].includes(d.type)&&d.deliveryStatus!=='sent'?`<button class="btn small" data-retry-generated-email="${safe(d.id)}">Relancer envoi</button>`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}" ${locked?'disabled title="Disponible après archivage complet"':''}>Supprimer</button>`:''}</div></div>`;
     }).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
     document.querySelectorAll('[data-open-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>openGeneratedDocument(rows.find(d=>d.id===btn.dataset.openGeneratedDoc))));
     document.querySelectorAll('[data-download-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>downloadGeneratedDocument(rows.find(d=>d.id===btn.dataset.downloadGeneratedDoc))));
@@ -5597,14 +5625,37 @@ function listenGeneratedDocuments(){
     hydrateGeneratedDeliveryStatuses(localRows).then(merged=>{rows=merged;redraw();}).catch(()=>{});
   },()=>box.innerHTML='<div class="empty">Documents indisponibles. Vérifie les RLS Supabase.</div>'));
 }
+// Intervention PDFs are immutable archived bytes, never rebuilt from a generic document preview.
+async function openArchivedInterventionPdf(d,download=false){
+  const identity=currentUser?.supabaseUid||currentUser?.uid;
+  const preview=download?null:window.open('about:blank','_blank');
+  if(!download&&!preview){toast('Ouverture bloquée. Utilise Télécharger.','warning');return;}
+  if(preview)preview.opener=null;
+  try{
+    if(!navigator.onLine)throw new Error('Connexion requise pour vérifier l’accès au document.');
+    const sb=getSupabaseClient();
+    const latest=await sb.from('generated_documents').select('storage_bucket,storage_path').eq('firebase_id',d.id).eq('type','intervention').single();
+    if(latest.error||!latest.data)throw new Error('Document indisponible ou accès retiré.');
+    const result=await sb.storage.from(latest.data.storage_bucket).download(latest.data.storage_path);
+    if(result.error)throw result.error;
+    if(identity!==(currentUser?.supabaseUid||currentUser?.uid))throw new Error('Session modifiée. Rouvre le document depuis ton espace.');
+    if(!result.data||result.data.size<100)throw new Error('Archive PDF indisponible. Utilise la reprise depuis Interventions.');
+    const url=URL.createObjectURL(result.data);
+    if(preview)preview.location.replace(url);
+    else{const a=document.createElement('a');a.href=url;a.download=documentSlug(d.title||'Bon intervention','pdf');a.click();}
+    setTimeout(()=>URL.revokeObjectURL(url),120000);
+  }catch(error){preview?.close();toast(error.message||'PDF indisponible.','error');}
+}
 function openGeneratedDocument(d){
   if(!d)return;
+  if(d.type==='intervention')return openArchivedInterventionPdf(d,false);
   showModal('Document archivé',`<div class="document-preview">${generatedDocumentHtml(d)}</div><div class="btn-row"><button class="btn primary" id="download-generated-pdf">Télécharger PDF</button><button class="btn" id="print-generated-document">Imprimer depuis aperçu</button><button class="btn ghost" id="download-generated-csv">Exporter CSV</button></div>`,'wide');
   document.querySelector('#download-generated-pdf')?.addEventListener('click',()=>downloadGeneratedPdf(d));
   document.querySelector('#print-generated-document')?.addEventListener('click',()=>printGeneratedDocument(d));
   document.querySelector('#download-generated-csv')?.addEventListener('click',()=>exportCSV(generatedDocumentRows(d),`${documentSlug(d.title||d.type,'csv')}`));
 }
 function printGeneratedDocument(d){
+  if(d.type==='intervention')return openArchivedInterventionPdf(d,false);
   document.querySelector('#print-root')?.remove();
   const root=document.createElement('div');root.id='print-root';root.className='print-root';root.innerHTML=generatedDocumentHtml(d);document.body.appendChild(root);window.print();setTimeout(()=>root.remove(),600);
 }
@@ -6766,7 +6817,7 @@ function pdfTextValue(value){
   return String(value).replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/\s+/g,' ').trim();
 }
 function pdfBrandDocType(type){
-  return ({mci:'MAIN COURANTE', mission:'RAPPORT DE MISSION', rounds:'RONDES', alerts:'SOS / PTI', invoice:'FACTURE'}[type] || 'DOCUMENT OPÉRATIONNEL');
+  return ({intervention:'BON D’INTERVENTION', mci:'MAIN COURANTE', mission:'RAPPORT DE MISSION', rounds:'RONDES', alerts:'SOS / PTI', invoice:'FACTURE'}[type] || 'DOCUMENT OPÉRATIONNEL');
 }
 function pdfDrawLogo(doc, x, y, w, h){
   try { doc.addImage(AZZERA_DOC_LOGO_DATA_URI, 'PNG', x, y, w, h, undefined, 'FAST'); return; } catch(error) {}
@@ -6981,6 +7032,7 @@ function createGeneratedDocumentPdf(d){
   if(!jsPDF) throw new Error('Bibliothèque PDF indisponible. Vérifie ta connexion ou réessaie.');
   const C = AZZERA_DOC_BRAND;
   const doc = new jsPDF({ unit:'mm', format:'a4', orientation:'portrait' });
+  if(d.type==='intervention'){doc.setCreationDate(new Date(d.created_at));doc.setFileId(String(d.id).replaceAll('-','').toUpperCase());}
   doc.setProperties({ title: pdfDocumentTitle(d), subject: pdfBrandDocType(d.type), author:'AZZERA PROTECT · Sentinelle Pro' });
 
   doc.setFillColor(...C.obsidian); doc.rect(0,0,210,46,'F');
@@ -6996,7 +7048,7 @@ function createGeneratedDocumentPdf(d){
   doc.setFont('helvetica','bold'); doc.setFontSize(7.4); doc.setTextColor(...C.azure);
   doc.text(pdfBrandDocType(d.type), 196, 17, { align:'right' });
   doc.setTextColor(205,216,226); doc.setFont('helvetica','normal'); doc.setFontSize(7.2);
-  doc.text(`Généré le ${new Date().toLocaleString('fr-FR')}`, 196, 24, { align:'right' });
+  doc.text(`Généré le ${new Date(d.type==='intervention'?d.created_at:Date.now()).toLocaleString('fr-FR')}`, 196, 24, { align:'right' });
 
   let y = 58;
   doc.setTextColor(...C.obsidian); doc.setFont('helvetica','bold'); doc.setFontSize(18);
@@ -7012,7 +7064,32 @@ function createGeneratedDocumentPdf(d){
   ];
   y = pdfInfoPanel(doc, metaItems, y);
 
-  if(d.type === 'mission'){
+  if(d.type === 'intervention'){
+    const p=d.payload, i=p.intervention;
+    y=pdfSectionTitle(doc,'Informations de l’intervention',y);
+    doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(...C.grey);
+    for(const line of [`Client : ${p.clientName}`,`Site : ${p.siteNom}`,`Intervenant : ${p.agentNom}`,`Nature : ${i.kind}`,
+      `Prévue : ${dateText(i.scheduled_at)}`,`Début confirmé : ${dateText(i.started_at)}`,`Fin confirmée : ${dateText(i.completed_at)}`, 'Statut : Terminée']) y=pdfWrapped(doc,line,18,y,174,5);
+    for(const [title,text] of [['Motif initial',i.reason],['Description initiale',i.description],['Consignes',i.instructions]]){
+      if(!text)continue;y=pdfSectionTitle(doc,title,y+4);doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(...C.grey);y=pdfWrapped(doc,text,18,y,174,5);
+    }
+    y=pdfSectionTitle(doc,'Compte rendu des opérations',y+4);
+    for(const e of p.entries){
+      y=pdfEnsureSpace(doc,y,18);doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...C.obsidian);
+      y=pdfWrapped(doc,`${dateText(e.received_at)} · ${e.kind==='action'?'Action réalisée':'Observation'}`,18,y,174,5);
+      doc.setFont('helvetica','normal');doc.setTextColor(...C.grey);y=pdfWrapped(doc,e.message,18,y,174,5)+5;
+    }
+    y=pdfSectionTitle(doc,'Conclusion',y+3);doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(...C.grey);
+    y=pdfWrapped(doc,i.conclusion||'Intervention terminée.',18,y,174,5);
+    for(const [n,e] of p.entries.filter(e=>e.photoUrl).entries()){
+      doc.addPage();let py=pdfSectionTitle(doc,`Photographie ${n+1}`,24);
+      doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(...C.grey);
+      py=pdfWrapped(doc,`${dateText(e.received_at)} · ${p.siteNom}`,18,py,174,5)+5;
+      const ratio=Math.min(178/e.photoWidth,155/e.photoHeight);const w=e.photoWidth*ratio,h=e.photoHeight*ratio;
+      doc.addImage(e.photoUrl,'JPEG',16+(178-w)/2,py,w,h,undefined,'FAST');
+      py+=h+10;pdfWrapped(doc,e.message,18,py,174,5);
+    }
+  } else if(d.type === 'mission'){
     const {mission, shift, rows:missionRows, timelineRows} = pdfMissionPayload(d);
     y = pdfMetricCards(doc, [
       {label:'Rapports', value:missionRows.length},
@@ -7132,4 +7209,18 @@ function generatedDocumentHtml(d){
   else if(d.type==='rounds'){ headers=['Date','Agent','Site','Point','Méthode','Validité']; mapper=r=>[dateText(r.scannedAt),r.agentNom,r.siteNom,r.checkpointName,r.scanMethod,r.isValid?'Valide':'Refusé']; }
   else { headers=['Date','Agent','Site','Alerte','Statut','Message']; mapper=r=>[dateText(r.createdAt),r.agentNom,r.siteNom,r.typeAlerte,r.statut,r.message]; }
   return `<article class="report-doc azzera-doc"><header class="azza-header"><div class="azza-brand"><img src="${logo}" alt="Azzera Protect"><div><strong>AZZERA PROTECT</strong><span>SÉCURITÉ PRIVÉE</span></div></div><div class="azza-doc-type">${safe(pdfBrandDocType(d.type))}<br><small>${dateText(d.createdAt)}</small></div></header><section class="azza-hero"><p>On s’occupe du risque. Vous du reste.</p><h1>${safe(d.title||documentTypeLabel(d.type))}</h1><div class="azza-accent"></div></section><section class="azza-meta"><div><span>Type</span><strong>${safe(documentTypeLabel(d.type))}</strong></div><div><span>Site</span><strong>${safe(d.siteNom||'Tous sites')}</strong></div><div><span>Volume</span><strong>${d.rowCount||rows.length} ligne(s)</strong></div></section>${p.truncated?'<section class="azza-warning">Aperçu limité aux 350 premières lignes. Le volume total reste enregistré.</section>':''}<section><h3>Contenu du document</h3>${azzeraDocHtmlTable(headers, rows, mapper)}</section>${d.type==='mci'?photoAnnexesHtml(rows):''}<footer>Document généré automatiquement par Sentinelle Pro · AZZERA PROTECT</footer></article>`;
+}
+
+// Server snapshot + authorized bytes only; a missing photo prevents a false complete PDF.
+async function createInterventionPdfBlob(d,client){
+  const snapshot=structuredClone(d);const p=snapshot.payload;
+  if(!p?.intervention?.completed_at || !Array.isArray(p.entries))throw new Error('Source documentaire incomplète.');
+  for(const e of p.entries){if(e.photo_state==='ready'){
+    const {data,error}=await client.storage.from('report-photos').download(e.photo_path);if(error)throw error;
+    e.photoUrl=await blobToDataUrl(data);const img=new Image();img.src=e.photoUrl;
+    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('Photo illisible : archivage suspendu.'));});
+    e.photoWidth=img.naturalWidth;e.photoHeight=img.naturalHeight;
+  }}
+  snapshot.siteNom=p.siteNom;snapshot.rowCount=p.entries.length;
+  return createGeneratedDocumentPdf(snapshot).output('blob');
 }

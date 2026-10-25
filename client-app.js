@@ -6,6 +6,7 @@ let profile=null;
 let clients=[];
 let sites=[];
 let documents=[];
+let interventions=[];
 let recoveryMode=false;
 let portalEpoch=0;
 
@@ -27,6 +28,7 @@ function titleBusinessPeriod(title=''){
 function documentBusinessPeriod(document={}){
   const payload=document.payload&&typeof document.payload==='object'?document.payload:{};
   const type=String(document.type||'').toLowerCase();
+  if(type==='intervention')return {start:asDate(payload.intervention?.started_at),end:asDate(payload.intervention?.completed_at)};
   let start=asDate(payload.businessPeriodStart||payload.periodStart||payload.dateFrom||null);
   let end=asDate(payload.businessPeriodEnd||payload.periodEnd||payload.dateTo||null);
   if(type==='mission'){
@@ -60,7 +62,7 @@ function documentBusinessLabel(document={}){
   if(end&&!sameDay)return `Du ${shortDate(start)} au ${shortDate(end)}`;
   return shortDate(start);
 }
-function docTypeLabel(type){return ({mission:'Rapport de mission',mci:'Main courante',rounds:'Rapport de rondes',alerts:'Rapport SOS / PTI'}[String(type||'').toLowerCase()]||'Document opérationnel');}
+function docTypeLabel(type){return ({intervention:'Bon d’intervention',mission:'Rapport de mission',mci:'Main courante',rounds:'Rapport de rondes',alerts:'Rapport SOS / PTI'}[String(type||'').toLowerCase()]||'Document opérationnel');}
 function message(text,type='error'){const box=document.querySelector('#client-message');if(box){box.className=type;box.textContent=text;}}
 function toast(text,type='error'){
   document.querySelector('.client-toast')?.remove();
@@ -85,7 +87,7 @@ async function boot(){
     const client=await getSupabase();
     client.auth.onAuthStateChange((event,session)=>{
       if(event==='PASSWORD_RECOVERY'){recoveryMode=true;renderPasswordRecovery();return;}
-      if(event==='SIGNED_OUT'){portalEpoch++;profile=null;clients=[];sites=[];documents=[];renderLogin();}
+      if(event==='SIGNED_OUT'){portalEpoch++;profile=null;clients=[];sites=[];documents=[];interventions=[];renderLogin();}
       if(event==='SIGNED_IN'&&session&&!recoveryMode)loadPortal().catch(renderError);
     });
     const {data:{session}}=await client.auth.getSession();
@@ -159,6 +161,10 @@ async function loadPortal(){
     .eq('organization_id',nextProfile.organization_id).eq('status','active').order('created_at',{ascending:false}).limit(500);
   if(ticket!==portalEpoch)return;
   if(docsError)throw docsError;
+  const interventionResult=await supabase.rpc('sentinelle_client_interventions');
+  if(ticket!==portalEpoch)return;
+  if(interventionResult.error)throw interventionResult.error;
+  interventions=interventionResult.data||[];
   profile=nextProfile;clients=nextClients;sites=nextSites;
   documents=(docs||[]).sort((a,b)=>(documentBusinessDate(b)?.getTime()||0)-(documentBusinessDate(a)?.getTime()||0));
   renderPortal();
@@ -194,9 +200,13 @@ function renderPortal(){
       <div class="metric-card"><div class="metric-icon">＋</div><div class="metric-copy"><span>NOUVEAUX SUR 30 JOURS</span><strong>${last30}</strong></div></div>
     </section>
 
+    <section class="portal-card" id="client-interventions">
+      <div class="panel-head"><div><span class="eyebrow">OPÉRATIONS PONCTUELLES</span><h2>Interventions</h2><p>Vos bons finalisés et publiés, classés du plus récent au plus ancien.</p></div><span class="panel-count">${interventions.length} intervention(s)</span></div>
+      <div class="document-grid">${interventions.map(i=>`<article class="document-card"><div class="doc-icon" aria-hidden="true">↗</div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(i.number)}</span><span class="tag sent">Terminée</span></div><h3>${safe(i.reason)}</h3><p>${safe(i.site_name)} · ${safe(dateText(i.completed_at))}</p><p>${safe(i.kind)}</p></div><div class="doc-actions"><button data-intervention-open="${safe(i.document_id)}">Ouvrir le bon</button><button class="secondary" data-intervention-download="${safe(i.document_id)}">Télécharger</button></div></article>`).join('')||'<div class="empty">Aucun bon d’intervention publié pour le moment.</div>'}</div>
+    </section>
     <section class="portal-card">
       <div class="panel-head"><div><h2>Mains courantes & rapports</h2><p>Consultez, recherchez et téléchargez vos PDF opérationnels</p></div><span class="panel-count" id="client-result-count">${documents.length} document${documents.length>1?'s':''}</span></div>
-      <div class="filters"><select id="client-site-filter" aria-label="Filtrer par site"><option value="">Tous les sites</option>${siteOptions}</select><select id="client-type-filter" aria-label="Filtrer par type"><option value="">Tous les types</option><option value="mission">Rapports de mission</option><option value="mci">Mains courantes</option><option value="rounds">Rondes</option><option value="alerts">SOS / PTI</option></select><select id="client-month-filter" aria-label="Filtrer par période"><option value="">Toutes les périodes</option>${monthOptions}</select><input id="client-search" type="search" placeholder="Rechercher un rapport…" aria-label="Rechercher un rapport"></div>
+      <div class="filters"><select id="client-site-filter" aria-label="Filtrer par site"><option value="">Tous les sites</option>${siteOptions}</select><select id="client-type-filter" aria-label="Filtrer par type"><option value="">Tous les types</option><option value="mission">Rapports de mission</option><option value="intervention">Bons d’intervention</option><option value="mci">Mains courantes</option><option value="rounds">Rondes</option><option value="alerts">SOS / PTI</option></select><select id="client-month-filter" aria-label="Filtrer par période"><option value="">Toutes les périodes</option>${monthOptions}</select><input id="client-search" type="search" placeholder="Rechercher un rapport…" aria-label="Rechercher un rapport"></div>
       <div id="client-document-list" class="document-grid"></div>
     </section>
     <div class="footer-note"><strong>Sentinelle Pro</strong> · Portail client sécurisé · Azzera Protect — Sécurité privée</div>`;
@@ -208,6 +218,8 @@ function renderPortal(){
   if(latestDownload)latestDownload.addEventListener('click',()=>openDocument(latestDownload.dataset.documentId,latestDownload,true));
   ['client-site-filter','client-type-filter','client-month-filter'].forEach(id=>document.querySelector(`#${id}`)?.addEventListener('change',drawDocuments));
   document.querySelector('#client-search')?.addEventListener('input',drawDocuments);
+  document.querySelectorAll('[data-intervention-open]').forEach(b=>b.onclick=()=>openDocument(b.dataset.interventionOpen,b,false));
+  document.querySelectorAll('[data-intervention-download]').forEach(b=>b.onclick=()=>openDocument(b.dataset.interventionDownload,b,true));
   drawDocuments();
 }
 
@@ -245,7 +257,8 @@ async function openDocument(documentId,button,download){
   const requestEpoch=portalEpoch;
   let preview=null;
   try{
-    const d=documents.find(row=>row.id===documentId);if(!d)throw new Error('Document introuvable.');
+    const intervention=interventions.find(row=>row.document_id===documentId);
+    const d=documents.find(row=>row.id===documentId)||(intervention?{id:documentId,title:intervention.number}:null);if(!d)throw new Error('Document introuvable.');
     // Reserve the preview during the click gesture; Safari can block a popup
     // created after asynchronous authorization. No file is opened before checks.
     if(!download){

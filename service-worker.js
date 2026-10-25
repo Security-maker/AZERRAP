@@ -1,21 +1,23 @@
-const CACHE_NAME = 'sentinelle-pro-online-20261025-r1';
+const CACHE_NAME = 'sentinelle-pro-phase2-20261025-r1';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
+  './premium.css?v=phase2-20261025-r1',
+  './interventions.js?v=phase2-20261025-r1',
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=online-20261025-r1',
+  './app.js?v=phase2-20261025-r1',
   './sentinelle-config.js',
-  './supabase-compat.js?v=online-20261025-r1',
+  './supabase-compat.js?v=phase2-20261025-r1',
   './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js?v=online-20261025-r1',
+  './supabase-bridge.js?v=phase2-20261025-r1',
   './manifest.json',
   './manifest-client.json',
   './offline.html',
   './client.html',
   './client-style.css?v=597',
-  './client-app.js?v=5109',
+  './client-app.js?v=phase2-20261025-r1',
   './reset-password.html',
   './reset-password.js?v=593',
   './assets/logo.png',
