@@ -1,5 +1,6 @@
 // SENTINELLE PRO V5.8.8.3 — Web Push natif Supabase
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4'
+import { safePushEndpoint, safePushNavigation } from './security.mjs'
 import { setVapidDetails, sendNotification } from 'npm:web-push@3.6.7'
 
 const cors={
@@ -17,10 +18,7 @@ function secretKey(){
 function boolPref(value:any,key:string){ return value?.[key] !== false }
 function safeText(value:unknown,max=480){ return String(value||'').replace(/\s+/g,' ').trim().slice(0,max) }
 function routeUrl(route:string, explicit:string){
-  if(/^https:\/\//i.test(explicit||'')) return explicit
-  const base=Deno.env.get('SENTINELLE_PUBLIC_URL') || ''
-  if(!base) return ''
-  try{ const u=new URL(base); u.searchParams.set('route',route||'home'); return u.href }catch{return ''}
+  return safePushNavigation(Deno.env.get('SENTINELLE_PUBLIC_URL') || '', route, explicit)
 }
 
 async function currentProfile(admin:any,userId:string){
@@ -34,7 +32,7 @@ async function currentProfile(admin:any,userId:string){
 
 async function targetProfiles(admin:any, sender:any, payload:any){
   const org=sender.organization_id
-  const eventType=String(payload.notificationType||'flash')
+  const eventType=safeText(payload.notificationType||'flash',50)
 
   if(['shift_start','shift_end'].includes(eventType)){
     if(sender.role!=='agent') throw new Error('Événement de poste réservé à un agent')
@@ -53,6 +51,33 @@ async function targetProfiles(admin:any, sender:any, payload:any){
   }
 
   if(!['admin','superviseur'].includes(sender.role)) throw new Error('Envoi push réservé au QG')
+  // Flash content and audience come from the stored message, never from browser selectors.
+  if(eventType==='flash'){
+    const flashId=String(payload?.data?.flashId||'').trim()
+    if(!flashId) throw new Error('Flash enregistré requis')
+    const {data:record,error:flashError}=await admin.from('compat_records')
+      .select('external_id,payload').eq('organization_id',org).eq('collection_name','flashMessages')
+      .eq('external_id',flashId).maybeSingle()
+    if(flashError) throw flashError
+    const flash=record?.payload
+    if(!flash || flash.status!=='sent') throw new Error('Flash indisponible ou retiré')
+    const target=String(flash.target||'')
+    if(!['all','working'].includes(target) && !/^(agent|site):.+$/.test(target)) throw new Error('Cible Flash invalide')
+    const {data:agents,error:agentsError}=await admin.from('profiles')
+      .select('id,external_uid,role').eq('organization_id',org).eq('active',true).eq('role','agent')
+    if(agentsError) throw agentsError
+    let selected=agents||[]
+    if(target.startsWith('agent:')) selected=selected.filter((p:any)=>p.external_uid===target.slice(6))
+    else if(target==='working' || target.startsWith('site:')){
+      let query=admin.from('shifts').select('firebase_agent_uid').eq('organization_id',org).eq('status','active')
+      if(target.startsWith('site:')) query=query.eq('firebase_site_id',target.slice(5))
+      const {data:shifts,error:shiftsError}=await query
+      if(shiftsError) throw shiftsError
+      const active=new Set((shifts||[]).map((s:any)=>s.firebase_agent_uid))
+      selected=selected.filter((p:any)=>active.has(p.external_uid))
+    }
+    return {profiles:selected,shift:null,flash:{...flash,id:record.external_id}}
+  }
   const {data:agents,error}=await admin.from('profiles')
     .select('id,external_uid,role,firebase_payload').eq('organization_id',org).eq('active',true).eq('role','agent')
   if(error) throw error
@@ -127,7 +152,7 @@ export default {
       if(!publicKey||!privateKey) return json({ok:false,error:'Secrets VAPID incomplets'},500)
 
       const eventType=safeText(payload.notificationType||'flash',50)
-      const {profiles,shift}=await targetProfiles(admin,sender,payload)
+      const {profiles,shift,flash}=await targetProfiles(admin,sender,payload) as any
       if(!profiles.length) return json({ok:true,skipped:true,reason:'Aucun destinataire autorisé',delivered:0})
       const profileIds=profiles.map((p:any)=>p.id)
       const {data:subscriptions,error:subError}=await admin.from('web_push_subscriptions')
@@ -138,17 +163,17 @@ export default {
       const eligible=(subscriptions||[]).filter((s:any)=>boolPref(s.preferences,category))
       if(!eligible.length) return json({ok:true,skipped:true,reason:'Aucun appareil abonné pour cette notification',delivered:0})
 
-      const authoritative=serverMessage(sender,eventType,shift,payload)
-      const title=safeText(authoritative?.title||payload.title||'Sentinelle Pro',100)
-      const body=safeText(authoritative?.body||payload.message||'Nouvelle information opérationnelle',480)
+      const authoritative=flash ? {title:flash.title,body:flash.message,priority:flash.priority,route:'flash'} : serverMessage(sender,eventType,shift,payload)
+      const title=safeText((authoritative?authoritative.title:payload.title)||'Sentinelle Pro',100)
+      const body=safeText((authoritative?authoritative.body:payload.message)||'Nouvelle information opérationnelle',480)
       const route=safeText(authoritative?.route||payload.route||payload?.data?.route||'home',60)
-      const priority=safeText(authoritative?.priority||payload.priority||'Information',30)
-      const notificationId=safeText(payload.notificationId||`${eventType}_${Date.now()}`,160)
+      const priority=safeText((authoritative?authoritative.priority:payload.priority)||'Information',30)
+      const notificationId=safeText(flash?`flash_${flash.id}`:payload.notificationId||`${eventType}_${Date.now()}`,160)
       const urlToOpen=routeUrl(route,String(payload.url||''))
       const visiblePayload=JSON.stringify({
         title,body,notificationId,tag:`sentinelle-${eventType}-${notificationId}`,
         route,url:urlToOpen,requireInteraction:['Critique','Urgent'].includes(priority),
-        data:{type:eventType,priority,route,shiftId:payload?.data?.shiftId||'',missionId:payload?.data?.missionId||'',flashId:payload?.data?.flashId||''}
+        data:{type:eventType,priority,route,shiftId:payload?.data?.shiftId||'',missionId:payload?.data?.missionId||'',flashId:flash?.id||payload?.data?.flashId||''}
       })
 
       setVapidDetails(subject,publicKey,privateKey)
@@ -156,6 +181,16 @@ export default {
       const failures:any[]=[]
       for(const sub of eligible){
         try{
+          if(flash){
+            const fresh=await targetProfiles(admin,sender,{notificationType:'flash',data:{flashId:flash.id}}) as any
+            if(!fresh.profiles.some((p:any)=>p.id===sub.profile_id)) throw new Error('Destinataire Flash non autorisé au moment de l’envoi')
+            if(['target','title','message','priority','status'].some(k=>fresh.flash[k]!==flash[k])) throw new Error('Flash modifié : nouvelle vérification requise')
+            const {data:device,error:deviceError}=await admin.from('web_push_subscriptions')
+              .select('profile_id,enabled,preferences,endpoint').eq('id',sub.id).maybeSingle()
+            if(deviceError) throw deviceError
+            if(!device?.enabled || device.profile_id!==sub.profile_id || device.endpoint!==sub.endpoint || !boolPref(device.preferences,category)) throw new Error('Abonnement Flash désactivé ou modifié')
+          }
+          if(!safePushEndpoint(sub.endpoint)) throw new Error('Destination Web Push non autorisée; abonnement conservé pour vérification')
           await sendNotification({endpoint:sub.endpoint,keys:{p256dh:sub.p256dh,auth:sub.auth_secret}},visiblePayload,{TTL:['Critique','Urgent'].includes(priority)?3600:86400})
           delivered++
           await admin.from('web_push_subscriptions').update({last_success_at:new Date().toISOString(),failure_count:0,last_error:null,updated_at:new Date().toISOString()}).eq('id',sub.id)
@@ -166,7 +201,7 @@ export default {
           if(expired) disabled++
           const message=safeText(error?.body||error?.message||error,500)
           failures.push({status,message,disabled:expired})
-          await admin.from('web_push_subscriptions').update({enabled:expired?false:true,last_failure_at:new Date().toISOString(),failure_count:1,last_error:message,updated_at:new Date().toISOString()}).eq('id',sub.id)
+          await admin.from('web_push_subscriptions').update({...(expired?{enabled:false}:{}),last_failure_at:new Date().toISOString(),failure_count:1,last_error:message,updated_at:new Date().toISOString()}).eq('id',sub.id)
         }
       }
       return json({ok:true,provider:'web-push-vapid',oneSignal:false,requested:eligible.length,delivered,failed,disabled,notificationType:eventType,failures:failures.slice(0,5)})
