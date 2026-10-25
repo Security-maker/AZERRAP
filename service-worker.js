@@ -1,20 +1,21 @@
-const CACHE_NAME = 'sentinelle-pro-v5-9-7-client-mobile-site-card';
-const CDN_CACHE_NAME = 'sentinelle-cdn-v5-9-7';
+const CACHE_NAME = 'sentinelle-pro-online-20261025-r1';
+const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=593',
+  './app.js?v=online-20261025-r1',
   './sentinelle-config.js',
-  './supabase-compat.js?v=593',
+  './supabase-compat.js?v=online-20261025-r1',
+  './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js',
+  './supabase-bridge.js?v=online-20261025-r1',
   './manifest.json',
   './manifest-client.json',
   './offline.html',
   './client.html',
   './client-style.css?v=597',
-  './client-app.js?v=597',
+  './client-app.js?v=5109',
   './reset-password.html',
   './reset-password.js?v=593',
   './assets/logo.png',
@@ -49,17 +50,19 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('message', event => {
-  if (event.data?.type === 'ACTIVATE_UPDATE') self.skipWaiting();
+  if (event.data?.type === 'ACTIVATE_UPDATE') event.waitUntil((async()=>{
+    // Old clients cannot attest that their drafts and active operation are safe.
+    // Wait for all app windows to close; do not force activation mid-shift.
+    const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});
+    if(!windows.length) await self.skipWaiting();
+    else event.source?.postMessage({type:'UPDATE_DEFERRED',reason:'open_windows'});
+  })());
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.map(key => {
-      const isSentinelleCache = key.startsWith('sentinelle-pro-') || key.startsWith('sentinelle-cdn-');
-      return isSentinelleCache && ![CACHE_NAME, CDN_CACHE_NAME].includes(key) ? caches.delete(key) : Promise.resolve(false);
-    })))
-  );
-  self.clients.claim();
+  // Keep old versioned assets during coexistence; no automatic cache eviction.
+  // A later cleanup needs an explicit verified transition window.
+
 });
 
 async function networkFirst(request, cacheName=CACHE_NAME, fallback=null){
@@ -71,7 +74,9 @@ async function networkFirst(request, cacheName=CACHE_NAME, fallback=null){
     }
     return response;
   } catch (_) {
-    return (await caches.match(request)) || (fallback ? await caches.match(fallback) : null) || Response.error();
+    // Never let a retained historical cache supply another version's shell.
+    const cache = await caches.open(cacheName);
+    return (await cache.match(request)) || (fallback ? await cache.match(fallback) : null) || Response.error();
   }
 }
 
@@ -102,11 +107,23 @@ self.addEventListener('push', event => {
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
+// Only application entry points in this worker scope are notification destinations.
+function safeNotificationUrl(value, route='home'){
+  const base=new URL('./index.html',self.registration.scope);
+  const fallback=new URL(base);fallback.searchParams.set('route',String(route||'home'));
+  try {
+    const u=new URL(value||fallback.href,base);
+    const client=new URL('./client.html',base);
+    if(u.origin===base.origin && !u.username && !u.password && [base.pathname,client.pathname].includes(u.pathname)) return u.href;
+  } catch (_) {}
+  return fallback.href;
+}
+
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const notificationData = event.notification?.data || {};
   const fallback = `./index.html?route=${encodeURIComponent(notificationData.route || 'home')}`;
-  const targetUrl = new URL(notificationData.url || fallback, self.location.origin).href;
+  const targetUrl = safeNotificationUrl(notificationData.url, notificationData.route);
   event.waitUntil((async () => {
     const clientsList = await self.clients.matchAll({ type:'window', includeUncontrolled:true });
     for (const client of clientsList) {
@@ -128,18 +145,31 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
+  if (request.headers.has('authorization')) {
+    event.respondWith(fetch(request, {cache:'no-store'}));
+    return;
+  }
   if (TRUSTED_OFFLINE_CDN.has(url.hostname)) {
     event.respondWith(staleWhileRevalidate(request));
     return;
   }
   if (url.origin !== self.location.origin) return;
+  // Only public shell resources may use cache. API/Storage reads must reach the
+  // server, including same-origin recipe proxies and navigations to signed PDFs.
+  const shellPaths = new Set(APP_SHELL.map(path => new URL(path, self.registration.scope).pathname));
+  const assetPath = new URL('./assets/', self.registration.scope).pathname;
+  if (!shellPaths.has(url.pathname) && !url.pathname.startsWith(assetPath)) {
+    event.respondWith(fetch(request, {cache:'no-store'}));
+    return;
+  }
   if (request.mode === 'navigate') {
     const clientPortal = /\/client\.html$/i.test(url.pathname);
     const resetPortal = /\/reset-password\.html$/i.test(url.pathname);
     const fallbackPage = resetPortal ? './reset-password.html' : (clientPortal ? './client.html' : './index.html');
     event.respondWith(networkFirst(request, CACHE_NAME, fallbackPage).then(async response => {
       if (response && response.type !== 'error') return response;
-      return (await caches.match(fallbackPage)) || (await caches.match('./offline.html'));
+      const cache = await caches.open(CACHE_NAME);
+      return (await cache.match(fallbackPage)) || (await cache.match('./offline.html')) || Response.error();
     }));
     return;
   }

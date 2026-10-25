@@ -1,11 +1,11 @@
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=510';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=online-20261025-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient
-} from './supabase-compat.js?v=593';
+} from './supabase-compat.js?v=online-20261025-r1';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -81,13 +81,13 @@ const OFFLINE_READY_KEY = 'sentinelle_offline_ready_v1';
 function saveOfflineProfile(profile){
   if (!profile?.uid) return;
   try {
-    localStorage.setItem(OFFLINE_PROFILE_KEY, JSON.stringify({ uid:profile.uid, profile, savedAt:new Date().toISOString() }));
+    localStorage.setItem(OFFLINE_PROFILE_KEY, JSON.stringify({ uid:profile.uid, authUid:currentUser?.supabaseUid, organizationId:stagingConfig.organizationId, profile, savedAt:new Date().toISOString() }));
   } catch (_) {}
 }
 function readOfflineProfile(uid){
   try {
     const row = JSON.parse(localStorage.getItem(OFFLINE_PROFILE_KEY) || 'null');
-    return row?.uid === uid && row?.profile ? row.profile : null;
+    return row?.uid === uid && (row?.authUid || row?.profile?.authUserId) === currentUser?.supabaseUid && (!row?.organizationId || row.organizationId === stagingConfig.organizationId) && row?.profile ? row.profile : null;
   } catch (_) { return null; }
 }
 function setOfflineReady(uid){
@@ -101,9 +101,9 @@ function getOfflineReady(uid=currentUser?.uid){
 }
 function offlineReadyText(){
   const row = getOfflineReady();
-  if (!row?.syncedAt) return 'Non préparé';
+  if (!row?.syncedAt) return 'Connexion nécessaire pour vérifier les données serveur';
   const d = new Date(row.syncedAt);
-  return Number.isNaN(d.getTime()) ? 'Préparé' : `Dernière synchro ${d.toLocaleString('fr-FR',{dateStyle:'short',timeStyle:'short'})}`;
+  return Number.isNaN(d.getTime()) ? 'Actualisation nécessaire' : `Dernière actualisation ${d.toLocaleString('fr-FR',{dateStyle:'short',timeStyle:'short'})} — aucune file hors connexion`;
 }
 
 function toast(message, type='info'){
@@ -347,13 +347,13 @@ function boot(){
     });
   }
   window.addEventListener('online', () => {
-    toast('Connexion rétablie — synchronisation en cours', 'success');
+    toast('Réseau détecté — vérifie les confirmations serveur. Les brouillons ne sont pas envoyés automatiquement.', 'info');
     if (currentUser && currentProfile && rolePortal(currentProfile.role) === 'agent') {
       primeAgentOfflineData().catch(error => console.warn('Synchronisation hors ligne impossible', error));
     }
     retryPendingSupabaseDeliveries().catch(error => console.warn('Relance Supabase impossible', error));
   });
-  window.addEventListener('offline', () => toast('Mode hors ligne V5.8.8.6 — les écritures Supabase sont suspendues jusqu’au retour du réseau', 'warning'));
+  window.addEventListener('offline', () => toast('Connexion coupée : aucun nouvel enregistrement confirmé. Les brouillons peuvent être perdus si tu fermes ou quittes cet écran.', 'warning'));
 
   if (!isConfigured()) return renderSetupMissing();
   try {
@@ -379,7 +379,10 @@ function boot(){
   onAuthStateChanged(auth, async user => {
     clearSubs();
     currentUser = user;
+    currentProfile = null;
     activeShiftCache = null;
+    lastSitesCache=[];qgReportMissionGroups=[];qgNotificationsCache=[];qgMissionsCache=[];qgAllSitesCache=[];qgAllAgentsCache=[];qgInvoicesCache=[];billingProfileCache=null;
+    qgPlanningState.publications.clear();qgPlanningState.missions=[];qgPlanningState.sites=[];qgPlanningState.agents=[];
     if (passwordRecoveryMode) return renderPasswordRecovery();
     if (!user) return renderLogin();
     await loadProfile(user);
@@ -395,11 +398,12 @@ async function loadProfile(user){
     } catch (error) {
       if (navigator.onLine) throw error;
     }
-    if (!profileData) profileData = readOfflineProfile(user.uid);
+    if (!profileData && !navigator.onLine) profileData = readOfflineProfile(user.uid);
     if (!profileData) {
       if (!navigator.onLine) return renderOfflineDeviceNotPrepared(user);
       return renderMissingProfile(user);
     }
+    if(currentUser!==user) return;
     currentProfile = { uid:user.uid, ...profileData };
     saveOfflineProfile(currentProfile);
     if (navigator.onLine) {
@@ -426,9 +430,9 @@ async function loadProfile(user){
 
 async function primeAgentOfflineData(){
   if (!currentUser || !currentProfile || rolePortal(currentProfile.role) !== 'agent' || !navigator.onLine) return;
-  await Promise.allSettled([
-    getAgentPlannedMissions(),
-    getActiveSites(),
+  await Promise.all([
+    getAgentPlannedMissions({requireServer:true}),
+    getActiveSites({requireServer:true}),
     findActiveShift(),
     getDocs(query(collectionRef('documents'), limit(250))),
     getDocs(query(collectionRef('roundCheckpoints'), limit(500))),
@@ -467,6 +471,7 @@ function bindGlobalEvents(){
   document.querySelectorAll('[data-route]').forEach(btn => btn.addEventListener('click', () => { closeMenu(); navigate(btn.dataset.route); }));
   document.querySelectorAll('[data-action="diagnose-web-push"]').forEach(btn => btn.addEventListener('click', () => diagnosePushSetup(btn)));
   document.querySelectorAll('[data-action="logout"]').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirmLeavingMciDraft()) return;
     closeMenu();
     if (currentUser) await updateDoc(docRef('users', currentUser.uid), { isOnline:false, lastSeen: serverTimestamp() }).catch(()=>{});
     await disableNativePushForCurrentDevice().catch(()=>{});
@@ -477,6 +482,7 @@ function bindGlobalEvents(){
 }
 
 function navigate(route){
+  if (!confirmLeavingMciDraft()) return;
   currentRoute = route;
   clearSubs();
   const portal = rolePortal(currentProfile.role);
@@ -486,6 +492,18 @@ function navigate(route){
     ({ home:renderQGHome, missions:renderQGMissions, notifications:renderQGNotifications, reports:renderQGReports, documents:renderQGDocuments, clients:renderQGClients, billing:renderQGBilling, intel:renderQGIntel, device:renderQGDevice, sites:renderQGSites, agents:renderQGAgents, alerts:renderQGAlerts, flash:renderQGFlash, pushsetup:renderPushSetup, history:renderQGHistory }[route] || renderQGHome)();
   }
 }
+
+function hasUnsentMciDraft(){
+  const form = document.querySelector('#mci-form');
+  return Boolean(form && (form.message?.value?.trim() || document.querySelector('#mci-photo-preview img')));
+}
+function confirmLeavingMciDraft(){
+  return !hasUnsentMciDraft() || window.confirm('Ce brouillon n’est pas confirmé sur le serveur. Quitter cet écran peut perdre le texte et la photo. Quitter quand même ?');
+}
+window.addEventListener('beforeunload', event => {
+  // Best effort only: iOS may suspend/kill the process without this event.
+  if (hasUnsentMciDraft()) { event.preventDefault(); event.returnValue = ''; }
+});
 
 function renderSetupMissing(){
   render(`
@@ -506,7 +524,7 @@ function renderFatal(title, message){
   render(`<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo"><h1>${safe(title)}</h1><p class="subtitle">Erreur système</p><div class="setup-box danger-copy">${safe(message)}</div></section></div>`);
 }
 function renderOfflineDeviceNotPrepared(user){
-  render(`<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro"><h1>Accès hors ligne indisponible</h1><p class="subtitle">Cet appareil n’a pas encore été préparé</p><div class="setup-box warning-copy">Une première connexion avec réseau est nécessaire sur cet appareil pour vérifier le compte et mettre en cache le profil, le planning et les consignes. Ensuite, l’application pourra redémarrer sans réseau tant que l’agent ne se déconnecte pas.</div><button class="btn full" type="button" onclick="location.reload()">Réessayer</button></section></div>`);
+  render(`<div class="login-page"><section class="login-card"><img src="assets/logo.png" class="login-logo" alt="Sentinelle Pro"><h1>Accès hors ligne indisponible</h1><p class="subtitle">Cet appareil n’a pas encore été préparé</p><div class="setup-box warning-copy">Une connexion réseau est nécessaire pour vérifier le compte et les informations opérationnelles. Le cache peut afficher des informations anciennes ; il ne permet pas d’enregistrer une opération. Les brouillons sont perdus à la fermeture ou au rechargement.</div><button class="btn full" type="button" onclick="location.reload()">Réessayer</button></section></div>`);
 }
 function renderLogin(){
   currentProfile = null;
@@ -519,7 +537,7 @@ function renderLogin(){
         <div class="field"><label>Email</label><input class="input" id="login-email" name="email" type="email" autocomplete="email" required placeholder="agent@agence.fr"></div>
         <div class="field"><label>Mot de passe</label><input class="input" name="password" type="password" autocomplete="current-password" required placeholder="••••••••"></div>
         <button class="btn primary full" type="submit" ${navigator.onLine?'':'disabled'}>${navigator.onLine?'Connexion sécurisée':'Connexion impossible sans réseau'}</button>
-        ${navigator.onLine?`<button class="btn ghost full" type="button" id="main-forgot-password">Mot de passe oublié ?</button>`:`<div class="setup-box warning-copy">Aucune session active n’est disponible sur cet appareil. La toute première connexion Supabase ne peut pas être vérifiée sans réseau. Connecte cet appareil une fois, puis conserve la session pour les futurs démarrages hors ligne.</div>`}
+        ${navigator.onLine?`<button class="btn ghost full" type="button" id="main-forgot-password">Mot de passe oublié ?</button>`:`<div class="setup-box warning-copy">Aucune session vérifiable n’est disponible. Rétablis la connexion pour te connecter et consulter les informations à jour. Aucune opération ne sera envoyée automatiquement après reconnexion.</div>`}
         <div class="divider"></div>
         <p class="muted" style="font-size:12px;line-height:1.55">Authentification native <strong>Supabase Auth</strong>. Les rôles métier sont lus dans <strong>public.profiles</strong>.</p>
       </form>
@@ -612,19 +630,20 @@ async function findActiveShift(){
   const d = snap.docs[0];
   return { id:d.id, ...d.data() };
 }
-async function getActiveSites(){
+async function getActiveSites({requireServer=false}={}){
   try {
     const snap = await getDocs(query(collectionRef('sites'), where('isActive','==',true), orderBy('name'))).catch(async () => getDocs(query(collectionRef('sites'), where('isActive','==',true))));
     lastSitesCache = snap.docs.map(d => ({ id:d.id, ...d.data() }));
   } catch (error) {
+    if (requireServer) throw error;
     console.warn('Sites indisponibles hors ligne', error);
   }
   return lastSitesCache;
 }
 
-async function getAgentPlannedMissions(){
+async function getAgentPlannedMissions({requireServer=false}={}){
   if (!currentUser) return [];
-  const snap = await getDocs(query(collectionRef('missions'), where('agentId','==',currentUser.uid))).catch(()=>({docs:[]}));
+  const snap = await getDocs(query(collectionRef('missions'), where('agentId','==',currentUser.uid))).catch(error=>{if(requireServer) throw error;return {docs:[]};});
   const now = Date.now();
   return snap.docs.map(d => ({ id:d.id, ...d.data() }))
     .filter(m => !missionIsRemovedFromPlanning(m) && !missionIsDraft(m) && (['planned','assigned'].includes(m.status || 'planned') || ((m.scheduledEnd?.toDate?.()?.getTime() || 0) > now && m.status !== 'completed')))
@@ -1036,7 +1055,7 @@ async function renderAgentHome(){
     <section class="grid cols-3">
       <div class="card stat ${isWorking?'green':'orange'}"><div class="stat-label">Statut agent</div><div class="stat-value">${isWorking?'En poste':'Hors poste'}</div><div class="muted">${safe(currentProfile.prenom || '')} ${safe(currentProfile.nom || '')}</div></div>
       <div class="card stat blue"><div class="stat-label">Mission / site</div><div class="stat-value" style="font-size:22px">${safe(shift?.siteNom || 'Aucune')}</div><div class="muted">${isWorking ? 'Mission active' : 'Mission à sélectionner'}</div></div>
-      <div class="card stat ${navigator.onLine?'green':'orange'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'OK':'OFF'}</div><div class="muted">${navigator.onLine?'Synchronisation active':'Données locales actives'}</div></div>
+      <div class="card stat ${navigator.onLine?'green':'orange'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'Détecté':'OFF'}</div><div class="muted">${navigator.onLine?'Confirmation serveur requise':'Aucune transmission garantie'}</div></div>
     </section>
     <section class="card quick-actions-card" style="margin-top:16px">
       <div class="card-title"><div><h2>Actions rapides</h2><p>Les fonctions terrain essentielles, accessibles sans défilement</p></div></div>
@@ -1051,8 +1070,8 @@ async function renderAgentHome(){
       <div class="quick-actions-footer"><button class="btn full" id="enable-push">Activer les notifications écran verrouillé</button><p class="muted">En urgence, utiliser le bouton SOS/PTI.</p></div>
     </section>
     <section class="card offline-ready-card ${navigator.onLine?'':'offline-active'}" style="margin-top:16px">
-      <div class="card-title"><div><h2>Mode hors ligne</h2><p id="offline-ready-status">${safe(offlineReadyText())}</p></div>${navigator.onLine?'<button class="btn small" id="offline-sync-now">Synchroniser maintenant</button>':'<span class="pill orange">Hors ligne</span>'}</div>
-      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">${navigator.onLine?'Cache local de confort préparé. Le hors-ligne complet Supabase reste à valider avant la bascule production.':'Mode hors ligne : les écritures Supabase ne sont pas garanties sans réseau. Une alerte PTI hors ligne ne peut pas prévenir le QG immédiatement : appelle le QG ou le 112.'}</div>
+      <div class="card-title"><div><h2>Enregistrement en ligne uniquement</h2><p id="offline-ready-status">${safe(offlineReadyText())}</p></div>${navigator.onLine?'<button class="btn small" id="offline-sync-now">Actualiser les données</button>':'<span class="pill orange">Hors ligne</span>'}</div>
+      <div class="setup-box ${navigator.onLine?'':'warning-copy'}">Une connexion et une confirmation serveur sont nécessaires pour enregistrer une opération. Aucun envoi différé automatique. Les brouillons non envoyés peuvent être perdus après fermeture ou changement d’écran. Les opérations déjà confirmées restent conservées. En urgence sans réseau, appelle le QG ou le 112.</div>
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
@@ -1065,9 +1084,10 @@ async function renderAgentHome(){
   render(page('Accueil Agent', 'Exécution terrain rapide et sécurisée', body));
   bindAgentHome(shift);
   document.querySelector('#offline-sync-now')?.addEventListener('click', async event => {
-    const button = event.currentTarget; button.disabled = true; button.textContent = 'Synchronisation…';
-    await primeAgentOfflineData().catch(() => {});
-    button.textContent = 'Synchronisé'; setTimeout(() => { if (button.isConnected) { button.disabled=false; button.textContent='Synchroniser maintenant'; } }, 1200);
+    const button = event.currentTarget; button.disabled = true; button.textContent = 'Actualisation…';
+    try { if(!navigator.onLine) throw new Error('Connexion coupée.'); await primeAgentOfflineData(); toast('Données actualisées depuis le serveur.','success'); }
+    catch { toast('Actualisation non confirmée. Vérifie la connexion puis réessaie.','warning'); }
+    finally { if(button.isConnected){button.disabled=false;button.textContent='Actualiser les données';} }
   });
   if (shift) loadAgentHandoverCard(shift);
   listenAgentRecentReports();
@@ -1451,7 +1471,7 @@ function showTakeShiftPersistentError(error){
     advice = 'Autorise la localisation pour Sentinelle dans les réglages du téléphone puis réessaie.';
   } else if (low.includes('network') || low.includes('fetch') || low.includes('offline') || low.includes('réseau')) {
     title = 'Connexion réseau insuffisante';
-    advice = 'La vacation n’a pas été ouverte. Vérifie Internet puis réessaie une seule fois.';
+    advice = 'Résultat non confirmé. Le serveur peut avoir enregistré le poste avant la coupure. Rétablis la connexion et vérifie le poste actif avant de réessayer ; ne démarre pas un second poste.';
   }
   box.style.display = 'block';
   box.innerHTML = `<strong style="display:block;font-size:16px;margin-bottom:6px">❌ ${safe(title)}</strong><div>${safe(advice)}</div><div style="margin-top:10px;font-size:12px;opacity:.85;word-break:break-word"><strong>Détail technique :</strong> ${safe(code ? `[${code}] ${raw}` : raw)}</div>`;
@@ -1547,7 +1567,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
     const startPushResult = await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()});
     await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed'}).catch(()=>{});
-    toast(startPushResult?.ok ? 'Prise de poste confirmée · QG notifié' : 'Prise de poste confirmée', 'success');
+    toast(Number(startPushResult?.delivered)>0 ? 'Prise de poste confirmée · notification acceptée par le fournisseur' : 'Prise de poste confirmée', 'success');
     await renderAgentHome();
     return true;
   } catch(error){
@@ -1565,8 +1585,8 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     // V5.10.19 : avant d'afficher un échec, on vérifie qu'aucun shift n'a
     // réellement été créé. Une erreur tardive (push, synchronisation secondaire...)
     // ne doit jamais inviter l'agent à recommencer une prise de poste déjà ouverte.
-    const existingAfterError = shiftDoc ? (await findActiveShift().catch(()=>null)) : null;
-    if (shiftDoc && existingAfterError) {
+    const existingAfterError = await findActiveShift().catch(()=>null);
+    if (existingAfterError) {
       activeShiftCache = existingAfterError;
       currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:existingAfterError.siteId || site?.id || null, siteActuelNom:existingAfterError.siteNom || site?.name || null };
       toast('Poste bien ouvert · une étape secondaire n’a pas pu être synchronisée.', 'warning');
@@ -1574,8 +1594,13 @@ async function takeShift(site, mission=null, checkInPhoto=null){
       return true;
     }
 
-    // Échec réel AVANT création du shift : on ne quitte plus l'écran.
-    // L'erreur reste visible et le bouton devient « Réessayer la prise de poste ».
+    if(shiftDoc){
+      toast('Prise de poste confirmée par le serveur. Actualisation indisponible : ne recommence pas la prise de poste.','warning');
+      return true;
+    }
+
+    // No confirmed record: preserve the form. The next attempt must start by
+    // reading the active shift; an unreadable server must never mean "absent".
     showTakeShiftPersistentError(error);
     toast(error.message || 'Prise de poste impossible.', 'error');
     return false;
@@ -1584,19 +1609,40 @@ async function takeShift(site, mission=null, checkInPhoto=null){
 async function loadAgentHandoverCard(shift){
   const box = document.querySelector('#agent-handover-card');
   if (!box) return;
-  try {
-    const snap = await getDocs(query(collectionRef('shifts'), where('siteId','==',shift.siteId), where('status','==','completed'), orderBy('completedAt','desc'), limit(4))).catch(async()=>getDocs(query(collectionRef('shifts'), where('siteId','==',shift.siteId), where('status','==','completed'), limit(4))));
-    const prev = snap.docs.map(d => ({id:d.id,...d.data()})).filter(s => s.id !== shift.id).sort((a,b)=>(b.completedAt?.toDate?.()?.getTime()||0)-(a.completedAt?.toDate?.()?.getTime()||0))[0];
-    if (!prev) return box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">Relève agent</div><div class="item-meta">Aucune mission précédente trouvée sur ce site.</div></div></div>`;
-    const ack = shift.handoverAcknowledged ? `<span class="pill green">Relève confirmée</span>` : `<button class="btn small primary" id="ack-handover">Confirmer la relève</button>`;
-    box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">Relève agent ${ack}</div><div class="item-meta">Mission précédente : ${safe(prev.agentNom || '—')}<br>Fin : ${dateText(prev.completedAt)}<br>Rapports : ${prev.reportsCount || 0} · Rondes : ${prev.roundsCount || 0} · Incidents : ${prev.incidentsCount || 0}<br><br><strong>Note de relève :</strong><br>${safe(prev.handoverNote || 'Aucune note transmise.')}</div></div></div>`;
-    document.querySelector('#ack-handover')?.addEventListener('click', async () => {
-      await updateDoc(docRef('shifts', shift.id), { handoverAcknowledged:true, handoverFromShiftId:prev.id, handoverAcknowledgedAt:serverTimestamp(), updatedAt:serverTimestamp(), updatedBy:currentUser.uid });
-      await addAudit('handover_acknowledged', { shiftId:shift.id, fromShiftId:prev.id });
-      toast('Relève prise en compte', 'success');
-      loadAgentHandoverCard({ ...shift, handoverAcknowledged:true });
+  // Aucun repli vers une lecture brute des historiques ou un site autodéclaré.
+  const readHandover = async (acknowledge=false) => {
+    const {data,error} = await getSupabaseClient().rpc('sentinelle_get_handover', {
+      p_shift_id:shift.id, p_acknowledge:acknowledge
     });
-  } catch(e){ console.warn(e); box.innerHTML = `<div class="empty">Relève indisponible avec les règles actuelles.</div>`; }
+    if (error) throw error;
+    return data;
+  };
+  try {
+    const handover = await readHandover();
+    if (!box.isConnected) return;
+    if (!handover?.previous) {
+      box.innerHTML = `<div class="empty">Aucun poste précédent disponible pour cette relève.</div>`;
+      return;
+    }
+    const ack = handover.acknowledged ? `<span class="pill green">Relève confirmée</span>` : `<button class="btn small primary" id="ack-handover">Confirmer la relève</button>`;
+    const events = (handover.events || []).map(event => `<div class="item"><div class="item-main"><div class="item-title">${safe(event.category || 'Événement')} · ${safe(event.severity || '')}</div><div class="item-meta">${dateText(event.occurredAt)}<br>${safe(event.message || '').replace(/\n/g,'<br>')}</div></div></div>`).join('');
+    box.innerHTML = `<div class="item"><div class="item-main"><div class="item-title">Relève agent ${ack}</div><div class="item-meta">Poste précédent terminé : ${dateText(handover.previous.completedAt)}<br><br><strong>Consignes :</strong><br>${safe(handover.instructions || 'Aucune consigne transmise.').replace(/\n/g,'<br>')}<br><br><strong>Note de relève :</strong><br>${safe(handover.note || 'Aucune note transmise.').replace(/\n/g,'<br>')}</div></div></div>${events || '<div class="empty">Aucun événement transmis.</div>'}`;
+    document.querySelector('#ack-handover')?.addEventListener('click', async event => {
+      const button=event.currentTarget;
+      button.disabled=true;
+      try {
+        await readHandover(true);
+        toast('Relève prise en compte', 'success');
+        await loadAgentHandoverCard(shift);
+      } catch(error) {
+        console.warn('Relève non confirmée',error);
+        box.innerHTML='<div class="empty">Relève indisponible ou poste terminé. Recharge la page pour réessayer ; ton poste reste enregistré.</div>';
+      }
+    });
+  } catch(error){
+    console.warn('Consultation de relève indisponible',error);
+    box.innerHTML='<div class="empty">Relève indisponible. Recharge la page pour réessayer ; ton poste reste enregistré.</div>';
+  }
 }
 async function endShift(shift){
   try {
@@ -1635,7 +1681,7 @@ async function endShift(shift){
       try {
         // V5.8.8.6 : garde-fou idempotent. Si le premier clic a déjà terminé
         // le poste, un second passage ne réécrit rien et n'envoie aucun push.
-        const latestShiftSnap = await getDoc(docRef('shifts', shiftKey)).catch(()=>null);
+        const latestShiftSnap = await getDoc(docRef('shifts', shiftKey));
         if (latestShiftSnap?.exists?.() && latestShiftSnap.data()?.status === 'completed') {
           activeShiftCache = null;
           closeModal();
@@ -1644,6 +1690,7 @@ async function endShift(shift){
           return;
         }
 
+        if(!latestShiftSnap?.exists?.()) throw new Error('Poste introuvable : aucune clôture envoyée.');
         const fd = new FormData(form);
         const endGps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
         let finalReportsCount = reportsSnap.size;
@@ -1680,7 +1727,7 @@ async function endShift(shift){
         // Le push est exécuté une seule fois après confirmation du status=completed.
         const endPushResult = await spNotifyQGShiftEnded({
           shiftId:shift.id, siteName:shift.siteNom||'', reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount
-        });
+        }).catch(()=>({ok:false,error:'notification_failed'}));
         await addAudit('qg_shift_end_notification',{
           shiftId:shift.id,
           pushStatus:endPushResult?.skipped?(endPushResult?.reason||'skipped'):endPushResult?.ok?'sent':endPushResult?.error||'failed'
@@ -1696,18 +1743,23 @@ async function endShift(shift){
         await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps }).catch(()=>{});
 
         const [finalReportsSnap, finalShiftSnap, finalMissionSnap] = await Promise.all([
-          getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id))).catch(()=>({docs:[]})),
+          getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id))).catch(()=>null),
           getDoc(docRef('shifts', shift.id)).catch(()=>null),
           shift.missionId ? getDoc(docRef('missions', shift.missionId)).catch(()=>null) : Promise.resolve(null)
         ]);
         const finalShift = finalShiftSnap?.exists?.() ? {id:finalShiftSnap.id,...finalShiftSnap.data()} : {...shift, status:'completed', handoverNote:fd.get('handoverNote')||'RAS', signatureName:fd.get('signatureName'), completedAt:new Date(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score};
-        const finalMission = finalMissionSnap?.exists?.() ? {id:finalMissionSnap.id,...finalMissionSnap.data()} : {id:shift.missionId||shift.id, ...shift, status:'completed'};
-        archiveMissionReportSilently({ mission:finalMission, shift:finalShift, reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()})) }).catch(()=>{});
+        const finalMission = finalMissionSnap?.exists?.() ? {id:finalMissionSnap.id,...finalMissionSnap.data()} : {...shift,id:shift.missionId||null,status:'completed'};
+        if(finalReportsSnap) archiveMissionReportSilently({ mission:finalMission, shift:finalShift, reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()})) }).catch(()=>{});
 
         closeModal();
         toast(supabaseBridgeEnabled() ? 'Fin de poste confirmée · PDF en cours d’archivage et d’envoi' : 'Fin de poste confirmée · PDF archivé', 'success');
         await renderAgentHome();
       } catch(error) {
+        const confirmed=await getDoc(docRef('shifts',shiftKey)).catch(()=>null);
+        if(confirmed?.exists?.() && confirmed.data()?.status==='completed'){
+          activeShiftCache=null;closeModal();toast('Fin de poste enregistrée. Vérification des opérations secondaires nécessaire.','warning');
+          await renderAgentHome();return;
+        }
         console.error('Erreur clôture mission', error);
         toast(userFriendlyError(error, 'Erreur fin de poste.'), 'error');
         if (button && button.isConnected) { button.disabled = false; button.textContent = originalButtonText; }
@@ -1776,12 +1828,15 @@ function mciForm(shift){
     <div class="camera-preview" id="mci-photo-preview" style="display:none"></div>
     <input type="hidden" name="gpsRequested" value="false">
     <div id="voice-state" class="muted" style="margin:12px 0;font-size:12px"></div>
+    <p class="muted" id="mci-send-state" role="status">Attends la confirmation d’enregistrement avant de quitter. Le brouillon n’est pas sauvegardé : fermer, recharger ou quitter l’application peut perdre le texte et la photo non envoyés.</p>
     <div class="divider"></div><button class="btn primary full" type="submit">Envoyer au QG</button>
   </form>`;
 }
 function bindMCIForm(shift){
   const form = document.querySelector('#mci-form');
   let pendingMciPhoto = null;
+  let mciSubmitting = false;
+  let pendingMciWrite = null; // Same request on retry while this form remains open; no durable outbox.
   const photoInput = document.querySelector('#mci-photo-input');
   const photoImportInput = document.querySelector('#mci-photo-import-input');
   const photoPreview = document.querySelector('#mci-photo-preview');
@@ -1847,32 +1902,71 @@ function bindMCIForm(shift){
   photoImportInput?.addEventListener('change', event => handleMciPhotoSelection(event, 'import'));
   form.addEventListener('submit', async e => {
     e.preventDefault();
+    if (mciSubmitting) return;
+    const sendState = document.querySelector('#mci-send-state');
+    const stateMessage = message => { if (sendState) sendState.textContent = message; };
+    if (!isOnline()) {
+      const message = 'Non envoyé : réseau indisponible. Garde cet écran ouvert ; fermer, recharger ou quitter l’application peut perdre le brouillon.';
+      stateMessage(message);
+      toast(message, 'warning');
+      return;
+    }
+    mciSubmitting = true;
+    const submitButton = form.querySelector('[type="submit"]');
+    if (submitButton) submitButton.disabled = true;
     const fd = new FormData(form);
-    const onlineAtSubmission = isOnline();
-    const gps = fd.get('gpsRequested') === 'true' ? await getGPS() : null;
-    const reportRef = doc(collectionRef('reports'));
-    const reportData = {
-      agentId: currentUser.uid,
-      agentNom: `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
-      siteId: shift.siteId, siteNom: shift.siteNom, shiftId: shift.id, missionId: shift.missionId || null,
-      category: fd.get('category'), severity: fd.get('severity'), message: fd.get('message'),
-      photoUrl: pendingMciPhoto?.dataUrl || null,
-      photoAvailable: Boolean(pendingMciPhoto?.dataUrl),
-      photoBytes: Number(pendingMciPhoto?.bytes || 0),
-      photoMimeType: pendingMciPhoto?.mimeType || null,
-      photoWidth: Number(pendingMciPhoto?.width || 0),
-      photoHeight: Number(pendingMciPhoto?.height || 0),
-      photoCapturedAt: pendingMciPhoto?.capturedAt || null,
-      gps, status:'new', isLocked:true, createdAt: serverTimestamp(), createdBy: currentUser.uid
+    const fingerprint = () => {
+      const values = new FormData(form);
+      return JSON.stringify(['category','severity','message','gpsRequested'].map(key => values.get(key)).concat(pendingMciPhoto?.dataUrl || null));
     };
+    const submittedFingerprint = fingerprint();
     try {
-      const reportWrite = setDoc(reportRef, reportData);
-      if (onlineAtSubmission) {
-        await reportWrite;
+      if (!pendingMciWrite) {
+        const gps = fd.get('gpsRequested') === 'true' ? await getGPS() : null;
+        const reportRef = doc(collectionRef('reports'));
+        const reportData = {
+          agentId: currentUser.uid,
+          agentNom: `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(),
+          siteId: shift.siteId, siteNom: shift.siteNom, shiftId: shift.id, missionId: shift.missionId || null,
+          category: fd.get('category'), severity: fd.get('severity'), message: fd.get('message'),
+          photoUrl: pendingMciPhoto?.dataUrl || null,
+          photoAvailable: Boolean(pendingMciPhoto?.dataUrl),
+          photoBytes: Number(pendingMciPhoto?.bytes || 0),
+          photoMimeType: pendingMciPhoto?.mimeType || null,
+          photoWidth: Number(pendingMciPhoto?.width || 0),
+          photoHeight: Number(pendingMciPhoto?.height || 0),
+          photoCapturedAt: pendingMciPhoto?.capturedAt || null,
+          gps, status:'new', isLocked:true, createdAt: serverTimestamp(), createdBy: currentUser.uid
+        };
+        pendingMciWrite = {ref:reportRef, data:reportData, fingerprint:submittedFingerprint, attempted:false};
+      }
+      const request = pendingMciWrite;
+      const confirmed = async () => {
+        const snapshot = await getDoc(request.ref);
+        if (!snapshot.exists()) return false;
+        const row = snapshot.data();
+        if (row.agentId !== request.data.agentId || row.shiftId !== request.data.shiftId || row.message !== request.data.message || row.category !== request.data.category || row.severity !== request.data.severity || Boolean(row.photoAvailable) !== Boolean(request.data.photoAvailable)) throw new Error('Enregistrement reçu incohérent : ne pas renvoyer. Contacte le QG.');
+        return true;
+      };
+      // Resolve a lost response before any retry; never assign a second report ID.
+      let recovered = request.attempted && await confirmed();
+      if (!recovered) {
+        if (request.fingerprint !== submittedFingerprint) throw new Error('Envoi précédent non confirmé. Vérifie le flux avec le QG avant de changer ou renvoyer ce rapport.');
+        request.attempted = true;
+        stateMessage('Envoi en cours : enregistrement serveur non encore confirmé.');
+        try { await setDoc(request.ref, request.data); }
+        catch (error) { if (!await confirmed().catch(()=>false)) throw error; recovered = true; }
+      }
+      pendingMciWrite = null;
+      let followupFailed = false;
+      if (!recovered) {
         await updateDoc(docRef('users', currentUser.uid), { lastSeen: serverTimestamp() }).catch(()=>{});
-        await addAudit('report_create', { siteId: shift.siteId, shiftId: shift.id, missionId: shift.missionId || null, category: fd.get('category'), severity: fd.get('severity'), photoAvailable:Boolean(pendingMciPhoto?.dataUrl) });
-      } else {
-        reportWrite.catch(error => console.error('Synchronisation MCI hors ligne impossible', error));
+        await addAudit('report_create', { siteId: shift.siteId, shiftId: shift.id, missionId: shift.missionId || null, category: request.data.category, severity: request.data.severity, photoAvailable:request.data.photoAvailable }).catch(error => { followupFailed = true; console.error('Rapport enregistré ; journal de suivi en échec', error); });
+      }
+      if (fingerprint() !== request.fingerprint) {
+        stateMessage('Rapport précédent enregistré. Les nouvelles modifications affichées n’ont pas été envoyées.');
+        toast('Rapport précédent enregistré ; nouvelle saisie conservée.', 'success');
+        return;
       }
       form.reset();
       form.category.value = 'Ronde';
@@ -1882,10 +1976,15 @@ function bindMCIForm(shift){
       if (photoImportInput) photoImportInput.value = '';
       refreshPhotoPreview();
       document.querySelectorAll('.cat-btn').forEach((btn,index) => btn.classList.toggle('active', index===0));
-      toast(onlineAtSubmission ? 'Rapport envoyé au QG' : 'Rapport enregistré hors ligne. Il sera transmis au retour du réseau.', onlineAtSubmission ? 'success' : 'warning');
+      stateMessage(followupFailed ? 'Rapport enregistré côté serveur. Une étape de suivi a échoué : préviens le QG, sans renvoyer ce rapport.' : 'Rapport enregistré côté serveur.');
+      toast('Rapport envoyé au QG', 'success');
     } catch(error){
       console.error(error);
-      toast(userFriendlyError(error, 'Erreur envoi rapport.'), 'error');
+      stateMessage('Enregistrement non confirmé. Texte et photo conservés sur cet écran uniquement. Ne ferme pas la PWA ; réessaie avec le réseau ou vérifie avec le QG.');
+      toast(userFriendlyError(error, 'Enregistrement non confirmé.'), 'error');
+    } finally {
+      mciSubmitting = false;
+      if (submitButton) submitButton.disabled = false;
     }
   });
 }
@@ -1981,21 +2080,70 @@ function renderCheckpoints(state){
   const bar = document.querySelector('#round-progress'); if (bar) bar.style.width = `${percent}%`;
   const txt = document.querySelector('#round-progress-text'); if (txt) txt.textContent = `${percent}% validé · ${state.validated.size}/${state.points.length}`;
 }
+// In-memory request identity only; no offline queue or background replay.
+async function confirmOnlineRecord(request){
+  if (!isOnline()) throw new Error('Non envoyé : connexion réseau nécessaire.');
+  const checkIdentity = () => {
+    if (currentUser?.uid !== request.data.agentId) throw new Error('Compte changé : opération interrompue.');
+  };
+  const confirmed = async () => {
+    checkIdentity();
+    const snapshot = await getDoc(request.ref);
+    checkIdentity();
+    if (!snapshot.exists()) return false;
+    if (!request.matches(snapshot.data())) throw new Error('Enregistrement incohérent : ne pas renvoyer. Contacte le QG.');
+    return true;
+  };
+  checkIdentity();
+  if (request.attempted && await confirmed()) return;
+  request.attempted = true;
+  try { await setDoc(request.ref, request.data); }
+  catch (error) { if (!await confirmed().catch(()=>false)) throw error; }
+  checkIdentity();
+}
 async function validateCheckpoint(shift, state, point, method){
+  if (state.submitting) return;
+  if (!isOnline()) return toast('Point non envoyé : connexion nécessaire. Aucun envoi automatique au retour du réseau.', 'warning');
+  if (state.validated.has(point.id) && !state.pendingPoint) return toast('Point déjà contrôlé.', 'warning');
+  if (state.pendingPoint && state.pendingPoint.pointId !== point.id) return toast('Vérifie d’abord le point précédent : sa confirmation est encore incomplète.', 'warning');
+  state.submitting = true;
   try {
     if (!state.roundId) {
-      const round = await addDoc(collectionRef('rounds'), { agentId:currentUser.uid, agentNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim(), siteId:shift.siteId, siteNom:shift.siteNom, shiftId:shift.id, startedAt:serverTimestamp(), status:'active', checkpointsValidated:[] });
-      state.roundId = round.id;
+      if (!state.pendingRound) {
+        const data = { agentId:currentUser.uid, agentNom:`${currentProfile.prenom||''} ${currentProfile.nom||''}`.trim(), siteId:shift.siteId, siteNom:shift.siteNom, shiftId:shift.id, startedAt:serverTimestamp(), status:'active', checkpointsValidated:[] };
+        state.pendingRound = {ref:doc(collectionRef('rounds')),data,matches:row=>row.agentId===data.agentId && row.shiftId===data.shiftId && row.siteId===data.siteId};
+      }
+      await confirmOnlineRecord(state.pendingRound);
+      state.roundId = state.pendingRound.ref.id;
+      state.pendingRound = null;
     }
-    if (state.validated.has(point.id)) return toast('Point déjà contrôlé.', 'warning');
-    const gps = await getGPS();
-    await addDoc(collectionRef('roundCheckpointsLogs'), { roundId:state.roundId, agentId:currentUser.uid, siteId:shift.siteId, checkpointId:point.id, checkpointName:point.name, scanMethod:method, gps, scannedAt:serverTimestamp(), isValid:true, createdBy:currentUser.uid });
-    state.validated.add(point.id);
-    await updateDoc(docRef('rounds', state.roundId), { checkpointsValidated:[...state.validated], status:state.validated.size === state.points.length ? 'completed':'active', completedAt:state.validated.size === state.points.length ? serverTimestamp() : null });
+    if (!state.pendingPoint) {
+      const gps = await getGPS();
+      const data = { roundId:state.roundId, agentId:currentUser.uid, siteId:shift.siteId, checkpointId:point.id, checkpointName:point.name, scanMethod:method, gps, scannedAt:serverTimestamp(), isValid:true, createdBy:currentUser.uid };
+      state.pendingPoint = {pointId:point.id,ref:doc(collectionRef('roundCheckpointsLogs')),data,matches:row=>row.agentId===data.agentId && row.roundId===data.roundId && row.checkpointId===data.checkpointId};
+    }
+    await confirmOnlineRecord(state.pendingPoint);
+    const validated = new Set([...state.validated, point.id]);
+    const completed = validated.size === state.points.length;
+    // A lost aggregate response is read back before repeating the update. The
+    // confirmed checkpoint keeps the same ID while this screen remains open.
+    const roundRef = docRef('rounds', state.roundId);
+    const isComplete = row => row?.agentId===currentUser.uid && row?.shiftId===shift.id && validated.size===(row?.checkpointsValidated||[]).length && [...validated].every(id=>row.checkpointsValidated.includes(id)) && row.status===(completed?'completed':'active');
+    const snapshot = await getDoc(roundRef);
+    if (!snapshot.exists() || !isComplete(snapshot.data())) {
+      try { await updateDoc(roundRef, {checkpointsValidated:[...validated],status:completed?'completed':'active',completedAt:completed?serverTimestamp():null}); }
+      catch (error) {
+        const recovered = await getDoc(roundRef).catch(()=>null);
+        if (!recovered?.exists() || !isComplete(recovered.data())) throw error;
+      }
+    }
+    state.validated = validated;
+    state.pendingPoint = null;
     document.querySelector('#checkpoint-code').value = '';
     renderCheckpoints(state);
     toast('Point contrôlé', 'success');
-  } catch(error){ console.error(error); toast('Erreur validation ronde.', 'error'); }
+  } catch(error){ console.error(error); toast('Confirmation de ronde incomplète. Garde cet écran ouvert et vérifie le point avant de réessayer. Aucun envoi automatique.', 'error'); }
+  finally { state.submitting = false; }
 }
 
 function openWhatsapp(shift){
@@ -2097,17 +2245,23 @@ async function showQGDashboardDetail(type){
       ]);
       const users = new Map(usersSnap.docs.map(d => [d.id, {id:d.id, ...d.data()}]));
       const rows = shiftSnap.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b) => (timestampToDate(a.startTime)?.getTime() || 0) - (timestampToDate(b.startTime)?.getTime() || 0));
-      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucun agent n’est actuellement en poste.');
-      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>agent${rows.length>1?'s':''} actuellement en poste</span></div>` + rows.map(row => {
+      const recoveryButton='<button class="btn" id="qg-document-recovery">Reprises PDF des clôtures</button>';
+      if (!rows.length) {box.innerHTML=recoveryButton+dashboardEmpty('Aucun agent n’est actuellement en poste.');document.querySelector('#qg-document-recovery')?.addEventListener('click',openQGDocumentRecovery);return;}
+      box.innerHTML = recoveryButton+`<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>agent${rows.length>1?'s':''} actuellement en poste</span></div>` + rows.map(row => {
         const user = users.get(row.agentId) || {};
         const phone = user.telephone || user.phone || '';
-        const actions = `<button class="btn small" data-dashboard-map-shift="${safe(row.id)}">Voir sur la carte</button>${phone ? `<a class="btn small" href="tel:${safe(String(phone).replace(/\s/g,''))}">Appeler</a>` : ''}`;
+        const actions = `${!row.missionId && roleAllowedAdmin()?`<button class="btn small danger" data-dashboard-close-free="${safe(row.id)}">Clôturer le poste libre</button>`:''}<button class="btn small" data-dashboard-map-shift="${safe(row.id)}">Voir sur la carte</button>${phone ? `<a class="btn small" href="tel:${safe(String(phone).replace(/\s/g,''))}">Appeler</a>` : ''}`;
         return dashboardDetailItem({
           title:row.agentNom || `${user.prenom||''} ${user.nom||''}`.trim() || 'Agent',
           meta:`<strong>${safe(row.siteNom || 'Site non renseigné')}</strong><br>Prise de poste : ${safe(dateText(row.startTime))}<br>Depuis : <strong>${safe(elapsedShiftText(row.startTime))}</strong>${row.scheduledEnd ? `<br>Fin prévue : ${safe(dateText(row.scheduledEnd))}` : ''}`,
           badge:'En poste', badgeClass:'green', actions
         });
       }).join('');
+      document.querySelector('#qg-document-recovery')?.addEventListener('click',openQGDocumentRecovery);
+      document.querySelectorAll('[data-dashboard-close-free]').forEach(btn => btn.addEventListener('click', () => {
+        const shift=rows.find(row=>row.id===btn.dataset.dashboardCloseFree);
+        if(shift) openQGEndShiftModal(null,shift).catch(error=>toast(userFriendlyError(error,'Impossible de charger le poste libre.'),'error'));
+      }));
       document.querySelectorAll('[data-dashboard-map-shift]').forEach(btn => btn.addEventListener('click', () => {
         const shiftId = btn.dataset.dashboardMapShift;
         closeModal();
@@ -2931,16 +3085,21 @@ function qgClosureEffectiveDate(mode, customValue, mission){
   }
   return new Date();
 }
-async function openQGEndShiftModal(mission){
+async function openQGEndShiftModal(mission, freeShift=null){
   if(!roleAllowedAdmin()) return toast('Action réservée au QG.','error');
-  const latestMissionSnap=await getDoc(docRef('missions',mission.id)).catch(()=>null);
-  const latestMission=latestMissionSnap?.exists?.()?{id:latestMissionSnap.id,...latestMissionSnap.data()}:mission;
-  if(latestMission.status!=='active') return toast('Cette mission n’est plus en cours.','warning');
-  const shift=await findActiveShiftForQGMission(latestMission);
-  if(!shift) return toast('Aucun poste actif lié à cette mission. Aucune donnée n’a été modifiée.','error');
+  const planned=!!mission?.id;
+  const latestMissionSnap=planned?await getDoc(docRef('missions',mission.id)):null;
+  if(planned && !latestMissionSnap?.exists?.()) return toast('Mission introuvable.','error');
+  const freeSnap=!planned && freeShift?.id?await getDoc(docRef('shifts',freeShift.id)):null;
+  const latestMission=planned?{id:latestMissionSnap.id,...latestMissionSnap.data()}:null;
+  const shift=planned?await findActiveShiftForQGMission(latestMission):(freeSnap?.exists?.()?{id:freeSnap.id,...freeSnap.data()}:null);
+  if(!shift || shift.status!=='active' || (!planned && shift.missionId)) return toast('Poste libre ou planifié actif introuvable. Aucune donnée modifiée.','error');
+  if(planned && latestMission.status!=='active') return toast('Cette mission n’est plus en cours.','warning');
+  // Descripteur de presentation seulement : aucune mission fictive en base.
+  const displayMission=latestMission || {...shift,id:null};
 
   const now=new Date();
-  const scheduledEnd=timestampToDate(latestMission.scheduledEnd || shift.scheduledEnd);
+  const scheduledEnd=timestampToDate(displayMission.scheduledEnd || shift.scheduledEnd);
   const plannedAlreadyPassed=scheduledEnd && scheduledEnd.getTime()<=now.getTime();
   const defaultMode=plannedAlreadyPassed?'scheduled':'now';
   const defaultReason='Fin de poste non effectuée par l’agent.';
@@ -2948,7 +3107,7 @@ async function openQGEndShiftModal(mission){
     ? `<div class="setup-box warning-copy"><strong>Attention :</strong> l’heure de fin prévue n’est pas encore dépassée. Utilise cette clôture uniquement si le QG doit réellement interrompre la vacation.</div>`:'';
 
   showModal('Clôturer la mission depuis le QG',`<form id="qg-end-shift-form" class="end-shift-flow">
-    <div class="end-shift-hero"><span>CLÔTURE EXCEPTIONNELLE QG</span><strong>${safe(latestMission.agentNom||shift.agentNom||'Agent')}</strong><p>${safe(latestMission.siteNom||shift.siteNom||'Site')} · poste ouvert ${dateText(shift.startTime)}</p></div>
+    <div class="end-shift-hero"><span>CLÔTURE EXCEPTIONNELLE QG</span><strong>${safe(displayMission.agentNom||shift.agentNom||'Agent')}</strong><p>${safe(displayMission.siteNom||shift.siteNom||'Site')} · poste ouvert ${dateText(shift.startTime)}</p></div>
     ${earlyWarning}
     <div class="setup-box">Cette action termine le <strong>poste actif réel</strong>, libère l’agent pour une prochaine prise de poste, ajoute une trace de fin de service à la main courante et actualise le rapport de mission. La clôture sera identifiée comme effectuée par le QG.</div>
     <div class="field"><label>Heure de fin à enregistrer</label><select class="select" name="endMode" id="qg-end-mode">
@@ -2973,7 +3132,7 @@ async function openQGEndShiftModal(mission){
     if(!shiftKey || qgEndShiftSubmissionLocks.has(shiftKey)) return;
     const fd=new FormData(form);
     const reason=String(fd.get('reason')||'').trim();
-    const endAt=qgClosureEffectiveDate(String(fd.get('endMode')||'now'),fd.get('customEnd'),latestMission);
+    const endAt=qgClosureEffectiveDate(String(fd.get('endMode')||'now'),fd.get('customEnd'),displayMission);
     if(!reason) return toast('Le motif de clôture est obligatoire.','warning');
     if(!endAt || Number.isNaN(endAt.getTime())) return toast('Heure de fin invalide.','warning');
     const startAt=timestampToDate(shift.startTime);
@@ -2984,100 +3143,29 @@ async function openQGEndShiftModal(mission){
     const original=button?.textContent||'Clôturer définitivement le poste actif';
     if(button){button.disabled=true;button.textContent='Clôture QG en cours...';}
     try{
-      // Relecture autoritaire juste avant écriture : évite une double clôture si l'agent vient de terminer lui-même.
-      const [latestShiftSnap,missionSnap]=await Promise.all([
-        getDoc(docRef('shifts',shiftKey)).catch(()=>null),
-        getDoc(docRef('missions',latestMission.id)).catch(()=>null)
-      ]);
-      if(!latestShiftSnap?.exists?.()) throw new Error('Le poste actif n’existe plus.');
-      const liveShift={id:latestShiftSnap.id,...latestShiftSnap.data()};
-      const liveMission=missionSnap?.exists?.()?{id:missionSnap.id,...missionSnap.data()}:latestMission;
-      if(liveShift.status==='completed' && liveMission.status!=='completed'){
-        // Réparation d'un éventuel échec réseau entre l'écriture autoritaire du shift et celle de la mission.
-        await updateDoc(docRef('missions',liveMission.id),{
-          status:'completed',actualEnd:liveShift.completedAt||Timestamp.fromDate(endAt),completedBy:currentUser.uid,completedByRole:'qg',
-          qgClosed:true,qgClosedAt:serverTimestamp(),qgClosedBy:currentUser.uid,qgClosedByNom:qgClosureAdminName(),qgClosureReason:reason,
-          qgClosureEffectiveAt:liveShift.completedAt||Timestamp.fromDate(endAt),updatedAt:serverTimestamp(),updatedBy:currentUser.uid
-        });
-        closeModal();toast('Mission synchronisée avec le poste déjà clôturé.','success');return;
-      }
-      if(liveShift.status==='completed' && liveMission.status==='completed'){
-        closeModal();toast('Mission déjà terminée. Aucune double clôture créée.','success');return;
-      }
-      if(liveMission.status==='completed' && liveShift.status==='active') throw new Error('La mission est déjà marquée terminée mais le poste est encore actif. Vérification QG requise avant toute action.');
-      if(liveShift.status!=='active' || String(liveShift.missionId||'')!==String(liveMission.id)) throw new Error('Le poste actif ne correspond plus à cette mission. Aucune modification effectuée.');
-
-      // Comme dans la clôture agent, les compteurs sont obligatoires : une panne de lecture stoppe la clôture avant toute écriture.
+      // Une seule transaction serveur : evenement, poste, mission et reprise documentaire.
       const [reportsSnap,roundsSnap]=await Promise.all([
         getDocs(query(collectionRef('reports'),where('shiftId','==',shiftKey))),
         getDocs(query(collectionRef('rounds'),where('shiftId','==',shiftKey)))
       ]);
-      const existingReports=reportsSnap.docs.map(d=>({id:d.id,...d.data()}));
-      const reportsCount=Number(reportsSnap.size ?? existingReports.length ?? 0);
-      const roundsCount=Number(roundsSnap.size ?? roundsSnap.docs?.length ?? 0);
-      const incidentsCount=existingReports.filter(r=>['Incident','Intervention','Anomalie'].includes(r.category)||['Important','Critique'].includes(r.severity)).length;
-      const score=computeConformityScore({shift:liveShift,reportsCount,roundsCount,incidentsCount});
-      const endTimestamp=Timestamp.fromDate(endAt);
-      const qgName=qgClosureAdminName();
-      const handoverBase=String(liveShift.handoverNote||'').trim();
-      const qgHandover=`Clôture QG : ${reason}`;
-      const handoverNote=handoverBase?`${handoverBase}\n${qgHandover}`:qgHandover;
-      const alreadyHasEnd=existingReports.some(r=>String(r.eventType||'')==='shift_end');
-      let finalReportsCount=reportsCount;
-
-      if(!alreadyHasEnd){
-        await addDoc(collectionRef('reports'),{
-          agentId:liveShift.agentId||liveMission.agentId,agentNom:liveShift.agentNom||liveMission.agentNom,
-          siteId:liveShift.siteId||liveMission.siteId,siteNom:liveShift.siteNom||liveMission.siteNom,
-          shiftId:shiftKey,missionId:liveMission.id,
-          category:'Fin de service',severity:'Normal',
-          message:`Clôture effectuée par le QG — ${reason}`,
-          status:'new',isLocked:true,systemGenerated:true,eventType:'shift_end',qgClosure:true,
-          qgClosedBy:currentUser.uid,qgClosedByNom:qgName,qgClosureReason:reason,occurredAt:endTimestamp,
-          createdAt:endTimestamp,recordedAt:serverTimestamp(),createdBy:currentUser.uid
-        });
-        finalReportsCount+=1;
-      }
-
-      await updateDoc(docRef('shifts',shiftKey),{
-        completedAt:endTimestamp,status:'completed',reportsCount:finalReportsCount,roundsCount,incidentsCount,conformityScore:score,
-        handoverNote,signatureStatement:false,qgClosed:true,qgClosedAt:serverTimestamp(),qgClosedBy:currentUser.uid,qgClosedByNom:qgName,
-        qgClosureReason:reason,qgClosureEffectiveAt:endTimestamp,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
+      const reports=reportsSnap.docs.map(d=>d.data());
+      const score=computeConformityScore({shift,reportsCount:reportsSnap.size,roundsCount:roundsSnap.size,
+        incidentsCount:reports.filter(r=>['Incident','Intervention','Anomalie'].includes(r.category)||['Important','Critique'].includes(r.severity)).length});
+      const {data:closed,error}=await getSupabaseClient().rpc('sentinelle_qg_close',{
+        p_shift_id:shiftKey,p_end:endAt.toISOString(),p_reason:reason,p_score:score
       });
-      await updateDoc(docRef('missions',liveMission.id),{
-        status:'completed',actualEnd:endTimestamp,reportsCount:finalReportsCount,roundsCount,incidentsCount,conformityScore:score,
-        completedBy:currentUser.uid,completedByRole:'qg',qgClosed:true,qgClosedAt:serverTimestamp(),qgClosedBy:currentUser.uid,qgClosedByNom:qgName,
-        qgClosureReason:reason,qgClosureEffectiveAt:endTimestamp,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
-      });
-
-      // Ne passe l'agent hors poste que s'il n'a réellement aucun autre shift actif au moment de la vérification.
-      if(liveShift.agentId){
-        const remaining=await getDocs(query(collectionRef('shifts'),where('agentId','==',liveShift.agentId),where('status','==','active'),limit(2))).catch(()=>null);
-        if(remaining && remaining.docs.length===0){
-          await updateDoc(docRef('users',liveShift.agentId),{statut:'hors_poste',siteActuel:null,siteActuelNom:null,lastSeen:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:currentUser.uid}).catch(error=>console.warn('Profil agent non rafraîchi après clôture QG',error));
-        }
-      }
-
-      await addAudit('qg_shift_force_closed',{
-        missionId:liveMission.id,shiftId:shiftKey,agentId:liveShift.agentId||liveMission.agentId||null,siteId:liveShift.siteId||liveMission.siteId||null,
-        effectiveEnd:endAt.toISOString(),reason,reportsCount:finalReportsCount,roundsCount,incidentsCount,conformityScore:score,endReportAlreadyPresent:alreadyHasEnd
-      }).catch(()=>{});
-
-      // Recrée/met à jour le même document stable : jamais de doublon de rapport de mission.
-      const [finalReportsSnap,finalShiftSnap,finalMissionSnap]=await Promise.all([
-        getDocs(query(collectionRef('reports'),where('shiftId','==',shiftKey))).catch(()=>({docs:[]})),
-        getDoc(docRef('shifts',shiftKey)).catch(()=>null),
-        getDoc(docRef('missions',liveMission.id)).catch(()=>null)
-      ]);
-      const finalShift=finalShiftSnap?.exists?.()?{id:finalShiftSnap.id,...finalShiftSnap.data()}:{...liveShift,status:'completed',completedAt:endTimestamp,handoverNote};
-      const finalMission=finalMissionSnap?.exists?.()?{id:finalMissionSnap.id,...finalMissionSnap.data()}:{...liveMission,status:'completed',actualEnd:endTimestamp};
-      const pdfData=missionPdfData({mission:finalMission,shift:finalShift,reports:finalReportsSnap.docs.map(d=>({id:d.id,...d.data()}))});
-      const stableSource=String(pdfData.missionId||shiftKey).replace(/[^a-zA-Z0-9_-]/g,'-');
-      const documentId=`mission-${stableSource}`.slice(0,120);
-      await archivePdfDocument(pdfData,{silent:true,documentId}).catch(error=>console.warn('Rapport PDF après clôture QG non actualisé',error));
-
+      if(error) throw error;
       closeModal();
-      toast('Mission clôturée par le QG · agent libéré · rapport actualisé','success');
+      toast(closed.alreadyClosed?'Poste déjà clôturé : heure et auteur conservés.':'Poste clôturé par le QG.','success');
+      // Ne remet jamais la cloture en cause en cas de panne secondaire.
+      if(!closed.alreadyClosed && shift.agentId){
+        const remaining=await getDocs(query(collectionRef('shifts'),where('agentId','==',shift.agentId),where('status','==','active'),limit(2))).catch(()=>null);
+        if(remaining && !remaining.docs.length) await updateDoc(docRef('users',shift.agentId),{
+          statut:'hors_poste',siteActuel:null,siteActuelNom:null,lastSeen:serverTimestamp()
+        }).catch(()=>{});
+      }
+      if(closed.documentState!=='unmanaged') await recoverQGClosureDocument(shiftKey);
+
     }catch(error){
       console.error('Erreur clôture QG',error);
       toast(userFriendlyError(error,'Impossible de clôturer cette mission depuis le QG.'),'error');
@@ -3086,6 +3174,42 @@ async function openQGEndShiftModal(mission){
       qgEndShiftSubmissionLocks.delete(shiftKey);
     }
   });
+}
+
+
+async function recoverQGClosureDocument(shiftId){
+  const sb=getSupabaseClient();
+  const {data:claim,error}=await sb.rpc('sentinelle_qg_documents',{p_shift_id:shiftId,p_action:'claim'});
+  if(error){toast('État documentaire indisponible. La clôture reste enregistrée.','warning');return;}
+  if(claim.state!=='claimed'){toast(claim.state==='archived'?'Document déjà archivé.':claim.state==='source_changed'?'Sources modifiées depuis la clôture : révision documentaire à valider.':'Reprise documentaire déjà en cours.','info');return;}
+  try{
+    if(!navigator.onLine) throw Error('offline');
+    const snap=claim.snapshot;
+    if(!snap?.shift || snap.shift.status!=='completed' || !Array.isArray(snap.reports) || !snap.reports.some(r=>r.eventType==='shift_end')) throw Error('archive_failed');
+    const data=missionPdfData({mission:snap.mission,shift:snap.shift,reports:snap.reports});
+    const archived={...data,id:claim.documentKey,payload:{...data.payload,qgClosureKey:claim.documentKey}};
+    const prepared=await prepareGeneratedDocumentPhotos(archived);
+    if((prepared.payload?.rows||[]).some(row=>(row.photoAvailable||row.photoStoragePath||row.photoUrl) && !String(row.photoUrl||'').startsWith('data:image/'))) throw Error('archive_failed');
+    const pdfBlob=createGeneratedDocumentPdf(prepared).output('blob');
+    const result=await mirrorGeneratedDocument({firebaseUser:currentUser,profile:currentProfile,document:archived,pdfBlob,closureCreateOnly:true});
+    if(!result?.documentId || result.skipped) throw Error('archive_uncertain');
+    const completed=await sb.rpc('sentinelle_qg_documents',{p_shift_id:shiftId,p_action:'archived',p_attempt:claim.attempt,p_document:result.documentId});
+    if(completed.error) throw Error('archive_uncertain');
+    toast('PDF de clôture archivé. Les envois restent suivis dans Documents.','success');
+  }catch(error){
+    const code=error?.message==='offline'?'offline':error?.message==='archive_failed'?'archive_failed':'archive_uncertain';
+    const recorded=await sb.rpc('sentinelle_qg_documents',{p_shift_id:shiftId,p_action:code==='archive_uncertain'?'uncertain':'failed',p_attempt:claim.attempt,p_error:code}).catch(()=>({error:true}));
+    toast(recorded.error?'Clôture conservée. Résultat PDF incertain : consulter les reprises QG.':'Clôture conservée. Échec PDF enregistré dans les reprises QG.','warning');
+  }
+}
+async function openQGDocumentRecovery(){
+  if(!roleAllowedAdmin()) return;
+  const {data,error}=await getSupabaseClient().rpc('sentinelle_qg_documents',{});
+  if(error) return toast('Impossible de lire les reprises documentaires.','error');
+  showModal('Reprises PDF des clôtures QG',data.length?data.map(row=>`<div class="setup-box"><strong>Poste ${safe(row.shiftId)}</strong><p>${safe(row.state)} · ${safe(row.error||'Archivage à terminer')}</p><button class="btn" data-qg-pdf-retry="${safe(row.shiftId)}">Vérifier et reprendre le PDF</button></div>`).join(''):'Aucune reprise documentaire en attente.');
+  document.querySelectorAll('[data-qg-pdf-retry]').forEach(btn=>btn.addEventListener('click',async()=>{
+    btn.disabled=true;try{await recoverQGClosureDocument(btn.dataset.qgPdfRetry);await openQGDocumentRecovery();}finally{btn.disabled=false;}
+  }));
 }
 
 
@@ -3794,7 +3918,7 @@ function listenQGNotifications(selector, max=10){
         .select('id,title,type,delivery_status,delivery_error,updated_at,created_at')
         .eq('organization_id',stagingConfig.organizationId)
         .eq('type','mission')
-        .in('delivery_status',['failed','no_recipient'])
+        .in('delivery_status',['failed','no_recipient','uncertain','blocked'])
         .order('updated_at',{ascending:false})
         .limit(80);
       if(error)throw error;
@@ -3852,15 +3976,15 @@ function buildQGNotifications(state){
     const sent = qgNotificationEventMs(f.sentAt);
     if (sent && now - sent > 10*60000 && Object.keys(f.readBy || {}).length === 0) rows.push({id:`flash_${f.id}`,level:'orange',eventAt:sent,title:`Flash critique non lu`, meta:`Envoyé ${dateText(f.sentAt)}`, body:f.title || f.message || 'Message sans lecture confirmée'});
   });
-  state.documents.filter(d=>d.type==='mission' && ['failed','no_recipient'].includes(String(d.deliveryStatus||''))).forEach(d=>{
+  state.documents.filter(d=>d.type==='mission' && ['failed','no_recipient','uncertain','blocked'].includes(String(d.deliveryStatus||''))).forEach(d=>{
     const eventAt=qgNotificationEventMs(d.updatedAt||d.createdAt);
     rows.push({
       id:`main_courante_delivery_${d.id}`,
       level:d.deliveryStatus==='failed'?'red':'orange',
       eventAt,
-      title:d.deliveryStatus==='failed'?'Échec envoi main courante':'Main courante sans destinataire',
+      title:({failed:'Échec envoi main courante',uncertain:'Acceptation e-mail incertaine',blocked:'Envoi documentaire bloqué',no_recipient:'Main courante sans destinataire'})[d.deliveryStatus],
       meta:`${d.title||'Rapport de mission'} · ${dateText(d.updatedAt||d.createdAt)}`,
-      body:d.deliveryStatus==='failed'?'Les 3 tentatives automatiques ont échoué. Vérification QG requise.':'Configure un e-mail rapports dans la fiche client puis relance l’envoi.'
+      body:({failed:'Tentatives épuisées. Vérification QG requise.',uncertain:'Aucun renvoi automatique : vérifier le résultat fournisseur.',blocked:'Vérifier les autorisations du document et du client avant relance.',no_recipient:'Vérifier les destinataires configurés avant relance.'})[d.deliveryStatus]
     });
   });
   const clearedAt=Number(state.clearedAt||0);
@@ -5293,7 +5417,10 @@ async function generateAndArchiveDocument(fd, caches={}){
 function generatedDeliveryStatusMeta(status){
   const value=String(status||'');
   const map={
-    sent:{label:'Envoyé au client',cls:'green'},
+    sent:{label:'Accepté par le fournisseur',cls:'green'},
+    sending:{label:'Envoi en cours',cls:'blue'},
+    uncertain:{label:'Résultat incertain — vérifier avant renvoi',cls:'orange'},
+    blocked:{label:'Envoi bloqué par les autorisations',cls:'red'},
     retry_pending:{label:'Relance programmée',cls:'orange'},
     waiting_pdf:{label:'PDF en attente',cls:'orange'},
     no_recipient:{label:'Aucun destinataire',cls:'orange'},
@@ -5490,11 +5617,17 @@ async function retryGeneratedDocumentEmail(d,button){
   const original=button?.textContent||'Relancer envoi';
   if(button){button.disabled=true;button.textContent='Relance…';}
   try{
-    const {data,error}=await invokeSupabaseFunction('send-main-courante',{documentId:d.id});
+    const {data,error}=await invokeSupabaseFunction('send-main-courante',{documentId:d.id,manual:true});
     if(error)throw error;
     const status=data?.status||data?.deliveryStatus||'';
-    if(data?.ok||['sent','already_sent'].includes(status))toast(status==='already_sent'?'Document déjà envoyé.':'Document envoyé au client.','success');
-    else if(['retry_pending','failed'].includes(status))toast(data?.error||'Envoi impossible. Une nouvelle relance sera tentée automatiquement.','warning');
+    if(data?.ok||['sent','already_sent'].includes(status))toast(status==='already_sent'?'Document déjà envoyé.':'Document accepté par le fournisseur.','success');
+    else if(status==='withheld')toast('Ancien envoi suspendu sur décision du responsable : aucun renvoi. Le PDF reste disponible.','warning');
+    else if(status==='retry_pending')toast('Échec confirmé : relance programmée.','warning');
+    else if(status==='failed')toast('Tentatives épuisées. Le PDF reste archivé.','warning');
+    else if(status==='uncertain')toast('Acceptation incertaine : aucun renvoi automatique. Vérification nécessaire.','warning');
+    else if(status==='blocked')toast('Envoi refusé : vérifier les autorisations documentaires.','warning');
+    else if(['busy','sending','stale'].includes(status))toast('Traitement déjà réservé. Actualise son état avant toute relance.','warning');
+    else if(['disabled','no_recipient'].includes(status))toast('Envoi non effectué : vérifier les préférences et destinataires.','warning');
     else toast('Demande de relance transmise.','success');
   }catch(error){
     console.error(error);
@@ -5550,17 +5683,7 @@ async function loadBillingProfile(){
   billingProfileCache = snap?.exists?.() ? snap.data() : {};
   return billingProfileCache;
 }
-async function nextInvoiceNumber(){
-  const counterRef = docRef('billingSettings','counter');
-  const year = new Date().getFullYear();
-  return runTransaction(db, async transaction => {
-    const snap = await transaction.get(counterRef);
-    const data = snap.exists() ? snap.data() : {};
-    const sequence = data.year === year ? Number(data.sequence || 0) + 1 : 1;
-    transaction.set(counterRef, { year, sequence, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }, { merge:true });
-    return `SP-${year}-${String(sequence).padStart(4,'0')}`;
-  });
-}
+
 async function renderQGBilling(){
   if (!isStrictAdmin()) { toast('Facturation réservée au compte admin.', 'error'); return renderQGHome(); }
   currentRoute = 'billing';
@@ -5720,7 +5843,9 @@ async function showInvoiceCreateModal(sites){
   select.addEventListener('change',sync);
   document.querySelector('#invoice-create-form').addEventListener('submit',async e=>{
     e.preventDefault();
-    const fd=new FormData(e.currentTarget);
+    const form=e.currentTarget;
+    if(form._sentinelleInvoiceRequest) return submitInvoiceRequest(form);
+    const fd=new FormData(form);
     const site=sites.find(s=>s.id===fd.get('siteId'));
     if(!site)return toast('Site introuvable.','error');
     const periodStart=startOfDay(new Date(fd.get('periodStart'))), periodEnd=endOfDay(new Date(fd.get('periodEnd')));
@@ -5741,9 +5866,7 @@ async function showInvoiceCreateModal(sites){
     const vatRate=Number(fd.get('vatRate')||0);
     const vatAmount=round2(subtotal*vatRate/100);
     const total=round2(subtotal+vatAmount);
-    const number=await nextInvoiceNumber();
     const payload={
-      number,
       clientName:String(fd.get('clientName')||site.clientName||site.name||'').trim(),
       siteId:site.id,siteNom:site.name,siteColor:normalizeHexColor(site.planningColor)||planningColorForSite(site.id),
       billingAddress:String(fd.get('billingAddress')||'').trim(),billingEmail:String(fd.get('billingEmail')||'').trim(),
@@ -5754,11 +5877,18 @@ async function showInvoiceCreateModal(sites){
       lines,missionIds:missions.map(m=>m.id),subtotal,vatRate,vatAmount,total,currency:'EUR',status:'draft',
       createdAt:serverTimestamp(),createdBy:currentUser.uid,updatedAt:serverTimestamp(),updatedBy:currentUser.uid
     };
-    const ref=await addDoc(collectionRef('invoices'),payload);
-    await addAudit('invoice_created',{invoiceId:ref.id,number,siteId:site.id,total});
-    closeModal();
-    toast(`Facture ${number} créée.`, 'success');
+    await submitInvoiceRequest(form,payload);
   });
+}
+async function submitInvoiceRequest(form,payload){
+  // Keep the same snapshot and ID after a lost response, while this form remains open.
+  if(!form._sentinelleInvoiceRequest) form._sentinelleInvoiceRequest={id:crypto.randomUUID(),payload:JSON.parse(JSON.stringify(payload))};
+  const request=form._sentinelleInvoiceRequest;
+  const {data:invoice,error}=await getSupabaseClient().rpc('sentinelle_create_invoice_atomic',{p_id:request.id,p_payload:request.payload});
+  if(error) throw error;
+  await addAudit('invoice_created',{invoiceId:invoice.id,number:invoice.number,siteId:request.payload.siteId,total:request.payload.total});
+  closeModal();toast(`Facture ${invoice.number} créée.`, 'success');
+  return invoice;
 }
 async function updateInvoiceStatus(invoiceId,status){
   await updateDoc(docRef('invoices',invoiceId),{status,paidAt:status==='paid'?serverTimestamp():null,sentAt:status==='sent'?serverTimestamp():null,updatedAt:serverTimestamp(),updatedBy:currentUser.uid});await addAudit('invoice_status_updated',{invoiceId,status});toast(`Facture ${invoiceStatusLabel(status).toLowerCase()}.`,'success');
@@ -6320,11 +6450,9 @@ async function sendPushForFlash(flash){
 // -------------------- FLASH / SOS / UTILS --------------------
 function flashTargetsMe(f){
   if (!currentProfile || rolePortal(currentProfile.role) !== 'agent') return false;
-  if (f.target === 'all') return true;
-  if (f.target === 'working') return currentProfile.statut === 'en_poste';
-  if (f.target === `agent:${currentUser.uid}`) return true;
-  if (currentProfile.siteActuel && f.target === `site:${currentProfile.siteActuel}`) return true;
-  return false;
+  // Agent reads use sentinelle_agent_flash: the server has checked the real
+  // active shift. A stale display profile must not hide an authorized Flash.
+  return f.status === 'sent';
 }
 function startFlashListener(){
   if (!currentUser || rolePortal(currentProfile.role) !== 'agent') return;
@@ -6435,39 +6563,53 @@ function bindSos(){
   btn.addEventListener('pointerleave', stop, { passive:false });
   btn.addEventListener('pointercancel', stop, { passive:false });
 }
+let pendingSosWrite = null;
+let sosSubmitting = false;
 async function triggerSOS(){
-  const queuedOffline = !navigator.onLine;
+  if (sosSubmitting) return;
   document.querySelector('#sos-btn')?.classList.remove('arming');
   document.querySelector('#sos-help')?.classList.add('hidden');
+  if (!isOnline()) {
+    showModal('Alerte non envoyée', `<div class="setup-box danger-copy">Sans réseau, aucun SOS n’est enregistré ni envoyé automatiquement ensuite. Appelle immédiatement le QG ou les secours.</div><div class="grid cols-2">${qgPhoneButton()}<a class="btn danger full" href="tel:112">Appeler le 112</a></div>`);
+    resetSosButton();
+    return;
+  }
+  sosSubmitting = true;
   try {
-    const shift = await findActiveShift().catch(() => activeShiftCache || null);
-    const gps = await getGPS();
-    const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
-    const alertDoc = await addDoc(collectionRef('alerts'), {
-      agentId: currentUser.uid, agentNom, siteActuel: shift?.siteId || currentProfile.siteActuel || null, siteActuelNom: shift?.siteNom || currentProfile.siteActuelNom || null,
-      positionGPS: gps, heure: serverTimestamp(), localTriggeredAt:new Date().toISOString(), queuedOffline,
-      typeAlerte:'SOS/PTI', statut:'active', message:queuedOffline?'Alerte PTI enregistrée hors ligne — transmission au retour du réseau':'Alerte PTI déclenchée par l’agent', niveau:'critique', createdAt:serverTimestamp(), createdBy:currentUser.uid
-    });
+    if (pendingSosWrite && pendingSosWrite.data.agentId !== currentUser.uid) pendingSosWrite = null;
+    if (!pendingSosWrite) {
+      const shift = await findActiveShift().catch(() => activeShiftCache || null);
+      const gps = await getGPS();
+      const data = {
+        agentId: currentUser.uid, agentNom: `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim(), siteActuel: shift?.siteId || currentProfile.siteActuel || null, siteActuelNom: shift?.siteNom || currentProfile.siteActuelNom || null,
+        positionGPS: gps, heure: serverTimestamp(), localTriggeredAt:new Date().toISOString(), queuedOffline:false,
+        typeAlerte:'SOS/PTI', statut:'active', message:'Alerte PTI déclenchée par l’agent', niveau:'critique', createdAt:serverTimestamp(), createdBy:currentUser.uid
+      };
+      pendingSosWrite = {ref:doc(collectionRef('alerts')),data,matches:row=>row.agentId===data.agentId && row.typeAlerte===data.typeAlerte && row.localTriggeredAt===data.localTriggeredAt};
+    }
+    const request = pendingSosWrite;
+    await confirmOnlineRecord(request);
+    pendingSosWrite = null;
     updateDoc(docRef('users', currentUser.uid), { statut:'alerte', lastSeen:serverTimestamp() }).catch(()=>{});
-    addAudit('sos_triggered', { alertId: alertDoc.id, siteId: shift?.siteId || null, queuedOffline }).catch(()=>{});
+    addAudit('sos_triggered', { alertId:request.ref.id, siteId:request.data.siteActuel, queuedOffline:false }).catch(()=>{});
     if (navigator.vibrate) navigator.vibrate([200,80,200,80,200]);
-    showSOSSent(alertDoc.id, { queuedOffline });
+    showSOSSent(request.ref.id);
   } catch(error){
     console.error(error);
-    showModal('Alerte non enregistrée', `<div class="setup-box danger-copy">L’appareil n’a pas pu enregistrer l’alerte. Appelle immédiatement le QG ou les secours.</div><div class="grid cols-2">${qgPhoneButton()}<a class="btn danger full" href="tel:112">Appeler le 112</a></div>`);
-  }
+    showModal('Alerte non confirmée', `<div class="setup-box danger-copy">L’enregistrement serveur n’a pas pu être confirmé. Une réponse peut avoir été perdue. Appelle immédiatement le QG ou les secours. Ne considère pas le QG comme prévenu ; garde cet écran ouvert pour vérifier avant une nouvelle tentative.</div><div class="grid cols-2">${qgPhoneButton()}<a class="btn danger full" href="tel:112">Appeler le 112</a></div>`);
+    resetSosButton();
+  } finally { sosSubmitting = false; }
 }
+
 function qgPhoneButton(){
   const digits = String(DEFAULT_QG_WHATSAPP || '').replace(/\D/g,'');
   if (!digits || digits === '33600000000') return '';
   const tel = String(DEFAULT_QG_WHATSAPP).replace(/[^+\d]/g,'');
   return `<a class="btn warning full" href="tel:${safe(tel)}">Appeler le QG</a>`;
 }
-function showSOSSent(alertId,{queuedOffline=false}={}){
-  const title = queuedOffline ? 'Alerte enregistrée hors ligne' : 'Alerte envoyée au QG';
-  const message = queuedOffline
-    ? 'L’alerte est conservée sur cet appareil et sera synchronisée au retour du réseau. Le QG n’est pas prévenu en temps réel : appelle-le immédiatement ou compose le 112.'
-    : 'QG notifié. Restez en sécurité.';
+function showSOSSent(alertId){
+  const title = 'Alerte enregistrée sur le serveur';
+  const message = 'La prise en charge par le QG n’est pas encore confirmée. Reste en sécurité et appelle le QG ou le 112 si nécessaire.';
   showModal(title, `<div class="setup-box danger-copy">${safe(message)}</div><div class="grid cols-2">${qgPhoneButton()}<a class="btn danger full" href="tel:112">Appeler secours 112</a><button class="btn full" id="false-alert">Fausse alerte</button></div><p class="muted" style="font-size:12px;margin-top:14px">La fausse alerte est tracée et ne supprime pas silencieusement l’historique.</p>`);
   document.querySelector('#false-alert')?.addEventListener('click', async () => {
     const reason = prompt('Confirme la fausse alerte avec une justification :');

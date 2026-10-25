@@ -7,6 +7,7 @@ let clients=[];
 let sites=[];
 let documents=[];
 let recoveryMode=false;
+let portalEpoch=0;
 
 function safe(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function configured(){return supabaseConfig.enabled&&supabaseConfig.url&&!supabaseConfig.url.includes('REMPLACE_MOI')&&supabaseConfig.publishableKey&&!supabaseConfig.publishableKey.includes('REMPLACE_MOI');}
@@ -73,7 +74,7 @@ async function registerClientPwa(){
 async function getSupabase(){
   if(supabase)return supabase;
   if(!configured())throw new Error('Le portail client n’est pas relié au projet Supabase.');
-  const {createClient}=await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+  const {createClient}=await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm');
   supabase=createClient(supabaseConfig.url,supabaseConfig.publishableKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,storageKey:'sentinelle-client-v591-auth'}});
   return supabase;
 }
@@ -84,7 +85,7 @@ async function boot(){
     const client=await getSupabase();
     client.auth.onAuthStateChange((event,session)=>{
       if(event==='PASSWORD_RECOVERY'){recoveryMode=true;renderPasswordRecovery();return;}
-      if(event==='SIGNED_OUT')renderLogin();
+      if(event==='SIGNED_OUT'){portalEpoch++;profile=null;clients=[];sites=[];documents=[];renderLogin();}
       if(event==='SIGNED_IN'&&session&&!recoveryMode)loadPortal().catch(renderError);
     });
     const {data:{session}}=await client.auth.getSession();
@@ -131,27 +132,34 @@ function renderPasswordRecovery(){
 }
 
 async function loadPortal(){
+  const ticket=++portalEpoch;
   const {data:{user}}=await supabase.auth.getUser();
+  if(ticket!==portalEpoch)return;
   if(!user)return renderLogin();
   const {data:profileData,error:profileError}=await supabase.from('profiles').select('id,organization_id,role,first_name,last_name,email,active').eq('auth_user_id',user.id).maybeSingle();
+  if(ticket!==portalEpoch)return;
   if(profileError)throw profileError;
   if(!profileData||profileData.role!=='client'||profileData.active===false)throw new Error('Aucun accès client actif n’est associé à ce compte.');
-  profile=profileData;
+  const nextProfile=profileData;
 
-  const {data:links,error:linkError}=await supabase.from('client_users').select('client_id,clients(id,name,report_email,billing_email,address,portal_enabled,active)').eq('profile_id',profile.id);
+  const {data:links,error:linkError}=await supabase.from('client_users').select('client_id,clients(id,name,report_email,billing_email,address,portal_enabled,active)').eq('profile_id',nextProfile.id);
+  if(ticket!==portalEpoch)return;
   if(linkError)throw linkError;
-  clients=(links||[]).map(row=>row.clients).filter(Boolean).filter(c=>c.active!==false&&c.portal_enabled!==false);
-  if(!clients.length)throw new Error('Votre compte n’est rattaché à aucun client autorisé.');
-  const clientIds=clients.map(c=>c.id);
+  const nextClients=(links||[]).map(row=>row.clients).filter(Boolean).filter(c=>c.active!==false&&c.portal_enabled!==false);
+  if(!nextClients.length)throw new Error('Votre compte n’est rattaché à aucun client autorisé.');
+  const clientIds=nextClients.map(c=>c.id);
 
   const {data:siteLinks,error:siteError}=await supabase.from('client_sites').select('site_id,client_id,sites(id,firebase_id,name,address,active)').in('client_id',clientIds);
+  if(ticket!==portalEpoch)return;
   if(siteError)throw siteError;
-  sites=(siteLinks||[]).map(row=>row.sites).filter(Boolean).filter(s=>s.active!==false);
+  const nextSites=(siteLinks||[]).map(row=>row.sites).filter(Boolean).filter(s=>s.active!==false);
 
   const {data:docs,error:docsError}=await supabase.from('generated_documents')
     .select('id,client_id,title,type,row_count,created_at,firebase_site_id,storage_bucket,storage_path,delivery_status,status,payload')
-    .eq('organization_id',profile.organization_id).eq('status','active').order('created_at',{ascending:false}).limit(500);
+    .eq('organization_id',nextProfile.organization_id).eq('status','active').order('created_at',{ascending:false}).limit(500);
+  if(ticket!==portalEpoch)return;
   if(docsError)throw docsError;
+  profile=nextProfile;clients=nextClients;sites=nextSites;
   documents=(docs||[]).sort((a,b)=>(documentBusinessDate(b)?.getTime()||0)-(documentBusinessDate(a)?.getTime()||0));
   renderPortal();
 }
@@ -227,18 +235,35 @@ function drawDocuments(){
 }
 
 async function signedDocumentUrl(d,expires=120){
-  const {data,error}=await supabase.storage.from(d.storage_bucket||supabaseConfig.reportBucket).createSignedUrl(d.storage_path,expires);
+  const latest=await supabase.from('generated_documents').select('id,storage_bucket,storage_path').eq('id',d.id).maybeSingle();
+  if(latest.error || !latest.data) throw new Error('Document retiré ou accès désactivé.');
+  const {data,error}=await supabase.storage.from(latest.data.storage_bucket).createSignedUrl(latest.data.storage_path,expires);
   if(error)throw error;if(!data?.signedUrl)throw new Error('Lien PDF indisponible.');return data.signedUrl;
 }
 async function openDocument(documentId,button,download){
   const original=button.textContent;button.disabled=true;button.textContent=download?'Téléchargement…':'Ouverture…';
+  const requestEpoch=portalEpoch;
+  let preview=null;
   try{
     const d=documents.find(row=>row.id===documentId);if(!d)throw new Error('Document introuvable.');
+    // Reserve the preview during the click gesture; Safari can block a popup
+    // created after asynchronous authorization. No file is opened before checks.
+    if(!download){
+      preview=window.open('about:blank','_blank');
+      if(!preview)throw new Error('Ouverture bloquée par le navigateur. Utilise le bouton Télécharger.');
+      preview.opener=null;
+    }
     const url=await signedDocumentUrl(d,180);
-    if(!download){window.open(url,'_blank','noopener');return;}
-    const response=await fetch(url);if(!response.ok)throw new Error('Téléchargement impossible.');
-    const blob=await response.blob();const a=document.createElement('a');const objectUrl=URL.createObjectURL(blob);a.href=objectUrl;a.download=`${String(d.title||'main-courante').replace(/[^a-z0-9-_]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);
-  }catch(error){toast(error?.message||'Ouverture impossible.');}
+    if(requestEpoch!==portalEpoch)throw new Error('Session modifiée. Reconnecte-toi avant d’ouvrir le document.');
+    if(!download){
+      if(preview.closed)throw new Error('La fenêtre du document a été fermée.');
+      preview.location.replace(url);return;
+    }
+    const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error('Téléchargement impossible.');
+    const blob=await response.blob();
+    if(requestEpoch!==portalEpoch)throw new Error('Session modifiée. Reconnecte-toi avant d’ouvrir le document.');
+    const a=document.createElement('a');const objectUrl=URL.createObjectURL(blob);a.href=objectUrl;a.download=`${String(d.title||'main-courante').replace(/[^a-z0-9-_]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);
+  }catch(error){if(preview&&!preview.closed)preview.close();toast(error?.message||'Ouverture impossible.');}
   finally{button.disabled=false;button.textContent=original;}
 }
 

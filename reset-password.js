@@ -45,7 +45,7 @@ async function boot(){
   if(!supabaseConfig?.enabled||!supabaseConfig?.url||!supabaseConfig?.publishableKey){
     setInvalid();return;
   }
-  const {createClient}=await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+  const {createClient}=await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm');
   // Stockage volontairement séparé et non persistant : aucune ancienne session Agent/Admin/Client
   // ne peut décider de l’espace ouvert par le lien de récupération.
   supabase=createClient(supabaseConfig.url,supabaseConfig.publishableKey,{

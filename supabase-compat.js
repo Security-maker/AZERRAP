@@ -1,4 +1,4 @@
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm';
 import { stagingConfig } from './sentinelle-config.js';
 
 const CORE = Object.freeze({
@@ -22,6 +22,8 @@ const supabase = createClient(stagingConfig.supabaseUrl, stagingConfig.supabaseP
 
 let compatUserCache = null;
 let profileCache = null;
+let identityEpoch = 0;
+let nativeIdentity = null;
 
 class CompatTimestamp {
   constructor(value){
@@ -132,7 +134,9 @@ async function signedPrivateUrl(bucket,path,expiresIn=3600){
   const key=`${bucket}:${path}`;
   const cached=signedUrlCache.get(key);
   if(cached && cached.expiresAt>Date.now()+60000) return cached.url;
+  const epoch=identityEpoch;
   const {data,error}=await supabase.storage.from(bucket).createSignedUrl(path,expiresIn);
+  if(epoch!==identityEpoch) throw new Error('Session remplacée');
   if(error) throw error;
   const url=String(data?.signedUrl||'');
   if(url) signedUrlCache.set(key,{url,expiresAt:Date.now()+Math.max(60,expiresIn-60)*1000});
@@ -226,11 +230,15 @@ async function hydrateGenericMedia(path,payload){
 }
 
 async function loadCompatUser(user, session=null){
-  if (!user) { compatUserCache=null; profileCache=null; return null; }
+  const identity=user?.id || null;
+  if(identity!==nativeIdentity){ nativeIdentity=identity;identityEpoch++;compatUserCache=null;profileCache=null;signedUrlCache.clear(); }
+  const epoch=identityEpoch;
+  if (!user) return null;
   const { data:profile, error } = await supabase.from('profiles')
     .select('id,organization_id,auth_user_id,external_uid,role,first_name,last_name,email,phone,active,firebase_payload')
     .eq('auth_user_id', user.id).maybeSingle();
   if (error) throw error;
+  if(epoch!==identityEpoch) throw new Error('Session remplacée');
   if (!profile) {
     const accessToken = session?.access_token || (await supabase.auth.getSession()).data.session?.access_token || null;
     return {
@@ -239,14 +247,15 @@ async function loadCompatUser(user, session=null){
       getIdToken: async()=>accessToken
     };
   }
-  profileCache=profile;
   const accessToken = session?.access_token || (await supabase.auth.getSession()).data.session?.access_token || null;
+  if(epoch!==identityEpoch) throw new Error('Session remplacée');
+  profileCache=profile;
   compatUserCache={
     uid:profile.external_uid || user.id,
     supabaseUid:user.id,
     email:user.email || profile.email || '',
     emailVerified:Boolean(user.email_confirmed_at),
-    getIdToken: async()=> (await supabase.auth.getSession()).data.session?.access_token || accessToken
+    getIdToken: async()=> {const s=(await supabase.auth.getSession()).data.session;return s?.user?.id===user.id?s.access_token:'';}
   };
   return compatUserCache;
 }
@@ -265,30 +274,27 @@ export async function createUserWithEmailAndPassword(){
   throw new Error('Utilise la fonction Edge admin-manage-user de Sentinelle Pro.');
 }
 export async function signOut(){
-  compatUserCache=null; profileCache=null;
+  identityEpoch++;nativeIdentity=null;compatUserCache=null;profileCache=null;signedUrlCache.clear();
   const { error }=await supabase.auth.signOut();
   if(error) throw error;
 }
 export function onAuthStateChanged(_auth, callback){
-  let active=true;
-  let initialized=false;
-  supabase.auth.getSession().then(async ({data,error})=>{
-    if(!active) return;
-    if(error){ console.warn('Session Supabase indisponible',error); return callback(null); }
-    initialized=true;
-    try { callback(await loadCompatUser(data.session?.user || null,data.session)); }
-    catch(e){ console.error(e); callback(null); }
+  let active=true, revision=0;
+  const deliver=async(session,ticket)=>{
+    try {const user=await loadCompatUser(session?.user||null,session);if(active && ticket===revision) callback(user);}
+    catch(e){if(active && ticket===revision){console.error(e);callback(null);}}
+  };
+  const initial=revision;
+  supabase.auth.getSession().then(({data,error})=>{
+    if(!active || revision!==initial) return;
+    if(error){callback(null);return;}
+    deliver(data.session,initial);
   });
   const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,session)=>{
-    // Évite l'écho INITIAL_SESSION déjà traité par getSession().
-    if(!active || (!initialized && _event==='INITIAL_SESSION')) return;
-    queueMicrotask(async()=>{
-      if(!active) return;
-      try { callback(await loadCompatUser(session?.user || null,session)); }
-      catch(e){ console.error(e); callback(null); }
-    });
+    const ticket=++revision;
+    queueMicrotask(()=>{if(active && ticket===revision) deliver(session,ticket);});
   });
-  return ()=>{ active=false; subscription?.unsubscribe?.(); };
+  return ()=>{active=false;revision++;subscription?.unsubscribe?.();};
 }
 
 export function initializeFirestore(){ return { kind:'supabase-db-v587' }; }
@@ -364,6 +370,16 @@ function idForCore(path,row){
 }
 
 async function readRows(path){
+  if(path==='flashMessages' && profileCache?.role==='agent'){
+    const {data,error}=await supabase.rpc('sentinelle_agent_flash');
+    if(error) throw error;
+    return (data||[]).map(row=>({id:row.external_id,data:revive(row.payload)}));
+  }
+  if(['sites','missions'].includes(path) && profileCache?.role==='agent'){
+    const {data,error}=await supabase.rpc(path==='sites'?'sentinelle_agent_sites':'sentinelle_agent_missions');
+    if(error) throw error;
+    return (data||[]).map(row=>({id:row.firebase_id,data:decodeCore(path,row)}));
+  }
   const cfg=coreFor(path);
   if(cfg){
     const {data,error}=await supabase.from(cfg.table).select('*');
@@ -375,6 +391,16 @@ async function readRows(path){
   return Promise.all((data||[]).map(async row=>({id:String(row.external_id),data:await hydrateGenericMedia(path,revive(row.payload||{}))})));
 }
 async function readOne(path,id){
+  if(path==='flashMessages' && profileCache?.role==='agent'){
+    const {data,error}=await supabase.rpc('sentinelle_agent_flash',{p_flash:id});
+    if(error) throw error;
+    return data?.[0]?revive(data[0].payload):null;
+  }
+  if(['sites','missions'].includes(path) && profileCache?.role==='agent'){
+    const {data,error}=await supabase.rpc(path==='sites'?'sentinelle_agent_sites':'sentinelle_agent_missions',path==='sites'?{p_site:id}:{p_mission:id});
+    if(error) throw error;
+    return data?.[0]?decodeCore(path,data[0]):null;
+  }
   const cfg=coreFor(path);
   if(cfg){
     const {data,error}=await supabase.from(cfg.table).select('*').eq(cfg.id,id).maybeSingle();
@@ -441,6 +467,11 @@ async function updateOwnOperationalProfile(id,data){
 }
 
 async function existingCoreRow(path,id){
+  if(['sites','missions'].includes(path) && profileCache?.role==='agent'){
+    const {data,error}=await supabase.rpc(path==='sites'?'sentinelle_agent_sites':'sentinelle_agent_missions',path==='sites'?{p_site:id}:{p_mission:id});
+    if(error) throw error;
+    return data?.[0]||null;
+  }
   const cfg=coreFor(path);
   const {data,error}=await supabase.from(cfg.table).select('*').eq(cfg.id,id).maybeSingle();
   if(error) throw error;
@@ -475,14 +506,21 @@ async function buildCoreRecord(path,id,data,{merge=false}={}){
   throw new Error(`Collection core non prise en charge : ${path}`);
 }
 async function writeCore(path,id,data,{merge=false,insertOnly=false}={}){
+  if(path==='missions' && profileCache?.role==='agent'){
+    if(insertOnly) throw new Error('Création de mission planifiée réservée au QG.');
+    const {error}=await supabase.rpc('sentinelle_agent_update_mission',{p_mission:id,p_patch:plain(data)});
+    if(error) throw error;
+    return makeDoc(path,id);
+  }
   if(path==='users' && await updateOwnOperationalProfile(id,data)) return makeDoc(path,id);
   const cfg=coreFor(path);
   if(path==='auditLogs'){
     const details=plain({...data.details,__userRole:data.userRole??null,__userAgent:data.userAgent??null});
-    const row={organization_id:stagingConfig.organizationId,actor_external_uid:data.userId||currentExternalUid(),action:data.action||'event',details,created_at:toIso(data.createdAt)||new Date().toISOString()};
-    const {data:created,error}=await supabase.from('audit_logs').insert(row).select('id').single();
+    const {data:auditId,error}=await supabase.rpc('sentinelle_append_client_audit',{
+      p_action:data.action||'event',p_details:details
+    });
     if(error) throw error;
-    return makeDoc(path,String(created.id));
+    return makeDoc(path,String(auditId));
   }
   const existing=insertOnly?null:await existingCoreRow(path,id);
   const prepared=await prepareCoreMedia(path,id,data,existing);
@@ -491,6 +529,7 @@ async function writeCore(path,id,data,{merge=false,insertOnly=false}={}){
   if(existing) result=await supabase.from(cfg.table).update(record).eq(cfg.id,id).select(cfg.id).maybeSingle();
   else result=await supabase.from(cfg.table).insert(record).select(cfg.id).single();
   if(result.error) throw result.error;
+  if(!result.data || String(result.data[cfg.id])!==String(id)) throw new Error('Enregistrement non confirmé par le serveur. Vérifie son état avant de réessayer.');
   return makeDoc(path,id);
 }
 function ownerFor(path,payload){
@@ -498,6 +537,12 @@ function ownerFor(path,payload){
   return payload.agentId||payload.userId||payload.createdBy||(first==='planningAcknowledgements'?String(path).split('/')[1]:null)||currentExternalUid();
 }
 async function writeGeneric(path,id,data,{merge=false}={}){
+  if(path==='flashMessages' && profileCache?.role==='agent'){
+    if(Object.keys(data||{}).length!==1 || !Object.hasOwn(data,`readBy.${currentExternalUid()}`)) throw new Error('Seule la confirmation personnelle de lecture est autorisée.');
+    const {error}=await supabase.rpc('sentinelle_agent_flash',{p_flash:id,p_ack:true});
+    if(error) throw error;
+    return makeDoc(path,id);
+  }
   const prev=merge?await readOne(path,id):null;
   const prepared=await prepareGenericMedia(path,id,data,prev||{});
   let combined=prepared;
@@ -505,8 +550,9 @@ async function writeGeneric(path,id,data,{merge=false}={}){
   const row={organization_id:stagingConfig.organizationId,collection_name:path,external_id:id,owner_external_uid:ownerFor(path,combined),payload:plain(combined),updated_at:new Date().toISOString()};
   const {data:existing,error:readError}=await supabase.from('compat_records').select('id').eq('collection_name',path).eq('external_id',id).maybeSingle();
   if(readError) throw readError;
-  const result=existing?await supabase.from('compat_records').update(row).eq('id',existing.id):await supabase.from('compat_records').insert(row);
+  const result=existing?await supabase.from('compat_records').update(row).eq('id',existing.id).select('external_id').single():await supabase.from('compat_records').insert(row).select('external_id').single();
   if(result.error) throw result.error;
+  if(!result.data || result.data.external_id!==id) throw new Error('Enregistrement non confirmé par le serveur. Vérifie son état avant de réessayer.');
   return makeDoc(path,id);
 }
 export async function addDoc(ref,data){
@@ -554,11 +600,12 @@ export function onSnapshot(ref,next,error){
   let stopped=false, running=false, fingerprint='';
   const poll=async()=>{
     if(stopped||running) return; running=true;
+    const pollEpoch=identityEpoch;
     try{
       const snap=ref.__kind==='doc'?await getDoc(ref):await getDocs(ref);
       const raw=ref.__kind==='doc'?(snap.exists()?snap.data():null):snap.docs.map(d=>[d.id,d.data()]);
       const nextPrint=JSON.stringify(plain(raw));
-      if(nextPrint!==fingerprint){ fingerprint=nextPrint; next(snap); }
+      if(!stopped && pollEpoch===identityEpoch && nextPrint!==fingerprint){ fingerprint=nextPrint; next(snap); }
     }catch(e){ if(!stopped){ console.warn('Flux Supabase indisponible',e); error?.(e); } }
     finally{running=false;}
   };
@@ -570,12 +617,21 @@ export function onSnapshot(ref,next,error){
 export function writeBatch(){
   const ops=[];
   return {
-    set:(ref,data,options={})=>ops.push(()=>setDoc(ref,data,options)),
-    update:(ref,data)=>ops.push(()=>updateDoc(ref,data)),
-    delete:(ref)=>ops.push(()=>deleteDoc(ref)),
-    commit:async()=>{ for(const op of ops) await op(); }
+    set:(ref,data,options={})=>ops.push({op:'set',ref,data,options}),
+    update:(ref,data)=>ops.push({op:'update',ref,data}),
+    delete:(ref)=>ops.push({op:'delete',ref}),
+    commit:async()=>{
+      if(ops.length && ops.every(o=>o.ref.path==='missions' && o.op!=='delete')){
+        const {error}=await supabase.rpc('sentinelle_apply_mission_batch',{p_ops:ops.map(o=>({op:o.op,id:o.ref.id,data:plain(o.data)}))});
+        if(error) throw error;
+        return;
+      }
+      // Other collections / cross-service cleanup still have sequential semantics.
+      for(const o of ops){if(o.op==='set')await setDoc(o.ref,o.data,o.options);else if(o.op==='update')await updateDoc(o.ref,o.data);else await deleteDoc(o.ref);}
+    }
   };
 }
+
 export async function runTransaction(_db,handler){
   const ops=[];
   const tx={
