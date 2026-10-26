@@ -1,3 +1,4 @@
+import { singleFlight, startVisiblePoll } from './ui-runtime.js?v=phase3-20261026-r4';
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/+esm';
 import { stagingConfig } from './sentinelle-config.js';
 
@@ -372,7 +373,9 @@ function idForCore(path,row){
   return String(row?.[cfg.id] ?? '');
 }
 
-async function readRows(path){
+const sharedReads=singleFlight();
+function readRows(path){return sharedReads(`${identityEpoch}:${usesOperationalProjection()}:${path}`,()=>fetchRows(path));}
+async function fetchRows(path){
   if(path==='flashMessages' && profileCache?.role==='agent'){
     const {data,error}=await supabase.rpc('sentinelle_agent_flash');
     if(error) throw error;
@@ -618,9 +621,10 @@ export function onSnapshot(ref,next,error){
     }catch(e){ if(!stopped){ console.warn('Flux Supabase indisponible',e); error?.(e); } }
     finally{running=false;}
   };
-  poll();
-  const timer=setInterval(poll,3500);
-  return ()=>{stopped=true;clearInterval(timer);};
+  // Preserve background operational alerts/Flash/profile monitoring. Only passive lists pause.
+  const path=ref.__kind==='query'?ref.ref?.path:ref.path;
+  const stop=startVisiblePoll(poll,{pauseWhenHidden:['generatedDocuments','invoices','auditLogs'].includes(path)});
+  return ()=>{stopped=true;stop();};
 }
 
 export function writeBatch(){

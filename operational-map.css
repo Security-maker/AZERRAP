@@ -1,0 +1,25 @@
+/* Independent map hotfix. Keep overlays legible without covering the map. */
+.map-service-status{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;padding:10px 12px;border:1px solid #52677b;border-radius:10px;color:var(--cold,#edf3fa);font-size:13px;line-height:1.5;background:#101f30}
+.map-service-status[hidden]{display:none}.map-service-status .btn{flex-shrink:0}
+.premium-map{background:#152335}
+.premium-map .leaflet-control-layers{border:1px solid #c2ccd6;border-radius:10px;box-shadow:0 2px 8px #0002}
+.premium-map .leaflet-control-layers-toggle{width:44px;height:44px;display:grid;place-items:center;background:none;color:#081b33;text-decoration:none}
+.premium-map .leaflet-control-layers-expanded .leaflet-control-layers-toggle{display:none}
+.premium-map .leaflet-control-layers-toggle::after{content:'▱';font-size:30px;font-weight:700;line-height:1}
+.premium-map .leaflet-control-layers-expanded{padding:8px 12px;max-width:min(230px,70vw)}
+.premium-map .leaflet-control-layers label{display:flex;align-items:center;margin:0;min-height:42px;font-size:13px;font-weight:600;line-height:1.4;text-transform:none;letter-spacing:0}
+.premium-map .leaflet-control-layers input{width:17px;height:17px;min-height:0;padding:0;margin:0 8px 0 0;box-shadow:none}
+.premium-map .leaflet-control-zoom a{width:42px;height:42px;line-height:42px;font-size:24px}
+.premium-map .leaflet-control-attribution{max-width:100%;font-size:10px;line-height:1.5;background:#ffffffeb;color:#24364a}
+.premium-map .leaflet-control-attribution a{color:#065e94}
+.map-actions .btn{min-height:42px}.map-card-title{gap:12px}
+@media(max-width:560px){.map-card-title{flex-wrap:wrap}.map-actions{width:100%;display:flex;justify-content:flex-start}.map-actions .btn{flex:1;padding:8px 12px;font-size:13px}.map-legend-premium{gap:14px;padding:8px 10px;font-size:11px}.map-empty-help{position:static;margin-top:10px;padding:10px;font-size:12px}.map-service-status{flex-wrap:wrap}.premium-map-xl{height:420px}.premium-map .leaflet-control-layers-expanded{max-height:250px;overflow:auto}}
+.premium-map .leaflet-bottom{max-width:100%}.premium-map .leaflet-control-attribution{white-space:normal;margin:0!important;box-sizing:border-box;text-align:right;overflow-wrap:anywhere}
+
+.sp-map-controls{color:#081b33;background:#fff;border:1px solid #c2ccd6;border-radius:10px;box-shadow:0 2px 8px #0002}
+.sp-map-controls summary{list-style:none;width:44px;height:44px;display:grid;place-items:center;cursor:pointer;font-size:30px;font-weight:700;line-height:1}
+.sp-map-controls summary::-webkit-details-marker{display:none}.sp-map-controls details[open] summary{border-bottom:1px solid #dae1e8;width:100%;text-align:right}
+.sp-map-options{padding:4px 12px 8px;min-width:170px}.sp-map-options label{display:flex;align-items:center;gap:9px;min-height:42px;color:#081b33;font:600 13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0;text-transform:none;margin:0}
+.sp-map-options input{width:17px;height:17px;min-height:0;margin:0;padding:0;accent-color:#0077bf;box-shadow:none}
+
+.map-service-status button[hidden]{display:none}

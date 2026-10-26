@@ -1,23 +1,27 @@
-const CACHE_NAME = 'sentinelle-pro-phase2-20261025-r1';
+const CACHE_NAME = 'sentinelle-pro-phase3-20261026-r4';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
-  './premium.css?v=phase2-20261025-r1',
-  './interventions.js?v=phase2-20261025-r1',
+  './operational-map.js?v=map-20261026-r1',
+  './operational-map.css?v=map-20261026-r1',
+  './phase3.css?v=phase3-20261026-r4',
+  './ui-runtime.js?v=phase3-20261026-r4',
+  './premium.css?v=phase3-20261026-r4',
+  './interventions.js?v=phase3-20261026-r4',
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=phase2-20261025-r1',
+  './app.js?v=phase3-20261026-r4',
   './sentinelle-config.js',
-  './supabase-compat.js?v=phase2-20261025-r1',
+  './supabase-compat.js?v=phase3-20261026-r4',
   './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js?v=phase2-20261025-r1',
+  './supabase-bridge.js?v=phase3-20261026-r4',
   './manifest.json',
   './manifest-client.json',
   './offline.html',
   './client.html',
   './client-style.css?v=597',
-  './client-app.js?v=phase2-20261025-r1',
+  './client-app.js?v=phase3-20261026-r4',
   './reset-password.html',
   './reset-password.js?v=593',
   './assets/logo.png',
@@ -160,7 +164,10 @@ self.addEventListener('fetch', event => {
   // server, including same-origin recipe proxies and navigations to signed PDFs.
   const shellPaths = new Set(APP_SHELL.map(path => new URL(path, self.registration.scope).pathname));
   const assetPath = new URL('./assets/', self.registration.scope).pathname;
-  if (!shellPaths.has(url.pathname) && !url.pathname.startsWith(assetPath)) {
+  // Public map libraries are cached only when the QG actually opens the map.
+  // No tile prefetch, no business API or Storage response enters this cache.
+  const mapAssets = new Set(['maplibre-gl-5.24.0.js','maplibre-gl-5.24.0.css','leaflet-maplibre-gl-0.0.22.js'].map(name=>new URL('./vendor/maps/'+name,self.registration.scope).pathname));
+  if (!shellPaths.has(url.pathname) && !url.pathname.startsWith(assetPath) && !mapAssets.has(url.pathname)) {
     event.respondWith(fetch(request, {cache:'no-store'}));
     return;
   }

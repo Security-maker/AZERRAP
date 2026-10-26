@@ -1,12 +1,14 @@
-import { createInterventionModule } from './interventions.js?v=phase2-20261025-r1';
+import { installOperationalBasemap } from './operational-map.js?v=map-20261026-r1';
+import { createClock } from './ui-runtime.js?v=phase3-20261026-r4';
+import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=phase2-20261025-r1';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=phase3-20261026-r4';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
-} from './supabase-compat.js?v=phase2-20261025-r1';
+} from './supabase-compat.js?v=phase3-20261026-r4';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -22,6 +24,7 @@ let currentUser = null;
 let currentProfile = null;
 let currentRoute = 'home';
 let unsubscribeList = [];
+const viewClock=createClock(()=>{const node=document.querySelector('#clock-pill');if(node)node.textContent=nowText();});
 let latestFlashUnsub = null;
 let mapInstance = null;
 let mapMarkers = [];
@@ -57,7 +60,10 @@ function renderInterventions(){
   interventionModule ||= createInterventionModule({client:getSupabaseClient(),safe,date:dateText,toast,page,render,
     isQG:()=>rolePortal(currentProfile?.role)==='qg',isCurrent:()=>currentRoute==='interventions',
     compress:compressCheckInPhoto,makePdf:createInterventionPdfBlob});
-  return interventionModule.show();
+  const url=new URL(location.href),requested=url.searchParams.get('intervention');
+  const interventionId=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requested||'')?requested:null;
+  if(requested){url.searchParams.delete('intervention');history.replaceState(null,'',url);}
+  return interventionModule.show(interventionId);
 }
 let fieldMode = false;
 const canUseFieldMode = () => ['admin','superviseur'].includes(currentProfile?.role);
@@ -302,9 +308,9 @@ function page(title, subtitle, body, options={}){
   const nav = portal === 'agent' ? agentNav() : qgNav();
   const gpsPill = portal === 'agent' ? `<span class="pill ${currentProfile?.statut === 'en_poste' ? 'green' : ''}">${currentProfile?.statut === 'en_poste' ? 'GPS actif pendant le service' : 'GPS inactif hors poste'}</span>` : '';
   return `
-    <div class="layout ${portal}">
+    <div class="layout ${portal}" data-screen="${safe(currentRoute)}">
       <div class="drawer-backdrop" id="drawer-backdrop" data-action="close-menu"></div>
-      <aside class="nav-drawer" id="nav-drawer" aria-hidden="true">
+      <aside class="nav-drawer" id="nav-drawer" aria-hidden="true" inert>
         <div class="drawer-head">
           <div class="brand drawer-brand">
             <img src="assets/logo.png" alt="Sentinelle Pro">
@@ -325,7 +331,7 @@ function page(title, subtitle, body, options={}){
           <div class="topbar-leading">
             <button class="menu-toggle" data-action="toggle-menu" aria-label="Ouvrir le menu"><span></span><span></span><span></span></button>
             <img src="assets/logo.png" alt="Sentinelle Pro" class="topbar-logo">
-            <div class="page-title"><h1>${safe(title)}</h1><p>${safe(subtitle || '')}</p></div>
+            <div class="page-title"><span class="workspace-label">AZZERA PROTECT / ${portal==='agent'?'ESPACE TERRAIN':'ESPACE QG'}</span><h1>${safe(title)}</h1><p>${safe(subtitle || '')}</p></div>
           </div>
           <div class="top-actions">
             ${canUseFieldMode()?`<button class="btn mode-switch" data-action="switch-mode">${fieldMode?"Retourner au QG":"Passer en mode Agent"}</button>`:""}
@@ -336,13 +342,14 @@ function page(title, subtitle, body, options={}){
         </div>
         ${body}
       </main>
+      <nav class="phase3-dock" aria-label="Accès rapides">${portal==='agent' ? [navBtn('home','⌂','Accueil'),navBtn('planning','◷','Planning'),navBtn('interventions','↗','Interventions'),navBtn('mci','▤','MCI')].join('') : [navBtn('home','⌂','QG'),navBtn('missions','◷','Planning'),navBtn('interventions','↗','Interventions'),navBtn('documents','▣','Documents')].join('')}<button class="nav-btn" data-action="toggle-menu" aria-label="Tous les écrans"><span class="nav-icon">☷</span><span>Menu</span></button></nav>
       ${portal === 'agent' ? sosButton() : ''}
     </div>
   `;
 }
 
 function navBtn(route, icon, label){
-  return `<button class="nav-btn ${currentRoute === route ? 'active':''}" data-route="${route}"><span class="nav-icon">${icon}</span><span>${label}</span></button>`;
+  return `<button class="nav-btn ${currentRoute === route ? 'active':''}" data-route="${route}" ${currentRoute === route ? 'aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${icon}</span><span>${label}</span></button>`;
 }
 function agentNav(){
   return [
@@ -476,7 +483,8 @@ function render(html){
   $app.innerHTML = html;
   bindGlobalEvents();
   const clock = document.querySelector('#clock-pill');
-  if (clock) setInterval(() => { const c=document.querySelector('#clock-pill'); if(c) c.textContent=nowText(); }, 30000);
+  viewClock.stop();
+  if(clock)viewClock.start();
 }
 
 function bindGlobalEvents(){
@@ -485,11 +493,13 @@ function bindGlobalEvents(){
   const openMenu = () => {
     layout?.classList.add('drawer-open');
     document.querySelector('#nav-drawer')?.setAttribute('aria-hidden','false');
+    document.querySelector('#nav-drawer')?.removeAttribute('inert');
     document.body.classList.add('menu-open');
   };
   const closeMenu = () => {
     layout?.classList.remove('drawer-open');
     document.querySelector('#nav-drawer')?.setAttribute('aria-hidden','true');
+    document.querySelector('#nav-drawer')?.setAttribute('inert','');
     document.body.classList.remove('menu-open');
   };
   document.querySelectorAll('[data-action="toggle-menu"]').forEach(btn => btn.addEventListener('click', openMenu));
@@ -1079,12 +1089,16 @@ async function renderAgentHome(){
   }
   const body = `
     <section class="grid cols-3">
-      <div class="card stat ${isWorking?'green':'orange'}"><div class="stat-label">Statut agent</div><div class="stat-value">${isWorking?'En poste':'Hors poste'}</div><div class="muted">${safe(currentProfile.prenom || '')} ${safe(currentProfile.nom || '')}</div></div>
+      <div class="card stat agent-status ${isWorking?'is-working':'is-off-duty'}"><div class="stat-label">Statut agent</div><div class="stat-value">${isWorking?'En poste':'Hors poste'}</div><div class="muted">${safe(currentProfile.prenom || '')} ${safe(currentProfile.nom || '')}</div></div>
       <div class="card stat blue"><div class="stat-label">Mission / site</div><div class="stat-value" style="font-size:22px">${safe(shift?.siteNom || 'Aucune')}</div><div class="muted">${isWorking ? 'Mission active' : 'Mission à sélectionner'}</div></div>
       <div class="card stat ${navigator.onLine?'green':'orange'}"><div class="stat-label">Réseau</div><div class="stat-value">${navigator.onLine?'Détecté':'OFF'}</div><div class="muted">${navigator.onLine?'Confirmation serveur requise':'Aucune transmission garantie'}</div></div>
     </section>
+    <section class="card field-operation-card ${isWorking?'is-active':''}" style="margin-top:16px">
+      <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
+      ${isWorking ? shiftSummary(shift) + `<button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer le poste</button>` + shiftPhotoRecoveryHtml(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div>` : takeShiftForm()}
+    </section>
     <section class="card quick-actions-card" style="margin-top:16px">
-      <div class="card-title"><div><h2>Actions rapides</h2><p>Les fonctions terrain essentielles, accessibles sans défilement</p></div></div>
+      <div class="card-title"><div><h2>Actions rapides</h2><p>Vos outils terrain</p></div></div>
       <div class="quick-action-bubbles">
         <button class="quick-action-bubble primary" data-route="planning"><span class="quick-action-icon">◷</span><strong>Planning</strong><small>Mes missions</small></button>
         <button class="quick-action-bubble" data-route="mci"><span class="quick-action-icon">▤</span><strong>Main courante</strong><small>Déclarer un événement</small></button>
@@ -1098,10 +1112,6 @@ async function renderAgentHome(){
     <section class="card offline-ready-card ${navigator.onLine?'':'offline-active'}" style="margin-top:16px">
       <div class="card-title"><div><h2>Enregistrement en ligne uniquement</h2><p id="offline-ready-status">${safe(offlineReadyText())}</p></div>${navigator.onLine?'<button class="btn small" id="offline-sync-now">Actualiser les données</button>':'<span class="pill orange">Hors ligne</span>'}</div>
       <div class="setup-box ${navigator.onLine?'':'warning-copy'}">Une connexion et une confirmation serveur sont nécessaires pour enregistrer une opération. Aucun envoi différé automatique. Les brouillons non envoyés peuvent être perdus après fermeture ou changement d’écran. Les opérations déjà confirmées restent conservées. En urgence sans réseau, appelle le QG ou le 112.</div>
-    </section>
-    <section class="card" style="margin-top:16px">
-      <div class="card-title"><div><h2>${isWorking?'Poste en cours':'Prise de poste'}</h2><p>${isWorking?'Résumé, relève et clôture':'Mission planifiée ou prise de poste libre'}</p></div></div>
-      ${isWorking ? shiftSummary(shift) + shiftPhotoRecoveryHtml(shift) + `<div id="agent-handover-card" class="handover-box"><div class="empty">Chargement de la relève...</div></div><button class="btn danger full end-shift-main-btn" id="end-shift-btn">Terminer ma mission</button>` : takeShiftForm()}
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-title"><div><h2>Derniers rapports envoyés</h2><p>Flux personnel</p></div></div>
@@ -1410,7 +1420,7 @@ async function bindAgentHome(shift){
         checkInPhoto = await compressCheckInPhoto(file);
         if (photoPreview) photoPreview.innerHTML = `<img src="${safe(checkInPhoto.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo prête</strong><span>${Math.round(checkInPhoto.bytes / 1024)} Ko · ${checkInPhoto.width}×${checkInPhoto.height}</span></div>`;
         if (photoConfirm) { photoConfirm.disabled = false; photoConfirm.checked = true; }
-        toast('Photo de prise de poste enregistrée.', 'success');
+        toast('Photo prête : elle sera associée au poste après confirmation.', 'info');
       } catch(error) {
         console.error(error);
         checkInPhoto = null;
@@ -2210,7 +2220,7 @@ async function renderQGHome(){
       <div class="card stat blue dashboard-stat" role="button" tabindex="0" data-dashboard-detail="missions" aria-label="Afficher les missions du jour"><div class="stat-label">Missions du jour</div><div class="stat-value" id="stat-missions">—</div><div class="stat-hint">Voir le programme opérationnel</div></div>
     </section>
     <section class="card map-card map-card-xl" style="margin-top:16px">
-      <div class="card-title map-card-title"><div><h2>Carte opérationnelle</h2><p>Vue lisible des sites géolocalisés et agents en poste</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div>
+      <div class="card-title map-card-title"><div><h2>Carte opérationnelle</h2><p>Sites et équipes en service</p></div><div class="btn-row map-actions"><button class="btn small" id="map-locate">Ma position</button><button class="btn small" id="map-reset">Tout afficher</button></div></div>
       <div class="map-legend map-legend-premium"><span><i class="legend-dot agent"></i>Agents en poste</span><span><i class="legend-dot site"></i>Sites client</span><span class="muted">Touchez un agent pour afficher son poste · Touchez un site pour ouvrir sa fiche</span></div>
       <div id="qg-map" class="map premium-map premium-map-xl"></div>
       <div id="map-empty-help" class="map-empty-help hidden">Renseigne une adresse complète dans Gestion Sites : la position sera calculée automatiquement.</div>
@@ -2219,8 +2229,8 @@ async function renderQGHome(){
       <div class="card"><div class="card-title"><div><h2>Centre notifications</h2><p>Retards, prises de poste, inactivité, SOS et critiques</p></div><div class="btn-row"><button class="btn small ghost" id="qg-clear-notifications-preview" type="button">Effacer</button><button class="btn small" data-route="notifications">Voir tout</button></div></div><div id="qg-notifications-preview" class="list"><div class="empty">Chargement...</div></div></div>
       <div class="card"><div class="card-title"><div><h2>Alertes prioritaires</h2><p>SOS/PTI actifs</p></div></div><div id="qg-alerts-feed" class="list"><div class="empty">Chargement...</div></div></div>
     </section>
-    <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Temps réel, sans pollution planning</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
-  render(page('Dashboard QG', 'Centre de commandement temps réel', body));
+    <section class="card" style="margin-top:16px"><div class="card-title"><div><h2>Derniers rapports MCI</h2><p>Événements opérationnels récents</p></div><button class="btn small" data-route="reports">Voir journal</button></div><div id="qg-reports-feed" class="timeline"><div class="empty">Chargement...</div></div></section>`;
+  render(page('Vue d’ensemble', 'Pilotage opérationnel', body));
   listenQGStats(); bindQGDashboardDetails(); listenQGReportsFeed(); listenQGAlertsFeed(); initQGMap(); listenQGNotifications('#qg-notifications-preview', 5); bindQGNotificationClearButton('#qg-clear-notifications-preview');
 }
 
@@ -2458,13 +2468,13 @@ async function initQGMap(){
   if (!window.L) { el.innerHTML = '<div class="empty" style="margin:20px">Carte indisponible. Connexion CDN Leaflet requise.</div>'; return; }
   if (mapInstance) { try { mapInstance.remove(); } catch(e){} }
   mapMarkers = []; mapBoundsCache = []; mapSitePoints = []; mapAgentPoints = [];
-  mapInstance = L.map('qg-map', { zoomControl:false, attributionControl:true }).setView([46.6, 2.4], 5);
+  mapInstance = L.map('qg-map', { zoomControl:false, attributionControl:true, minZoom:1, maxZoom:20 }).setView([46.6, 2.4], 5);
   L.control.zoom({ position:'bottomright' }).addTo(mapInstance);
-  const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' }).addTo(mapInstance);
-  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom:20, attribution:'© OpenStreetMap © CARTO' });
   mapSiteLayer = L.layerGroup().addTo(mapInstance);
   mapAgentLayer = L.layerGroup().addTo(mapInstance);
-  L.control.layers({ 'Carte claire':light, 'Mode nuit':dark }, { 'Agents en poste':mapAgentLayer, 'Sites':mapSiteLayer }, { collapsed:false, position:'topright' }).addTo(mapInstance);
+  installOperationalBasemap(mapInstance,L,{sites:mapSiteLayer,agents:mapAgentLayer});
+  const thisMap=mapInstance;
+  unsubscribeList.push(()=>{thisMap.remove();if(mapInstance===thisMap)mapInstance=null;});
 
   const markerIcon = (type, label='', color='') => L.divIcon({
     className:'sp-map-icon-shell',
@@ -2538,8 +2548,10 @@ async function initQGMap(){
       fitAll();
     } catch(e) {}
   };
-  [80, 250, 700, 1400].forEach(ms => setTimeout(stabilizeMap, ms));
-  window.addEventListener('resize', () => setTimeout(stabilizeMap, 120), { passive:true });
+  const initialTimers=[80,250,700,1400].map(ms=>setTimeout(stabilizeMap,ms));
+  let resizeTimer;const resizeMap=()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(stabilizeMap,120);};
+  window.addEventListener('resize',resizeMap,{passive:true});
+  thisMap.once('unload',()=>{initialTimers.forEach(clearTimeout);clearTimeout(resizeTimer);window.removeEventListener('resize',resizeMap);});
 }
 function listenQGMissionsPreview(){
   const box = document.querySelector('#qg-missions-preview'); if (!box) return;
@@ -2554,7 +2566,20 @@ async function renderQGMissions(){
   currentRoute = 'missions';
   const today = new Date();
   const defaultDate = planningLocalDateKey(today);
-  const body = `<section class="grid cols-2 mission-admin-grid planning-admin-zone">
+  const body = `  <section class="card planning-card planning-card-v46" style="margin-top:16px">
+    <div class="card-title planning-title"><div><h2>Planning exploitation</h2><p>Affectations, horaires et disponibilité des équipes</p></div><div class="btn-row planning-title-actions"><button class="btn small" id="planning-today">Aujourd’hui</button><button class="btn small" id="planning-prev">‹</button><input class="input planning-date" id="planning-date" type="date" value="${defaultDate}"><button class="btn small" id="planning-next">›</button></div></div>
+    <div class="planning-toolbar planning-toolbar-v46">
+      <div class="segmented"><button class="active" data-planning-mode="sites">Sites</button><button data-planning-mode="agents">Collaborateurs</button></div>
+      <div class="field compact-field"><label>Affichage</label><select class="select" id="planning-days"><option value="7">7 jours</option><option value="14" selected>14 jours</option><option value="31">Mois</option></select></div>
+      <div class="field compact-field"><label>Statut</label><select class="select" id="planning-status"><option value="">Tous</option><option value="planned">Planifiées</option><option value="active">En cours</option><option value="completed">Terminées</option><option value="cancelled">Annulées</option></select></div>
+      <div class="field compact-field"><label>Recherche</label><input class="input" id="planning-search" placeholder="Site, agent, client..."></div>
+      <button class="btn primary" id="planning-quick-create" type="button">+ Mission rapide</button>${isStrictAdmin()?`<button class="btn danger" id="planning-bulk-remove" type="button">Supprimer plusieurs</button>`:'' }
+    </div>
+    <details class="planning-helpbar"><summary>Lire et utiliser le planning</summary><p>Chaque case indique le nombre d’agents prévus. Ouvrez une case pour consulter les noms et horaires ; choisissez une case vide pour créer une mission. Les couleurs identifient les sites.</p></details>
+    <div id="planning-site-legend" class="planning-site-legend"></div>
+    <div id="planning-board" class="planning-board"><div class="empty">Chargement du planning...</div></div>
+  </section>
+<section class="grid cols-2 mission-admin-grid planning-admin-zone">
     <div class="card"><div class="card-title"><div><h2>Créer une mission</h2><p>Planification rapide agent / site / horaires</p></div></div>
       <form id="mission-form">
         <div class="form-grid"><div class="field"><label>Agent</label><select class="select" name="agentId" id="mission-agent" required></select></div><div class="field"><label>Site</label><select class="select" name="siteId" id="mission-site" required></select></div></div>
@@ -2567,19 +2592,6 @@ async function renderQGMissions(){
       </form>
     </div>
     <div class="card"><div class="card-title"><div><h2>Suivi prioritaire</h2><p>Retards, missions en cours et missions du jour uniquement</p></div></div><div id="missions-live" class="list"><div class="empty">Chargement...</div></div></div>
-  </section>
-  <section class="card planning-card planning-card-v46" style="margin-top:16px">
-    <div class="card-title planning-title"><div><h2>Planning exploitation</h2><p>Vue PC avancée : missions multi-jours, planification rapide et lecture par site ou collaborateur</p></div><div class="btn-row planning-title-actions"><button class="btn small" id="planning-today">Aujourd’hui</button><button class="btn small" id="planning-prev">‹</button><input class="input planning-date" id="planning-date" type="date" value="${defaultDate}"><button class="btn small" id="planning-next">›</button></div></div>
-    <div class="planning-toolbar planning-toolbar-v46">
-      <div class="segmented"><button class="active" data-planning-mode="sites">Sites</button><button data-planning-mode="agents">Collaborateurs</button></div>
-      <div class="field compact-field"><label>Affichage</label><select class="select" id="planning-days"><option value="7">7 jours</option><option value="14" selected>14 jours</option><option value="31">Mois</option></select></div>
-      <div class="field compact-field"><label>Statut</label><select class="select" id="planning-status"><option value="">Tous</option><option value="planned">Planifiées</option><option value="active">En cours</option><option value="completed">Terminées</option><option value="cancelled">Annulées</option></select></div>
-      <div class="field compact-field"><label>Recherche</label><input class="input" id="planning-search" placeholder="Site, agent, client..."></div>
-      <button class="btn primary" id="planning-quick-create" type="button">+ Mission rapide</button>${isStrictAdmin()?`<button class="btn danger" id="planning-bulk-remove" type="button">Supprimer plusieurs</button>`:'' }
-    </div>
-    <div class="planning-helpbar"><span>Lecture compacte : chaque case colorée indique le nombre d’agents prévus sur la journée. Survole-la pour voir leurs noms et horaires, ou clique dessus pour ouvrir le détail. Clique sur une case vide pour créer une mission.</span></div>
-    <div id="planning-site-legend" class="planning-site-legend"></div>
-    <div id="planning-board" class="planning-board"><div class="empty">Chargement du planning...</div></div>
   </section>
   <section class="card collaborator-planning-card" style="margin-top:16px">
     <div class="card-title"><div><h2>Planning mensuel collaborateur</h2><p>Prépare le mois sans alerter les agents, puis publie-le en une seule fois.</p></div><div class="btn-row"><button class="btn small" id="collaborator-planning-print">Télécharger PDF</button></div></div>
@@ -3849,7 +3861,7 @@ function listenMissionsList(selector){
       const start = missionStartMs(m) || 0;
       return m.status === 'active' || missionIsLate(m) || (start >= today && start <= tomorrow && !['completed','cancelled'].includes(m.status));
     }).slice(0, 3);
-    box.innerHTML = priorityRows.length ? priorityRows.map(missionItem).join('') : `<div class="empty">Aucune mission prioritaire. Le planning complet reste visible en dessous.</div>`;
+    box.innerHTML = priorityRows.length ? priorityRows.map(missionItem).join('') : `<div class="empty">Aucune mission prioritaire. Consulte le planning complet en haut de cet écran.</div>`;
     document.querySelectorAll('[data-mission-cancel]').forEach(btn => btn.addEventListener('click', async () => {
       if (!confirm('Annuler cette mission ?')) return;
       const cancelledMission = rows.find(m => m.id === btn.dataset.missionCancel);

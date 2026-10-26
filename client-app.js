@@ -1,6 +1,18 @@
+import { debounce } from './ui-runtime.js?v=phase3-20261026-r4';
 import { supabaseConfig } from './supabase-config.js';
 
 const root=document.querySelector('#client-app');
+// One delegated handler per page, including after an authorized refresh.
+document.addEventListener('click',event=>{
+  const account=root.querySelector('.client-account[open]');
+  if(account&&!account.contains(event.target))account.open=false;
+});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape'){
+    const account=root.querySelector('.client-account[open]');
+    if(account){account.open=false;account.querySelector('summary')?.focus();}
+  }
+});
 let supabase=null;
 let profile=null;
 let clients=[];
@@ -173,41 +185,39 @@ async function loadPortal(){
 function renderPortal(){
   root.className='client-shell';
   const clientNames=clients.map(c=>c.name).join(' · ');
-  const latest=documents[0]||null;
   const latestMainCourante=documents.find(d=>{
     const type=String(d.type||'').toLowerCase();
     const title=String(d.title||'').toLowerCase();
     return type==='mission'||type==='mci'||title.includes('main courante');
   })||null;
   const last30=documents.filter(d=>{const dt=asDate(d.created_at);return dt&&Date.now()-dt.getTime()<=30*86400000;}).length;
-  const sitePills=sites.length?sites.map(s=>`<span class="site-pill"><span class="site-pill-name">${safe(s.name)}</span>${s.address?`<span class="site-pill-address">${safe(s.address)}</span>`:''}</span>`).join(''):'<span class="site-pill site-pill-empty"><span class="site-pill-name">Aucun site affiché</span></span>';
+  const accountName=[profile.first_name,profile.last_name].filter(Boolean).join(' ')||'Compte client';
+  const sitePills=sites.length?sites.map(s=>`<li><strong>${safe(s.name)}</strong>${s.address?`<span>${safe(s.address)}</span>`:''}</li>`).join(''):'<li>Aucun site affiché</li>';
   const siteOptions=sites.map(s=>`<option value="${safe(s.firebase_id||s.id)}">${safe(s.name)}</option>`).join('');
   const monthOptions=[...new Set(documents.map(d=>monthKey(documentBusinessDate(d))).filter(Boolean))].slice(0,18).map(m=>{const [y,mo]=m.split('-');const label=new Date(Number(y),Number(mo)-1,1).toLocaleDateString('fr-FR',{month:'long',year:'numeric'});return `<option value="${m}">${safe(label)}</option>`;}).join('');
   root.innerHTML=`
     <header class="client-topbar">
-      <div class="client-brand"><span class="client-brand-mark"><img src="./assets/client-logo.png" alt=""></span><div class="client-brand-text"><h1>Sentinelle Pro <span class="portal-label">ESPACE CLIENT</span></h1><p>${safe(clientNames)}</p></div></div>
-      <div class="client-actions"><button class="secondary" id="client-refresh">Actualiser</button><button class="ghost" id="client-logout">Déconnexion</button></div>
+      <div class="client-brand"><img class="client-brand-logo" src="./assets/client-logo.png" alt="Azzera Protect"><div class="client-brand-text"><h1>Sentinelle Pro</h1><p>Espace client</p></div></div>
+      <div class="client-account-name">${safe(clientNames)}</div>
+      <div class="client-actions"><button class="secondary client-refresh" id="client-refresh" title="Actualiser les données" aria-label="Actualiser les données"><span aria-hidden="true">↻</span></button><details class="client-account"><summary aria-label="Compte et déconnexion"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-3a7 7 0 0 1 14 0v3"/></svg><span>Mon compte</span><span aria-hidden="true">⌄</span></summary><div class="client-account-menu"><span>Connecté en tant que</span><strong>${safe(accountName)}</strong><p>${safe(profile.email||'')}</p><button class="ghost" id="client-logout">Déconnexion</button></div></details></div>
     </header>
 
-    <section class="portal-hero">
-      <div class="hero-card hero-main"><span class="hero-kicker">ACCÈS SÉCURISÉ ACTIF</span><h2>Bonjour ${safe(profile.first_name||'')}</h2><p>Votre espace de suivi opérationnel pour ${safe(clientNames)} · Consultez les rapports mis à votre disposition et retrouvez rapidement les documents de chacun de vos sites</p><div class="sites-strip">${sitePills}</div></div>
-      <div class="hero-card hero-side latest-main-courante"><div class="hero-side-top"><span class="hero-side-icon">▤</span><span class="hero-side-status">ACCÈS DIRECT</span></div><div><div class="hero-side-label">DERNIÈRE MAIN COURANTE</div><div class="big">${latestMainCourante?shortDate(documentBusinessDate(latestMainCourante)):'—'}</div><div class="hero-side-title">${latestMainCourante?safe(latestMainCourante.title):'Aucune main courante disponible'}</div>${latestMainCourante?`<div class="hero-side-actions"><button id="client-open-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Ouvrir</button><button class="secondary" id="client-download-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Télécharger</button></div>`:'<div class="hero-side-empty">Le dernier PDF apparaîtra ici dès sa génération</div>'}</div></div>
-    </section>
-
-    <section class="client-metrics">
-      <div class="metric-card"><div class="metric-icon">▤</div><div class="metric-copy"><span>DOCUMENTS DISPONIBLES</span><strong>${documents.length}</strong></div></div>
-      <div class="metric-card"><div class="metric-icon">⌖</div><div class="metric-copy"><span>SITES ACCESSIBLES</span><strong>${sites.length}</strong></div></div>
-      <div class="metric-card"><div class="metric-icon">＋</div><div class="metric-copy"><span>NOUVEAUX SUR 30 JOURS</span><strong>${last30}</strong></div></div>
+    <nav class="client-section-nav" aria-label="Rubriques client"><a href="#client-overview">Vue d’ensemble</a><a href="#client-interventions">Interventions</a><a href="#client-reports">Rapports & PDF</a></nav>
+    <section class="client-overview" id="client-overview" aria-labelledby="client-welcome-title">
+      <div class="client-welcome"><div><span class="eyebrow">SUIVI OPÉRATIONNEL</span><h2 id="client-welcome-title">Bonjour${profile.first_name?' '+safe(profile.first_name):''}</h2><p>Vos rapports, interventions et documents publiés.</p></div><div class="client-shortcuts"><a href="#client-reports">Rapports PDF <span aria-hidden="true">↗</span></a><a href="#client-interventions">Interventions <span aria-hidden="true">↗</span></a></div></div>
+      <dl class="client-summary"><div><dt>Sites accessibles</dt><dd>${sites.length}</dd></div><div><dt>Documents disponibles</dt><dd>${documents.length}</dd></div><div><dt>Publiés · 30 jours</dt><dd>${last30}</dd></div></dl>
+      <details class="client-sites"><summary>Vos sites <span>${sites.length}</span></summary><ul>${sitePills}</ul></details>
+      <div class="client-latest"><div class="client-latest-copy"><span class="eyebrow">DERNIÈRE MAIN COURANTE</span><h3>${latestMainCourante?safe(latestMainCourante.title):'Aucune main courante disponible'}</h3><p>${latestMainCourante?safe(shortDate(documentBusinessDate(latestMainCourante))):'Les PDF publiés apparaîtront dans cet espace.'}</p></div>${latestMainCourante?`<div class="client-file-actions"><button id="client-open-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Ouvrir</button><button class="secondary" id="client-download-latest-main-courante" data-document-id="${safe(latestMainCourante.id)}">Télécharger</button></div>`:''}</div>
     </section>
 
     <section class="portal-card" id="client-interventions">
-      <div class="panel-head"><div><span class="eyebrow">OPÉRATIONS PONCTUELLES</span><h2>Interventions</h2><p>Vos bons finalisés et publiés, classés du plus récent au plus ancien.</p></div><span class="panel-count">${interventions.length} intervention(s)</span></div>
-      <div class="document-grid">${interventions.map(i=>`<article class="document-card"><div class="doc-icon" aria-hidden="true">↗</div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(i.number)}</span><span class="tag sent">Terminée</span></div><h3>${safe(i.reason)}</h3><p>${safe(i.site_name)} · ${safe(dateText(i.completed_at))}</p><p>${safe(i.kind)}</p></div><div class="doc-actions"><button data-intervention-open="${safe(i.document_id)}">Ouvrir le bon</button><button class="secondary" data-intervention-download="${safe(i.document_id)}">Télécharger</button></div></article>`).join('')||'<div class="empty">Aucun bon d’intervention publié pour le moment.</div>'}</div>
+      <div class="panel-head"><div><h2>Interventions</h2><p>Bons finalisés et publiés.</p></div><span class="panel-count">${interventions.length} intervention${interventions.length>1?'s':''}</span></div>
+      <div class="document-grid">${interventions.map(i=>`<article class="document-card"><div class="doc-icon" aria-hidden="true"></div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(i.number)}</span><span class="tag sent">Terminée</span></div><h3>${safe(i.reason)}</h3><p class="doc-site">${safe(i.site_name)} · ${safe(i.kind)}</p><p>${safe(dateText(i.completed_at))}</p></div><div class="doc-actions"><button data-intervention-open="${safe(i.document_id)}">Ouvrir le bon</button><button class="secondary" data-intervention-download="${safe(i.document_id)}">Télécharger</button></div></article>`).join('')||'<div class="empty">Aucun bon d’intervention publié pour le moment.</div>'}</div>
     </section>
-    <section class="portal-card">
-      <div class="panel-head"><div><h2>Mains courantes & rapports</h2><p>Consultez, recherchez et téléchargez vos PDF opérationnels</p></div><span class="panel-count" id="client-result-count">${documents.length} document${documents.length>1?'s':''}</span></div>
-      <div class="filters"><select id="client-site-filter" aria-label="Filtrer par site"><option value="">Tous les sites</option>${siteOptions}</select><select id="client-type-filter" aria-label="Filtrer par type"><option value="">Tous les types</option><option value="mission">Rapports de mission</option><option value="intervention">Bons d’intervention</option><option value="mci">Mains courantes</option><option value="rounds">Rondes</option><option value="alerts">SOS / PTI</option></select><select id="client-month-filter" aria-label="Filtrer par période"><option value="">Toutes les périodes</option>${monthOptions}</select><input id="client-search" type="search" placeholder="Rechercher un rapport…" aria-label="Rechercher un rapport"></div>
-      <div id="client-document-list" class="document-grid"></div>
+    <section class="portal-card" id="client-reports">
+      <div class="panel-head"><div><h2>Mains courantes & rapports</h2><p>Vos PDF opérationnels.</p></div><span class="panel-count" id="client-result-count" role="status" aria-live="polite">${documents.length} document${documents.length>1?'s':''}</span></div>
+      <div class="filters"><label><span>Rechercher</span><input id="client-search" type="search" placeholder="Titre ou site…" aria-label="Rechercher un rapport"></label><label><span>Site</span><select id="client-site-filter" aria-label="Filtrer par site"><option value="">Tous les sites</option>${siteOptions}</select></label><label><span>Type de document</span><select id="client-type-filter" aria-label="Filtrer par type"><option value="">Tous les types</option><option value="mission">Rapports de mission</option><option value="intervention">Bons d’intervention</option><option value="mci">Mains courantes</option><option value="rounds">Rondes</option><option value="alerts">SOS / PTI</option></select></label><label><span>Période</span><select id="client-month-filter" aria-label="Filtrer par période"><option value="">Toutes les périodes</option>${monthOptions}</select></label></div>
+      <div id="client-document-list" class="document-grid" aria-busy="false"></div>
     </section>
     <div class="footer-note"><strong>Sentinelle Pro</strong> · Portail client sécurisé · Azzera Protect — Sécurité privée</div>`;
   document.querySelector('#client-logout').addEventListener('click',()=>supabase.auth.signOut());
@@ -217,7 +227,7 @@ function renderPortal(){
   if(latestOpen)latestOpen.addEventListener('click',()=>openDocument(latestOpen.dataset.documentId,latestOpen,false));
   if(latestDownload)latestDownload.addEventListener('click',()=>openDocument(latestDownload.dataset.documentId,latestDownload,true));
   ['client-site-filter','client-type-filter','client-month-filter'].forEach(id=>document.querySelector(`#${id}`)?.addEventListener('change',drawDocuments));
-  document.querySelector('#client-search')?.addEventListener('input',drawDocuments);
+  document.querySelector('#client-search')?.addEventListener('input',debounce(drawDocuments));
   document.querySelectorAll('[data-intervention-open]').forEach(b=>b.onclick=()=>openDocument(b.dataset.interventionOpen,b,false));
   document.querySelectorAll('[data-intervention-download]').forEach(b=>b.onclick=()=>openDocument(b.dataset.interventionDownload,b,true));
   drawDocuments();
@@ -240,7 +250,7 @@ function drawDocuments(){
   const count=document.querySelector('#client-result-count');if(count)count.textContent=`${rows.length} document${rows.length>1?'s':''}`;
   box.innerHTML=rows.length?rows.map(d=>{
     const siteName=siteMap.get(String(d.firebase_site_id||''))?.name||'Site rattaché';
-    return `<article class="document-card"><div class="doc-icon" aria-hidden="true"></div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(docTypeLabel(d.type))}</span>${d.delivery_status==='sent'?'<span class="tag sent">Envoyé par e-mail</span>':''}</div><h3 title="${safe(d.title||'Document')}">${safe(d.title||'Document')}</h3><p>${safe(siteName)} · ${safe(documentBusinessLabel(d))} · ${Number(d.row_count||0)} événement(s)</p></div><div class="doc-actions"><button data-open-document="${safe(d.id)}">Ouvrir PDF</button><button class="secondary" data-download-document="${safe(d.id)}">Télécharger</button></div></article>`;
+    return `<article class="document-card"><div class="doc-icon" aria-hidden="true"></div><div class="doc-main"><div class="doc-eyebrow"><span class="tag">${safe(docTypeLabel(d.type))}</span>${d.delivery_status==='sent'?'<span class="tag sent">Envoyé par e-mail</span>':''}</div><h3>${safe(d.title||'Document')}</h3><p class="doc-site">${safe(siteName)}</p><p>${safe(documentBusinessLabel(d))} · ${Number(d.row_count||0)} événement(s)</p></div><div class="doc-actions"><button data-open-document="${safe(d.id)}">Ouvrir PDF</button><button class="secondary" data-download-document="${safe(d.id)}">Télécharger</button></div></article>`;
   }).join(''):'<div class="empty">Aucun document ne correspond à ces filtres.</div>';
   box.querySelectorAll('[data-open-document]').forEach(button=>button.addEventListener('click',()=>openDocument(button.dataset.openDocument,button,false)));
   box.querySelectorAll('[data-download-document]').forEach(button=>button.addEventListener('click',()=>openDocument(button.dataset.downloadDocument,button,true)));
