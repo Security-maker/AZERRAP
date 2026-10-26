@@ -1,0 +1,32 @@
+[
+  {
+    "file": "maplibre-gl-5.24.0.js",
+    "source": "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js",
+    "bytes": 1056837,
+    "sha256": "45a9b07a9189ce56054c620a947ccf41e291e58c95e9b61533b740aaa65ee5cb"
+  },
+  {
+    "file": "maplibre-gl-5.24.0.css",
+    "source": "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css",
+    "bytes": 70024,
+    "sha256": "ab1e70d59ec40465bae7e7030da2f3ccf28133fd502e62bd598eefbadfd7a732"
+  },
+  {
+    "file": "leaflet-maplibre-gl-0.0.22.js",
+    "source": "https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js",
+    "bytes": 10451,
+    "sha256": "59ecd8d2b32779d24f1bd26b87c8890f27e4a6e7858d993bd17e4d878e6d2677"
+  },
+  {
+    "file": "MAPLIBRE-LICENSE.txt",
+    "source": "https://unpkg.com/maplibre-gl@5.24.0/LICENSE.txt",
+    "bytes": 5984,
+    "sha256": "ee5fc05a0677eaf69601d2c7db0d9ecd6cc27c3abc1d0733bc9ed34707cf8ef2"
+  },
+  {
+    "file": "ADAPTER-LICENSE.txt",
+    "source": "https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/LICENSE",
+    "bytes": 767,
+    "sha256": "eaa721ba158cbeff47ad53b1035dfc26ff744df66662c93ff715c9885197ebf3"
+  }
+]
