@@ -162,6 +162,11 @@ body:has(.client-shell),.client-background {background:#f4f6f9;color:#132a43}.cl
 
 /* Review corrections: preserve semantic indicators, quiet numeric hierarchy. */
 .layout .stat.green .stat-value,.layout .stat.red .stat-value,.layout .stat.orange .stat-value,.layout .stat.blue .stat-value {color:var(--ui-text)}
+/* QG overview: retain the established semantic colors on the counters. */
+.layout #qg-stats .stat.green .stat-value {color:var(--green)}
+.layout #qg-stats .stat.red .stat-value {color:var(--red)}
+.layout #qg-stats .stat.orange .stat-value {color:var(--orange)}
+.layout #qg-stats .stat.blue .stat-value {color:var(--ui-brand)}
 .layout input[type=date],.layout input[type=datetime-local],.layout input[type=month] {color-scheme:dark}
 .layout #qg-map:has(>.empty) {background:transparent;padding:0;border:0;min-height:90px!important}
 .layout .end-shift-main-btn {margin-bottom:18px;background:#aa354c!important;color:#fff!important;border-color:#d35f76!important}
