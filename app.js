@@ -2,7 +2,7 @@ import { installOperationalBasemap } from './operational-map.js?v=map-20261026-r
 import { createClock } from './ui-runtime.js?v=phase3-20261026-r4';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=phase3-20261026-r4';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=documents-20261028-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
@@ -5456,47 +5456,51 @@ async function generateAndArchiveDocument(fd, caches={}){
 function generatedDeliveryStatusMeta(status){
   const value=String(status||'');
   const map={
-    sent:{label:'Accepté par le fournisseur',cls:'green'},
+    sent:{label:'Accepté par Brevo — distribution non vérifiée',cls:'green'},
     sending:{label:'Envoi en cours',cls:'blue'},
     uncertain:{label:'Résultat incertain — vérifier avant renvoi',cls:'orange'},
     blocked:{label:'Envoi bloqué par les autorisations',cls:'red'},
-    retry_pending:{label:'Relance programmée',cls:'orange'},
+    retry_pending:{label:'Relance automatique programmée',cls:'orange'},
     waiting_pdf:{label:'PDF en attente',cls:'orange'},
     no_recipient:{label:'Aucun destinataire',cls:'orange'},
-    failed:{label:'Échec envoi',cls:'red'},
+    failed:{label:'Échec confirmé',cls:'red'},
     disabled:{label:'Envoi auto désactivé',cls:''},
     email_queued:{label:'Envoi en cours',cls:'blue'},
     supabase_archived:{label:'PDF archivé',cls:'blue'},
     bridge_failed:{label:'Relance serveur',cls:'orange'},
     v587_metadata_only:{label:'PDF en préparation',cls:'blue'},
-    pending:{label:'En attente',cls:'blue'}
+    pending:{label:'En attente',cls:'blue'},
+    not_requested:{label:'Aucun envoi demandé',cls:''},
+    withheld:{label:'Envoi exclu — aucun e-mail',cls:'orange'},
+    unverified:{label:'État de l’envoi à vérifier',cls:'orange'}
   };
   return map[value]||{label:value?value:'—',cls:''};
 }
 
+function generatedPdfStatusMeta(state){
+  return ({archived:{label:'Archivé et accessible au QG',cls:'green'},archiving:{label:'Archivage en cours',cls:'blue'},repair:{label:'Archivage à corriger',cls:'orange'}})[state] || {label:'État du PDF à vérifier',cls:''};
+}
 async function hydrateGeneratedDeliveryStatuses(rows){
-  const missionIds=(rows||[]).filter(d=>['mission','intervention'].includes(d.type)&&d.id).map(d=>String(d.id));
-  if(!missionIds.length||!navigator.onLine)return rows;
+  const keys=(rows||[]).filter(d=>d.id).map(d=>String(d.id));
+  if(!keys.length)return rows;
   try{
-    const sb=getSupabaseClient();
-    const {data,error}=await sb.from('generated_documents')
-      .select('firebase_id,delivery_status,delivery_attempts,next_delivery_attempt_at,delivery_error,delivered_at,updated_at')
-      .eq('organization_id',stagingConfig.organizationId)
-      .in('firebase_id',missionIds);
+    if(!navigator.onLine)throw Error('offline');
+    const {data,error}=await getSupabaseClient().rpc('sentinelle_qg_document_states',{p_keys:keys});
     if(error)throw error;
     const byId=new Map((data||[]).map(d=>[String(d.firebase_id),d]));
-    return (rows||[]).map(d=>{
-      const remote=byId.get(String(d.id));
-      if(!remote)return d;
-      return {...d,deliveryStatus:remote.delivery_status,deliveryAttempts:remote.delivery_attempts,nextDeliveryAttemptAt:remote.next_delivery_attempt_at,deliveryError:remote.delivery_error,deliveredAt:remote.delivered_at,deliveryUpdatedAt:remote.updated_at};
+    return rows.map(d=>{
+      const state=byId.get(String(d.id));
+      if(!state)return {...d,documentState:null};
+      return {...d,documentState:state,deliveryStatus:state.delivery_status,deliveryAttempts:state.attempts,nextDeliveryAttemptAt:state.next_attempt_at};
     });
   }catch(error){
-    console.warn('Synchronisation statuts e-mail documents indisponible',error);
-    return rows;
+    console.warn('État documentaire indisponible',error);
+    return rows.map(d=>({...d,documentState:null}));
   }
 }
 
 function generatedDocumentDeleteLocked(d){
+  if(d?.documentState?.email_state==='withheld')return true;
   if(d?.type==='intervention')return true; // Immutable archive; use withdrawal in Interventions.
   const status=String(d?.deliveryStatus||'');
   const activeStatuses=new Set(['pending','email_queued','waiting_pdf','retry_pending','bridge_failed']);
@@ -5586,15 +5590,18 @@ function listenGeneratedDocuments(){
     [...selectedIds].forEach(id=>{if(!validIds.has(id))selectedIds.delete(id);});
     visibleRows=rows.filter(d=>!type||d.type===type);
     box.innerHTML=visibleRows.length?visibleRows.map(d=>{
-      const delivery=generatedDeliveryStatusMeta(d.deliveryStatus);
+      const state=d.documentState;
+      const delivery=state?generatedDeliveryStatusMeta(state.email_state):{label:'État de l’envoi à vérifier',cls:''};
+      const pdf=generatedPdfStatusMeta(state?.pdf_state);
+      const retryReason=state?.retry_reason || (state?.retry_allowed?'':'Vérification serveur nécessaire avant relance.');
       const locked=generatedDocumentDeleteLocked(d);
       const checked=selectedIds.has(String(d.id));
-      const selector=isStrictAdmin()?`<label style="display:flex;align-items:flex-start;padding:5px 8px 0 0;min-width:34px" title="${locked?'Document protégé pendant son traitement':'Sélectionner ce document'}"><input type="checkbox" data-select-generated-doc="${safe(d.id)}" ${checked?'checked':''} ${locked?'disabled':''} style="width:19px;height:19px;accent-color:#32b8ff"></label>`:'';
-      return `<div class="item document-item pdf-document">${selector}<div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span>${['mission','intervention'].includes(d.type)?` <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>`:''}${locked&&isStrictAdmin()?` <span class="pill orange">Protégé</span>`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${['mission','intervention'].includes(d.type)&&d.deliveryStatus!=='sent'?`<button class="btn small" data-retry-generated-email="${safe(d.id)}">Relancer envoi</button>`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}" ${locked?'disabled title="Disponible après archivage complet"':''}>Supprimer</button>`:''}</div></div>`;
+      const selector=isStrictAdmin()?`<label style="display:flex;align-items:flex-start;padding:5px 8px 0 0;min-width:34px" title="${locked?'Suppression verrouillée par les règles documentaires':'Sélectionner ce document'}"><input type="checkbox" data-select-generated-doc="${safe(d.id)}" ${checked?'checked':''} ${locked?'disabled':''} style="width:19px;height:19px;accent-color:#32b8ff"></label>`:'';
+      return `<div class="item document-item pdf-document">${selector}<div class="item-main"><div class="item-title">${safe(d.title||documentTypeLabel(d.type))} <span class="pill blue">PDF</span></div><div class="item-meta" style="margin-top:8px">PDF : <span class="pill ${pdf.cls}">${safe(pdf.label)}</span>${locked&&isStrictAdmin()?` <span class="pill orange">Suppression verrouillée</span>`:''}${['mission','intervention'].includes(d.type)?`<br>E-mail : <span class="pill ${delivery.cls}">${safe(delivery.label)}</span>${state?.email_state==='retry_pending'&&state?.next_attempt_at?`<br>Prochaine tentative : ${dateText(state.next_attempt_at)}`:''}${state?`<br>${Number(state.accepted)||0} acceptation(s) enregistrée(s) · ${Number(state.recipients)||0} destinataire(s) configuré(s)`:''}`:''}</div><div class="item-meta">${safe(documentTypeLabel(d.type))} · ${safe(d.siteNom||'Tous sites')} · ${d.rowCount||0} ligne(s)<br>Créé ${dateText(d.createdAt)} par ${safe(d.createdByNom||'QG')}</div></div><div class="item-actions"><button class="btn small primary" data-open-generated-doc="${safe(d.id)}">Aperçu</button><button class="btn small success" data-download-generated-doc="${safe(d.id)}">Télécharger PDF</button>${['mission','intervention'].includes(d.type)?`<button class="btn small" data-retry-generated-email="${safe(d.id)}" ${state?.retry_allowed?'':`disabled title="${safe(retryReason)}"`}>Relancer envoi</button>${retryReason?`<small class="muted" style="max-width:230px;line-height:1.4">${safe(retryReason)}</small>`:''}`:''}${isStrictAdmin()?`<button class="btn small danger" data-delete-generated-doc="${safe(d.id)}" ${locked?'disabled title="Disponible après archivage complet"':''}>Supprimer</button>`:''}</div></div>`;
     }).join(''):`<div class="empty">Aucun document PDF archivé.</div>`;
     document.querySelectorAll('[data-open-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>openGeneratedDocument(rows.find(d=>d.id===btn.dataset.openGeneratedDoc))));
     document.querySelectorAll('[data-download-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>downloadGeneratedDocument(rows.find(d=>d.id===btn.dataset.downloadGeneratedDoc))));
-    document.querySelectorAll('[data-retry-generated-email]').forEach(btn=>btn.addEventListener('click',()=>retryGeneratedDocumentEmail(rows.find(d=>d.id===btn.dataset.retryGeneratedEmail),btn)));
+    document.querySelectorAll('[data-retry-generated-email]').forEach(btn=>btn.addEventListener('click',()=>retryGeneratedDocumentEmail(rows.find(d=>d.id===btn.dataset.retryGeneratedEmail),btn,redraw)));
     document.querySelectorAll('[data-delete-generated-doc]').forEach(btn=>btn.addEventListener('click',()=>requestDeleteGeneratedDocument(rows.find(d=>d.id===btn.dataset.deleteGeneratedDoc))));
     document.querySelectorAll('[data-select-generated-doc]').forEach(input=>input.addEventListener('change',()=>{
       const id=String(input.dataset.selectGeneratedDoc||'');
@@ -5675,28 +5682,35 @@ async function downloadGeneratedDocument(d){
   if(!d)return;
   await downloadGeneratedPdf(d);
 }
-async function retryGeneratedDocumentEmail(d,button){
-  if(!d?.id)return;
-  const original=button?.textContent||'Relancer envoi';
-  if(button){button.disabled=true;button.textContent='Relance…';}
+const generatedEmailRetryInFlight = new Set();
+async function retryGeneratedDocumentEmail(d,button,redraw=()=>{}){
+  if(!d?.id || generatedEmailRetryInFlight.has(d.id))return;
+  generatedEmailRetryInFlight.add(d.id);
+  if(button){button.disabled=true;button.textContent='Vérification…';}
   try{
-    const {data,error}=await invokeSupabaseFunction('send-main-courante',{documentId:d.id,manual:true});
+    const [fresh]=await hydrateGeneratedDeliveryStatuses([d]);Object.assign(d,fresh);
+    const state=d.documentState;
+    if(!state?.retry_allowed)return toast(state?.retry_reason||'État serveur indisponible : aucune relance.','warning');
+    if(!window.confirm(`Relancer l’envoi de « ${d.title||'ce document'} » après échec confirmé ? Les destinataires déjà acceptés ne seront pas renvoyés.`))return;
+    const {data,error}=await getSupabaseClient().functions.invoke('send-main-courante',{body:{documentId:state.id,manual:true}});
     if(error)throw error;
-    const status=data?.status||data?.deliveryStatus||'';
-    if(data?.ok||['sent','already_sent'].includes(status))toast(status==='already_sent'?'Document déjà envoyé.':'Document accepté par le fournisseur.','success');
-    else if(status==='withheld')toast('Ancien envoi suspendu sur décision du responsable : aucun renvoi. Le PDF reste disponible.','warning');
-    else if(status==='retry_pending')toast('Échec confirmé : relance programmée.','warning');
-    else if(status==='failed')toast('Tentatives épuisées. Le PDF reste archivé.','warning');
-    else if(status==='uncertain')toast('Acceptation incertaine : aucun renvoi automatique. Vérification nécessaire.','warning');
-    else if(status==='blocked')toast('Envoi refusé : vérifier les autorisations documentaires.','warning');
-    else if(['busy','sending','stale'].includes(status))toast('Traitement déjà réservé. Actualise son état avant toute relance.','warning');
-    else if(['disabled','no_recipient'].includes(status))toast('Envoi non effectué : vérifier les préférences et destinataires.','warning');
-    else toast('Demande de relance transmise.','success');
+    const status=data?.status||'';
+    if(status==='sent')toast('Accepté par Brevo — distribution non vérifiée.','success');
+    else {
+      const messages={withheld:'Envoi exclu : aucun e-mail.',retry_pending:'Échec confirmé : relance automatique programmée.',failed:'Échec confirmé : tentatives épuisées.',uncertain:'Résultat incertain : vérifier Brevo avant tout renvoi.',blocked:'Envoi refusé par les autorisations.',not_retryable:'La situation a changé : relance inutile ou interdite.',busy:'Un traitement est déjà en cours.',sending:'Un traitement est déjà en cours.',stale:'Réservation expirée : vérifier l’état serveur.',disabled:'Envoi automatique désactivé.',no_recipient:'Aucun destinataire configuré.'};
+      toast(messages[status]||'Résultat non confirmé : vérifier l’état serveur avant toute nouvelle action.','warning');
+    }
   }catch(error){
     console.error(error);
-    toast(userFriendlyError(error,'Relance e-mail impossible.'),'error');
-  }finally{if(button&&button.isConnected){button.disabled=false;button.textContent=original;}}
+    toast('Réponse non confirmée. Vérifie l’état serveur avant de réessayer ; aucun renvoi automatique depuis ce bouton.','warning');
+  }finally{
+    const [fresh]=await hydrateGeneratedDeliveryStatuses([d]);Object.assign(d,fresh);
+    generatedEmailRetryInFlight.delete(d.id);
+    if(button&&button.isConnected){button.disabled=!d.documentState?.retry_allowed;button.textContent='Relancer envoi';}
+    redraw();
+  }
 }
+
 function requestDeleteGeneratedDocument(d){
   if(!d)return;
   if(generatedDocumentDeleteLocked(d))return toast('Ce document est encore récent ou en cours de traitement. Réessaie dans quelques minutes.','warning');

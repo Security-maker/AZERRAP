@@ -25,10 +25,21 @@ export async function mirrorGeneratedDocument({ firebaseUser, profile, document,
   const client = getSupabaseClient();
   if(closureCreateOnly) return archiveClosureOnce(client,document,pdfBlob,firebaseUser,profile);
   const organizationId = supabaseConfig.organizationId;
-  const ownerId = String(firebaseUser?.uid || profile?.uid || 'qg');
-  const siteId = String(document.siteId || 'sans-site');
-  const missionId = String(document.missionId || document.id || 'sans-mission');
-  const filename = `${slug(document.title || document.id)}.pdf`;
+  const existingResult=await client.from('generated_documents')
+    .select('id,created_by_external_uid,storage_path,storage_bucket,delivery_status,status,firebase_site_id,firebase_mission_id,title')
+    .eq('organization_id',organizationId).eq('firebase_id',document.id).maybeSingle();
+  if(existingResult.error)throw existingResult.error;
+  const existing=existingResult.data;
+  if(existing && !existing.storage_path.includes('/v587-metadata/')){
+    // Recovery never regenerates or overwrites an already linked archive, nor sends it.
+    const saved=await client.storage.from(existing.storage_bucket).download(existing.storage_path);
+    if(saved.error || !saved.data?.size)throw Error('Archive liée indisponible : correction documentaire nécessaire.');
+    return {documentId:existing.id,storagePath:existing.storage_path,emailStatus:existing.delivery_status,emailQueued:false};
+  }
+  const ownerId = String(existing?.created_by_external_uid || firebaseUser?.uid || profile?.uid || 'qg');
+  const siteId = String((existing ? existing.firebase_site_id : document.siteId) || 'sans-site');
+  const missionId = String((existing ? existing.firebase_mission_id : document.missionId) || document.id || 'sans-mission');
+  const filename = `${slug(existing?.title || document.title || document.id)}.pdf`;
   const storagePath = `${organizationId}/${slug(ownerId)}/${slug(siteId)}/${slug(missionId)}/${document.id}-${filename}`;
 
   const upload = await client.storage
@@ -58,11 +69,13 @@ export async function mirrorGeneratedDocument({ firebaseUser, profile, document,
     delivery_status: 'supabase_archived'
   };
 
-  const { data, error } = await client
-    .from('generated_documents')
-    .upsert(record, { onConflict:'organization_id,firebase_id' })
-    .select('id')
-    .single();
+  // UPDATE, not INSERT ON CONFLICT: the insert trigger must still forbid forged authors.
+  // Recovery preserves every historical field and binds only the verified archive.
+  const mutation = existing
+    ? client.from('generated_documents').update({storage_path:storagePath,delivery_status:'supabase_archived'})
+        .eq('id',existing.id).eq('organization_id',organizationId).eq('storage_path',existing.storage_path)
+    : client.from('generated_documents').upsert(record,{onConflict:'organization_id,firebase_id'});
+  const { data, error } = await mutation.select('id').single();
   if (error) throw error;
 
   let emailQueued = false;

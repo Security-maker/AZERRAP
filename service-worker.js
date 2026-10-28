@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-phase3-20261026-r4';
+const CACHE_NAME = 'sentinelle-pro-documents-20261028-r1';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
   './operational-map.js?v=map-20261026-r1',
@@ -10,12 +10,12 @@ const APP_SHELL = [
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=phase3-20261026-r4',
+  './app.js?v=documents-20261028-r1',
   './sentinelle-config.js',
   './supabase-compat.js?v=phase3-20261026-r4',
   './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js?v=phase3-20261026-r4',
+  './supabase-bridge.js?v=documents-20261028-r1',
   './manifest.json',
   './manifest-client.json',
   './offline.html',
