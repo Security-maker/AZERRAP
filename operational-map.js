@@ -53,7 +53,8 @@ export function installOperationalBasemap(map,L,{sites,agents}){
     try{
       await loadLibraries();if(disposed)return;
       if(!layer){
-        layer=L.maplibreGL({style:BASEMAP_STYLES[mode],interactive:false,maxZoom:20}).addTo(map);
+        // Leaflet owns gestures. Keep the basemap in step with its markers while dragging.
+        layer=L.maplibreGL({style:BASEMAP_STYLES[mode],interactive:false,maxZoom:20,updateInterval:0}).addTo(map);
         gl=layer.getMaplibreMap();gl.on('error',failure);gl.on('idle',ready);
         gl.getCanvas().addEventListener('webglcontextlost',failure);
       }else gl.setStyle(BASEMAP_STYLES[mode]);
@@ -63,4 +64,32 @@ export function installOperationalBasemap(map,L,{sites,agents}){
   map.once('unload',()=>{disposed=true;clearTimeout(timer);retry.removeEventListener('click',begin);notice.remove();});
   void begin();
   return controls;
+}
+
+// Fit once when both initial reads settle. Later data/size changes must not undo a user's view.
+export function preserveOperationalMapView(map, fitAll, {sources=['sites','agents']}={}){
+  const pending=new Set(sources),host=map.getContainer();
+  let initial=true,disposed=false,frame;
+  const interacted=()=>{initial=false;};
+  const resize=()=>{
+    if(disposed)return;
+    cancelAnimationFrame(frame);
+    frame=requestAnimationFrame(()=>{
+      if(!disposed)map.invalidateSize({animate:false,pan:true,debounceMoveend:true});
+    });
+  };
+  const observer=typeof ResizeObserver==='function'?new ResizeObserver(resize):null;
+  observer?.observe(host);
+  if(!observer)window.addEventListener('resize',resize,{passive:true});
+  for(const event of ['pointerdown','touchstart','wheel','keydown'])host.addEventListener(event,interacted,{passive:true});
+  map.on('movestart',interacted);
+  map.once('unload',()=>{
+    disposed=true;cancelAnimationFrame(frame);observer?.disconnect();
+    window.removeEventListener('resize',resize);map.off('movestart',interacted);
+    for(const event of ['pointerdown','touchstart','wheel','keydown'])host.removeEventListener(event,interacted);
+  });
+  return source=>{
+    pending.delete(source);
+    if(!disposed&&initial&&!pending.size){initial=false;fitAll();}
+  };
 }

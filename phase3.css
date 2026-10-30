@@ -198,3 +198,8 @@ body:has(.client-shell),.client-background {background:#f4f6f9;color:#132a43}.cl
 @media(max-width:699px){.modal .mission-kpis {grid-template-columns:repeat(2,minmax(0,1fr))}.modal .end-shift-flow {gap:12px}}
 .layout .cat-btn {min-height:44px;padding:10px;border-radius:9px;font-size:14px;font-weight:550;line-height:1.4}.layout .cat-btn.active {background:#123758;border-color:var(--ui-brand);color:#d8efff;font-weight:650}
 @media(max-width:699px){.layout .category-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}
+
+/* Mobile navigation stays on the visible viewport, independently of document scrolling. */
+@media(max-width:699px){
+  .layout .phase3-dock{top:auto;bottom:0;left:0;right:0;width:auto;margin:0;transform:translate3d(0,var(--dock-offset,0px),0);transition:none;backface-visibility:hidden}
+}

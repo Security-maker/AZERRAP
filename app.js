@@ -1,5 +1,5 @@
-import { installOperationalBasemap } from './operational-map.js?v=map-20261026-r1';
-import { createClock } from './ui-runtime.js?v=phase3-20261026-r4';
+import { installOperationalBasemap, preserveOperationalMapView } from './operational-map.js?v=mobile-20261030-r1';
+import { createClock, pinMobileNavigation } from './ui-runtime.js?v=mobile-20261030-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
@@ -28,7 +28,7 @@ let unsubscribeList = [];
 const viewClock=createClock(()=>{const node=document.querySelector('#clock-pill');if(node)node.textContent=nowText();});
 let latestFlashUnsub = null;
 let mapInstance = null;
-let mapMarkers = [];
+let stopNavigationPinning = ()=>{};
 let mapSiteLayer = null;
 let mapAgentLayer = null;
 let mapBoundsCache = [];
@@ -481,7 +481,9 @@ function render(html){
   // Empêche le faux écran 'Démarrage trop long' une fois qu'une vue est rendue.
   window.__SENTINELLE_RENDERED__ = true;
   $app.className = '';
+  stopNavigationPinning();
   $app.innerHTML = html;
+  stopNavigationPinning=pinMobileNavigation($app.querySelector('.phase3-dock'));
   bindGlobalEvents();
   const clock = document.querySelector('#clock-pill');
   viewClock.stop();
@@ -2505,8 +2507,8 @@ async function initQGMap(){
   const el = document.querySelector('#qg-map'); if (!el) return;
   if (!window.L) { el.innerHTML = '<div class="empty" style="margin:20px">Carte indisponible. Connexion CDN Leaflet requise.</div>'; return; }
   if (mapInstance) { try { mapInstance.remove(); } catch(e){} }
-  mapMarkers = []; mapBoundsCache = []; mapSitePoints = []; mapAgentPoints = [];
-  mapInstance = L.map('qg-map', { zoomControl:false, attributionControl:true, minZoom:1, maxZoom:20 }).setView([46.6, 2.4], 5);
+  mapBoundsCache = []; mapSitePoints = []; mapAgentPoints = [];
+  mapInstance = L.map('qg-map', { zoomControl:false, attributionControl:true, minZoom:1, maxZoom:20, trackResize:false }).setView([46.6, 2.4], 5);
   L.control.zoom({ position:'bottomright' }).addTo(mapInstance);
   mapSiteLayer = L.layerGroup().addTo(mapInstance);
   mapAgentLayer = L.layerGroup().addTo(mapInstance);
@@ -2522,9 +2524,10 @@ async function initQGMap(){
   const syncBounds = () => { mapBoundsCache = [...mapSitePoints, ...mapAgentPoints]; };
   const googleLink = (lat,lng) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
   const fitAll = () => {
-    if (mapBoundsCache.length) mapInstance.fitBounds(mapBoundsCache, { padding:[42,42], maxZoom:14 });
-    else mapInstance.setView([46.6,2.4],5);
+    if (mapBoundsCache.length) thisMap.fitBounds(mapBoundsCache, { padding:[42,42], maxZoom:14, animate:false });
+    else thisMap.setView([46.6,2.4],5,{animate:false});
   };
+  const initialReadSettled=preserveOperationalMapView(thisMap,fitAll);
 
   unsubscribeList.push(onSnapshot(collectionRef('sites'), snap => {
     mapSiteLayer.clearLayers();
@@ -2539,11 +2542,11 @@ async function initQGMap(){
       const label = String(s.name || 'S').trim().slice(0,2).toUpperCase();
       const marker = L.marker([lat,lng], { icon:markerIcon('site', label, color) }).addTo(mapSiteLayer)
         .bindPopup(`<div class="map-popup"><strong>${safe(s.name || 'Site')}</strong><span>${safe(s.clientName || '')}</span><span>${safe(s.address || '')}</span><a href="${googleLink(lat,lng)}" target="_blank" rel="noopener">Ouvrir dans Google Maps</a></div>`);
-      mapMarkers.push(marker); mapSitePoints.push([lat,lng]);
+      mapSitePoints.push([lat,lng]);
     });
     document.querySelector('#map-empty-help')?.classList.toggle('hidden', mapSitePoints.length > 0 || mapAgentPoints.length > 0);
-    syncBounds(); setTimeout(fitAll, 80);
-  }, ()=>{}));
+    syncBounds(); initialReadSettled('sites');
+  }, ()=>initialReadSettled('sites')));
 
   const agentPopupHtml = (s, lat, lng, photoDataUrl='', loadingPhoto=false) => `<div class="map-popup agent-map-popup">
     <div class="agent-popup-head"><div><strong>${safe(s.agentNom || 'Agent')}</strong><span>${safe(s.siteNom || 'Site')}</span></div><span class="pill green">En poste</span></div>
@@ -2567,29 +2570,19 @@ async function initQGMap(){
         if (event?.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
         showAgentOperationalDetails(s, lat, lng);
       });
-      mapMarkers.push(marker); mapAgentPoints.push([lat,lng]);
+      mapAgentPoints.push([lat,lng]);
     });
     document.querySelector('#map-empty-help')?.classList.toggle('hidden', mapSitePoints.length > 0 || mapAgentPoints.length > 0);
-    syncBounds(); setTimeout(fitAll, 80);
-  }));
+    syncBounds(); initialReadSettled('agents');
+  }, ()=>initialReadSettled('agents')));
   document.querySelector('#map-reset')?.addEventListener('click', fitAll);
   document.querySelector('#map-locate')?.addEventListener('click', async()=>{
     const gps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+    if(mapInstance!==thisMap||!el.isConnected)return;
     if (!gps) return toast('Position indisponible ou refusée.', 'warning');
-    mapInstance.setView([gps.lat,gps.lng], 15);
-    L.circleMarker([gps.lat,gps.lng], { radius:10, color:'#00B8FF', fillColor:'#00B8FF', fillOpacity:.28, weight:3 }).addTo(mapInstance).bindPopup('Votre position').openPopup();
+    thisMap.setView([gps.lat,gps.lng], 15);
+    L.circleMarker([gps.lat,gps.lng], { radius:10, color:'#00B8FF', fillColor:'#00B8FF', fillOpacity:.28, weight:3 }).addTo(thisMap).bindPopup('Votre position').openPopup();
   });
-  const stabilizeMap = () => {
-    if (!mapInstance) return;
-    try {
-      mapInstance.invalidateSize(true);
-      fitAll();
-    } catch(e) {}
-  };
-  const initialTimers=[80,250,700,1400].map(ms=>setTimeout(stabilizeMap,ms));
-  let resizeTimer;const resizeMap=()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(stabilizeMap,120);};
-  window.addEventListener('resize',resizeMap,{passive:true});
-  thisMap.once('unload',()=>{initialTimers.forEach(clearTimeout);clearTimeout(resizeTimer);window.removeEventListener('resize',resizeMap);});
 }
 function listenQGMissionsPreview(){
   const box = document.querySelector('#qg-missions-preview'); if (!box) return;
