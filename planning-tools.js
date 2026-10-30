@@ -72,9 +72,10 @@ export function operationsPlanningGrid(missions,sites,range){
   return {summary,days,daily,rows:[...rows.values()].sort((a,b)=>a.siteName.localeCompare(b.siteName,'fr'))};
 }
 
-export function createOperationsPlanningPdf({jsPDF,drawLogo,brand,missions,sites,range,generatedAt=new Date()}){
+export function createOperationsPlanningPdf({jsPDF,drawLogo,brand,missions,sites,range,recap,generatedAt=new Date()}){
   const {summary,days,daily,rows}=operationsPlanningGrid(missions,sites,range),C=brand;
   const text=v=>String(v??'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim()||'-';
+  if(!recap?.breakdown||!Array.isArray(recap.weeks)||!Number.isFinite(recap.totalMinutes))throw new Error('Récapitulatif des heures indisponible. Aucun PDF incomplet généré.');
   const hours=n=>{const minutes=Math.round(n);return `${Math.floor(minutes/60)}:${String(minutes%60).padStart(2,'0')}`;};
   // Keep the collaborator PDF's masthead, identity strip and site/day grid.
   // One complete landscape sheet: A4 first, A3 only when genuinely necessary.
@@ -90,7 +91,7 @@ export function createOperationsPlanningPdf({jsPDF,drawLogo,brand,missions,sites
     });
     const height=prepared.reduce((sum,r)=>sum+r.height,0);
     layout={w,h,left,cell,fs,line,slotHeight,prepared};
-    if(height<=h-104)break;
+    if(height<=h-149)break;
     if(format==='a3')throw new Error('Ce mois contient trop de lignes pour une seule page lisible. Aucun planning incomplet généré.');
   }
   const {w,h,left,cell,fs,line,slotHeight,prepared}=layout;
@@ -139,7 +140,34 @@ export function createOperationsPlanningPdf({jsPDF,drawLogo,brand,missions,sites
   doc.setDrawColor(...C.line);doc.setFillColor(236,243,248);doc.rect(10,y,w-20,9,'F');doc.rect(10,y,left,9);
   doc.setTextColor(...C.obsidian);doc.setFont('helvetica','bold');doc.setFontSize(6);doc.text('TOTAL HEURES JOURNALIÈRES',12,y+5.8);
   daily.forEach((minutes,i)=>{const x=10+left+i*cell;doc.rect(x,y,cell,9);doc.setFontSize(fs);doc.text(minutes?(minutes/60).toFixed(1):'-',x+cell/2,y+5.8,{align:'center'});});
-  y+=9;
+  y+=17;
+  // Same categories and ISO week totals as the Agent planning, aggregated over all sites.
+  const leftW=(w-30)*.53,rightX=20+leftW,rightW=w-10-rightX,tableY=y+4,rowH=7;
+  doc.setTextColor(...C.obsidian);doc.setFont('helvetica','bold');doc.setFontSize(8);
+  doc.text('HEURES PLANIFIÉES',10,y);doc.text('HEURES HEBDOMADAIRES',rightX,y);
+  const widths=[.26,.18,.18,.19,.19].map(r=>r*leftW),headers=['','Jour','Nuit','Férié jour','Férié nuit'];
+  let x=10;
+  doc.setFillColor(...C.obsidian);doc.setTextColor(...C.white);doc.setFontSize(7);
+  doc.rect(10,tableY,leftW,rowH,'F');
+  headers.forEach((label,i)=>{doc.text(label,x+2,tableY+4.8);x+=widths[i];});
+  const b=recap.breakdown,hoursDecimal=n=>(n/60).toFixed(2);
+  const detail=[['Semaine',b.weekDay,b.weekNight,b.holidayDay,b.holidayNight],['Dimanche',b.sundayDay,b.sundayNight,null,null]];
+  detail.forEach((r,j)=>{x=10;doc.setTextColor(...C.obsidian);doc.setFont('helvetica','normal');r.forEach((value,i)=>{
+    doc.setDrawColor(...C.line);doc.rect(x,tableY+(j+1)*rowH,widths[i],rowH);
+    doc.text(i===0?value:value===null?'-':hoursDecimal(value),x+2,tableY+(j+1)*rowH+4.8);x+=widths[i];
+  });});
+  doc.setFillColor(236,243,248);doc.rect(10,tableY+3*rowH,leftW,rowH,'FD');doc.setFont('helvetica','bold');
+  doc.text('TOTAL DU MOIS',12,tableY+3*rowH+4.8);doc.text(hoursDecimal(recap.totalMinutes)+' h',10+leftW-2,tableY+3*rowH+4.8,{align:'right'});
+  const labelW=25,weekW=(rightW-labelW)/Math.max(1,recap.weeks.length);
+  doc.setFillColor(...C.obsidian);doc.setTextColor(...C.white);doc.rect(rightX,tableY,rightW,rowH,'F');doc.text('SEMAINE',rightX+2,tableY+4.8);
+  recap.weeks.forEach((week,i)=>doc.text(String(week.week),rightX+labelW+(i+.5)*weekW,tableY+4.8,{align:'center'}));
+  doc.setTextColor(...C.obsidian);doc.setFont('helvetica','normal');doc.rect(rightX,tableY+rowH,labelW,rowH);doc.text('HEURES',rightX+2,tableY+rowH+4.8);
+  recap.weeks.forEach((week,i)=>{const wx=rightX+labelW+i*weekW;doc.rect(wx,tableY+rowH,weekW,rowH);doc.text(hoursDecimal(week.minutes),wx+weekW/2,tableY+rowH+4.8,{align:'center'});});
+  if(!recap.weeks.length)doc.text('Aucune heure',rightX+labelW+3,tableY+rowH+4.8);
+  doc.setTextColor(...C.grey);doc.setFontSize(6.5);
+  doc.text('Heures du mois uniquement, cumulées pour tous les sites.',rightX,tableY+3*rowH);
+  doc.text('Répartition indicative : nuit 21 h - 6 h, selon le planning Agent.',rightX,tableY+4*rowH);
+  y=tableY+4*rowH;
   doc.setFont('helvetica','normal');doc.setTextColor(...C.grey);doc.setFontSize(7);
   doc.text('Chaque case : début / fin / agents prévus sur ce créneau. Les nuits sont réparties sur les jours concernés ; 24:00 = minuit.',10,y+7);
   doc.text('* : brouillon inclus. 0 ag. : créneau non affecté. Les effectifs représentent les affectations, pas les présences réelles.',10,y+12);

@@ -1,6 +1,6 @@
 import { installOperationalBasemap } from './operational-map.js?v=map-20261026-r1';
 import { createClock } from './ui-runtime.js?v=phase3-20261026-r4';
-import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r2';
+import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
 import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=documents-20261028-r1';
@@ -6766,7 +6766,10 @@ async function downloadOperationsPlanningPdf(){
     // Fresh, paginated, organization-scoped reads. Never export the cached first page.
     const data=await loadOperationsPlanning(getSupabaseClient(),stagingConfig.organizationId,range);
     const jsPDF=getJsPDF();if(!jsPDF)throw new Error('Bibliothèque PDF indisponible. Actualise la page puis réessaie.');
-    const pdf=createOperationsPlanningPdf({jsPDF,drawLogo:pdfDrawLogo,brand:AZZERA_DOC_BRAND,...data,range});
+    // Reuse the collaborator planning calculations, including holiday priority and 21h-6h nights.
+    const segments=data.missions.flatMap(m=>missionSegmentsByDay(m,range.start,range.end));
+    const recap={breakdown:planningHourBreakdown(segments),weeks:planningWeeklyTotals(segments),totalMinutes:segments.reduce((sum,s)=>sum+s.minutes,0)};
+    const pdf=createOperationsPlanningPdf({jsPDF,drawLogo:pdfDrawLogo,brand:AZZERA_DOC_BRAND,...data,range,recap});
     pdf.save(`planning-exploitation-${month}.pdf`);
     toast(`Planning global de ${range.label} téléchargé. Aucun envoi effectué.`,'success');
   }catch(error){console.error('Planning PDF',error);toast(userFriendlyError(error,'Téléchargement du planning impossible.'),'error');}
