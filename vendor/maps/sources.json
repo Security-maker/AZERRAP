@@ -28,5 +28,11 @@
     "source": "https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/LICENSE",
     "bytes": 767,
     "sha256": "eaa721ba158cbeff47ad53b1035dfc26ff744df66662c93ff715c9885197ebf3"
+  },
+  {
+    "file": "leaflet-maplibre-gl-0.1.4.js",
+    "source": "https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js",
+    "bytes": 9296,
+    "sha256": "1e6cf8cb3eb5fd909879aa1bf36a383fb506c9a5b2dbbfababce65a294dd1fcb"
   }
 ]
