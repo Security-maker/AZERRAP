@@ -1,4 +1,4 @@
-import { installOperationalBasemap, preserveOperationalMapView } from './operational-map.js?v=mobile-20261030-r1';
+import { installOperationalBasemap, preserveOperationalMapView } from './operational-map.js?v=map-pan-20261030-r2';
 import { createClock, pinMobileNavigation } from './ui-runtime.js?v=mobile-20261030-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';

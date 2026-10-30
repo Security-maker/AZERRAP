@@ -18,7 +18,8 @@ function loadLibraries(){
       el.href=new URL('./vendor/maps/maplibre-gl-5.24.0.css',import.meta.url).href;document.head.append(el);
     }
     if(!window.maplibregl)await script('maplibre-gl-5.24.0.js');
-    if(!window.L.maplibreGL)await script('leaflet-maplibre-gl-0.0.22.js');
+    // 0.1.4 uses MapLibre's public camera API; 0.0.22 did not redraw on pan with v5.
+    if(!window.L.maplibreGL)await script('leaflet-maplibre-gl-0.1.4.js');
   })().catch(error=>{libraries=null;throw error;});
   return libraries;
 }
@@ -54,7 +55,8 @@ export function installOperationalBasemap(map,L,{sites,agents}){
       await loadLibraries();if(disposed)return;
       if(!layer){
         // Leaflet owns gestures. Keep the basemap in step with its markers while dragging.
-        layer=L.maplibreGL({style:BASEMAP_STYLES[mode],interactive:false,maxZoom:20,updateInterval:0}).addTo(map);
+        // Attribution is already supplied above, including when the provider is unavailable.
+        layer=L.maplibreGL({style:BASEMAP_STYLES[mode],interactive:false,maxZoom:20,updateInterval:0,attributionControl:false}).addTo(map);
         gl=layer.getMaplibreMap();gl.on('error',failure);gl.on('idle',ready);
         gl.getCanvas().addEventListener('webglcontextlost',failure);
       }else gl.setStyle(BASEMAP_STYLES[mode]);
