@@ -1,5 +1,6 @@
 import { installOperationalBasemap } from './operational-map.js?v=map-20261026-r1';
 import { createClock } from './ui-runtime.js?v=phase3-20261026-r4';
+import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r1';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
 import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=documents-20261028-r1';
@@ -1344,7 +1345,7 @@ function takeShiftForm(){
   return `<form id="take-shift-form" class="take-shift-flow">
     <section class="shift-step">
       <div class="shift-step-head"><span class="shift-step-number">1</span><div><h3>Choisir la mission</h3><p>La mission planifiée sélectionne automatiquement le site.</p></div></div>
-      <div class="field"><label>Mission planifiée</label><select class="select" name="missionId" id="mission-select"><option value="">Chargement des missions...</option></select></div>
+      <div class="field"><label>Mission planifiée</label><select class="select" name="missionId" id="mission-select" aria-describedby="mission-select-help"><option value="">Chargement des missions...</option></select><small id="mission-select-help" class="muted">Deux missions maximum : créneau en cours, puis prochaines missions. La prise de poste libre reste disponible.</small></div>
       <div class="field"><label>Site</label><select class="select" name="siteId" id="site-select" required><option value="">Chargement des sites...</option></select></div>
     </section>
     <section class="shift-step">
@@ -1368,7 +1369,8 @@ async function bindAgentHome(shift){
   if (whatsappBtn) whatsappBtn.addEventListener('click', () => openWhatsapp(shift));
   document.querySelector('#enable-push')?.addEventListener('click', () => registerPushNotifications());
   if (!shift) {
-    const [sites, missions] = await Promise.all([getActiveSites().catch(()=>[]), getAgentPlannedMissions().catch(()=>[])]);
+    const [sites, plannedMissions] = await Promise.all([getActiveSites().catch(()=>[]), getAgentPlannedMissions().catch(()=>[])]);
+    let availableMissions=plannedMissions, missions=upcomingTakeShiftMissions(plannedMissions);
     const select = document.querySelector('#site-select');
     const missionSelect = document.querySelector('#mission-select');
     const photoInput = document.querySelector('#checkin-photo-input');
@@ -1391,8 +1393,42 @@ async function bindAgentHome(shift){
       submitButton.disabled = !(selectedSite() && checkInPhoto && photoConfirm?.checked);
     };
     if (select) select.innerHTML = `<option value="">Choisir un site</option>` + sites.map(s => `<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
-    if (missionSelect) {
+    const refreshMissionOptions = () => {
+      if(!missionSelect?.isConnected) return;
+      const previous=missionSelect.value;
+      missions=upcomingTakeShiftMissions(availableMissions);
       missionSelect.innerHTML = `<option value="">Prise de poste libre</option>` + missions.map(m => `<option value="${safe(m.id)}">${safe(m.siteNom || 'Site')} · ${dateText(m.scheduledStart)}</option>`).join('');
+      if(previous&&missions.some(m=>m.id===previous)) {
+        missionSelect.value=previous;
+        const selected=missions.find(m=>m.id===previous);
+        if(select)select.value=selected.siteId;
+        renderTakeShiftInfo(sites.find(s=>s.id===selected.siteId),selected);
+      }
+      else if(previous){
+        // An expired choice must never silently become a free shift on the same site.
+        if(select)select.value='';
+        renderTakeShiftInfo(null,null);
+        toast('Ce créneau n’est plus proposé. Choisis une mission ou un site avant de continuer.','warning');
+      }
+      syncSubmitState();
+    };
+    let refreshingMissions=false;
+    const reloadMissionOptions=async()=>{
+      if(refreshingMissions||!missionSelect?.isConnected||!isOnline())return;
+      refreshingMissions=true;
+      try{const rows=await getAgentPlannedMissions({requireServer:true});if(missionSelect.isConnected){availableMissions=rows;refreshMissionOptions();}}
+      catch{if(missionSelect.isConnected)toast('Actualisation des missions indisponible. Vérifie ta connexion.','warning');}
+      finally{refreshingMissions=false;}
+    };
+    if (missionSelect) {
+      refreshMissionOptions();
+      missionSelect.addEventListener('focus', refreshMissionOptions);
+      const visible=()=>{if(!document.hidden)reloadMissionOptions();};
+      window.addEventListener('online',reloadMissionOptions);
+      window.addEventListener('focus',reloadMissionOptions);
+      document.addEventListener('visibilitychange',visible);
+      const timer=setInterval(()=>{if(!document.hidden&&document.activeElement!==missionSelect)refreshMissionOptions();},30000);
+      unsubscribeList.push(()=>{clearInterval(timer);window.removeEventListener('online',reloadMissionOptions);window.removeEventListener('focus',reloadMissionOptions);document.removeEventListener('visibilitychange',visible);});
       missionSelect.addEventListener('change', () => {
         clearShiftError();
         const m = missions.find(x => x.id === missionSelect.value);
@@ -1439,7 +1475,9 @@ async function bindAgentHome(shift){
       if (takeShiftSubmissionLock) return;
       if (!isOnline()) return toast('Réseau indisponible — prise de poste impossible.', 'error');
       const fd = new FormData(form);
-      const mission = missions.find(m => m.id === fd.get('missionId')) || null;
+      const chosenId=fd.get('missionId');
+      const mission = upcomingTakeShiftMissions(availableMissions).find(m => m.id === chosenId) || null;
+      if(chosenId&&!mission){refreshMissionOptions();return toast('Cette mission n’est plus dans les deux créneaux proposés. Vérifie ta sélection.','warning');}
       const site = sites.find(s => s.id === (mission?.siteId || fd.get('siteId')));
       if (!site) return toast('Sélectionne un site.', 'warning');
       if (!checkInPhoto || !photoConfirm?.checked) return toast('La photo de prise de poste est obligatoire.', 'warning');
@@ -2567,7 +2605,7 @@ async function renderQGMissions(){
   const today = new Date();
   const defaultDate = planningLocalDateKey(today);
   const body = `  <section class="card planning-card planning-card-v46" style="margin-top:16px">
-    <div class="card-title planning-title"><div><h2>Planning exploitation</h2><p>Affectations, horaires et disponibilité des équipes</p></div><div class="btn-row planning-title-actions"><button class="btn small" id="planning-today">Aujourd’hui</button><button class="btn small" id="planning-prev">‹</button><input class="input planning-date" id="planning-date" type="date" value="${defaultDate}"><button class="btn small" id="planning-next">›</button></div></div>
+    <div class="card-title planning-title"><div><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><h2>Planning exploitation</h2><button class="btn small" id="planning-global-pdf" type="button" title="Télécharger une synthèse du mois complet sur une page paysage, tous sites et agents, sans les filtres">PDF global du mois</button></div><p>Affectations, horaires et disponibilité des équipes</p></div><div class="btn-row planning-title-actions"><button class="btn small" id="planning-today">Aujourd’hui</button><button class="btn small" id="planning-prev">‹</button><input class="input planning-date" id="planning-date" type="date" value="${defaultDate}"><button class="btn small" id="planning-next">›</button></div></div>
     <div class="planning-toolbar planning-toolbar-v46">
       <div class="segmented"><button class="active" data-planning-mode="sites">Sites</button><button data-planning-mode="agents">Collaborateurs</button></div>
       <div class="field compact-field"><label>Affichage</label><select class="select" id="planning-days"><option value="7">7 jours</option><option value="14" selected>14 jours</option><option value="31">Mois</option></select></div>
@@ -2642,6 +2680,7 @@ async function renderQGMissions(){
 }
 
 function bindPlanningControls(){
+  document.querySelector('#planning-global-pdf')?.addEventListener('click', downloadOperationsPlanningPdf);
   document.querySelectorAll('[data-planning-mode]').forEach(btn => btn.addEventListener('click', () => {
     qgPlanningState.mode = btn.dataset.planningMode;
     document.querySelectorAll('[data-planning-mode]').forEach(b => b.classList.toggle('active', b === btn));
@@ -6715,6 +6754,25 @@ async function addAudit(action, details={}){
     await addDoc(collectionRef('auditLogs'), { action, details, userId: currentUser.uid, userRole: currentProfile?.role || null, createdAt: serverTimestamp(), userAgent:navigator.userAgent });
   } catch(e) { console.warn('audit failed', e); }
 }
+async function downloadOperationsPlanningPdf(){
+  const button=document.querySelector('#planning-global-pdf');
+  if(button?.disabled)return;
+  const label=button?.textContent;
+  try{
+    if(!['admin','superviseur'].includes(currentProfile?.role)||rolePortal(currentProfile.role)!=='qg')throw new Error('Export réservé au QG autorisé.');
+    if(!isOnline())throw new Error('Le téléchargement du planning nécessite une connexion.');
+    if(button){button.disabled=true;button.textContent='Préparation du PDF…';button.setAttribute('aria-busy','true');}
+    const month=localMonthValue(qgPlanningState.startDate||new Date()),range=monthRange(month);
+    // Fresh, paginated, organization-scoped reads. Never export the cached first page.
+    const data=await loadOperationsPlanning(getSupabaseClient(),stagingConfig.organizationId,range);
+    const jsPDF=getJsPDF();if(!jsPDF)throw new Error('Bibliothèque PDF indisponible. Actualise la page puis réessaie.');
+    const pdf=createOperationsPlanningPdf({jsPDF,drawLogo:pdfDrawLogo,brand:AZZERA_DOC_BRAND,...data,range});
+    pdf.save(`planning-exploitation-${month}.pdf`);
+    toast(`Planning global de ${range.label} téléchargé. Aucun envoi effectué.`,'success');
+  }catch(error){console.error('Planning PDF',error);toast(userFriendlyError(error,'Téléchargement du planning impossible.'),'error');}
+  finally{if(button?.isConnected){button.disabled=false;button.textContent=label;button.removeAttribute('aria-busy');}}
+}
+
 async function downloadCollaboratorPlanningPdf(agentId,monthValue,{agentView=false}={}){
   try{
     const [agentSnap,missionSnap,siteSnap]=await Promise.all([
