@@ -1,6 +1,6 @@
 import { installOperationalBasemap } from './operational-map.js?v=map-20261026-r1';
 import { createClock } from './ui-runtime.js?v=phase3-20261026-r4';
-import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r1';
+import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r2';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
 import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=documents-20261028-r1';

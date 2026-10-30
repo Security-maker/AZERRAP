@@ -46,101 +46,105 @@ export function operationsPlanningSummary(missions,range){
     drafts:rows.filter(m=>String(m.publicationStatus||'').toLowerCase()==='draft').length};
 }
 
-// One row per site/agent, one column per day. A night is shown on its start day.
+// Same day-by-day grid as the collaborator PDF, consolidated by site.
+// Identical site/time assignments share one cell entry; every mission remains accounted for.
 export function operationsPlanningGrid(missions,sites,range){
   const summary=operationsPlanningSummary(missions,range),rows=new Map(),siteMap=new Map(sites.map(s=>[s.id,s]));
-  const days=new Date(range.start.getFullYear(),range.start.getMonth()+1,0).getDate();
-  const clock=d=>`${d.getHours()}h${d.getMinutes()?String(d.getMinutes()).padStart(2,'0'):''}`;
-  const calendarDay=d=>Date.UTC(d.getFullYear(),d.getMonth(),d.getDate());
-  const slotKey=m=>JSON.stringify([m.siteId,+dateOf(m.scheduledStart),+dateOf(m.scheduledEnd)]),staff=new Map();
-  for(const m of summary.missions){const key=slotKey(m);if(!staff.has(key))staff.set(key,new Set());if(m.agentId)staff.get(key).add(m.agentId);}
+  const days=new Date(range.start.getFullYear(),range.start.getMonth()+1,0).getDate(),daily=Array(days).fill(0);
+  const clock=d=>`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  const ensure=(id,name)=>{if(!rows.has(id))rows.set(id,{siteId:id,siteName:name||'Site non renseigné',cells:Array.from({length:days},()=>[]),minutes:0});return rows.get(id);};
+  for(const s of sites)ensure(s.id,s.name);
   for(const m of [...summary.missions].sort((a,b)=>dateOf(a.scheduledStart)-dateOf(b.scheduledStart)||String(a.id).localeCompare(String(b.id)))){
-    const key=JSON.stringify([m.siteId,m.agentId||null]);
-    if(!rows.has(key))rows.set(key,{siteId:m.siteId,siteName:siteMap.get(m.siteId)?.name||m.siteNom||'Site non renseigné',agentName:m.agentNom||'Non affectée',cells:Array.from({length:days},()=>[]),minutes:0});
-    const row=rows.get(key),start=dateOf(m.scheduledStart),end=dateOf(m.scheduledEnd),visibleStart=new Date(Math.max(+start,+range.start));
-    const carry=start<range.start,day=visibleStart.getDate()-1,offset=Math.round((calendarDay(end)-calendarDay(visibleStart))/86400000);
-    const draft=String(m.publicationStatus||'').toLowerCase()==='draft';
-    row.cells[day].push({id:m.id,start:clock(visibleStart)+(carry?'<':''),end:clock(end)+(offset?'+'+offset:''),draft,agents:staff.get(slotKey(m)).size});
-    row.minutes+=Math.max(0,(Math.min(+end,+range.end)-Math.max(+start,+range.start))/60000);
+    const row=ensure(m.siteId,siteMap.get(m.siteId)?.name||m.siteNom),start=dateOf(m.scheduledStart),end=dateOf(m.scheduledEnd);
+    const key=JSON.stringify([+start,+end]),draft=String(m.publicationStatus||'').toLowerCase()==='draft';
+    let cursor=new Date(Math.max(+start,+range.start));const hardEnd=Math.min(+end,+range.end);
+    while(+cursor<hardEnd){
+      // Calendar midnights, rather than 24-hour offsets, preserve daylight-saving changes.
+      const nextDay=new Date(cursor.getFullYear(),cursor.getMonth(),cursor.getDate()+1),stop=new Date(Math.min(+nextDay,hardEnd));
+      const day=cursor.getDate()-1,minutes=(+stop-+cursor)/60000;
+      let slot=row.cells[day].find(s=>s.key===key);
+      if(!slot){slot={key,missionIds:[],start:clock(cursor),end:+stop===+nextDay?'24:00':clock(stop),draft:false,agentIds:new Set(),agents:0};row.cells[day].push(slot);}
+      slot.missionIds.push(m.id);slot.draft ||= draft;if(m.agentId)slot.agentIds.add(m.agentId);slot.agents=slot.agentIds.size;
+      row.minutes+=minutes;daily[day]+=minutes;cursor=stop;
+    }
   }
-  for(const s of sites)if(![...rows.values()].some(r=>r.siteId===s.id))rows.set(JSON.stringify([s.id,null]),{siteId:s.id,siteName:s.name,agentName:'Aucune vacation',cells:Array.from({length:days},()=>[]),minutes:0});
-  return {summary,days,rows:[...rows.values()].sort((a,b)=>a.siteName.localeCompare(b.siteName,'fr')||a.agentName.localeCompare(b.agentName,'fr'))};
+  for(const row of rows.values())for(const slots of row.cells)for(const slot of slots){delete slot.key;delete slot.agentIds;}
+  return {summary,days,daily,rows:[...rows.values()].sort((a,b)=>a.siteName.localeCompare(b.siteName,'fr'))};
 }
 
 export function createOperationsPlanningPdf({jsPDF,drawLogo,brand,missions,sites,range,generatedAt=new Date()}){
-  const {summary,days,rows}=operationsPlanningGrid(missions,sites,range),C=brand;
+  const {summary,days,daily,rows}=operationsPlanningGrid(missions,sites,range),C=brand;
   const text=v=>String(v??'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim()||'-';
   const hours=n=>{const minutes=Math.round(n);return `${Math.floor(minutes/60)}:${String(minutes%60).padStart(2,'0')}`;};
-  // Keep one complete sheet. Prefer A4; use A3 for a denser month rather than unreadable type.
+  // Keep the collaborator PDF's masthead, identity strip and site/day grid.
+  // One complete landscape sheet: A4 first, A3 only when genuinely necessary.
   let doc,layout;
   for(const format of ['a4','a3']){
     doc=new jsPDF({unit:'mm',format,orientation:'landscape'});
-    const w=doc.internal.pageSize.getWidth(),h=doc.internal.pageSize.getHeight(),left=format==='a4'?53:65,total=15;
-    const cell=(w-20-left-total)/days,fs=format==='a4'?7:8,line=fs*25.4/72*1.25;
-    doc.setFont('helvetica','bold');doc.setFontSize(format==='a4'?8:9);
+    const w=doc.internal.pageSize.getWidth(),h=doc.internal.pageSize.getHeight(),left=format==='a4'?42:56;
+    const cell=(w-20-left)/days,fs=format==='a4'?6:7.5,line=fs*25.4/72*1.2,slotHeight=3*line+1.3;
+    doc.setFont('helvetica','bold');doc.setFontSize(format==='a4'?7:8.5);
     const prepared=rows.map(row=>{
-      const siteLines=doc.splitTextToSize(text(row.siteName),left-4),agentLines=doc.splitTextToSize(text(row.agentName),left-4);
-      const slotHeight=s=>(s.agents===1?2:3)*line+2;
-      const contentHeight=Math.max(0,...row.cells.map(xs=>xs.reduce((sum,s)=>sum+slotHeight(s),0)));
-      return {...row,siteLines,agentLines,height:Math.max(14,(siteLines.length+agentLines.length)*3.6+5,contentHeight+4)};
+      const siteLines=doc.splitTextToSize(text(row.siteName),left-4);
+      return {...row,siteLines,height:Math.max(14,siteLines.length*3.4+5,Math.max(...row.cells.map(xs=>xs.length),0)*slotHeight+4)};
     });
     const height=prepared.reduce((sum,r)=>sum+r.height,0);
-    doc.setFont('helvetica','normal');doc.setFontSize(6.5);
-    const timesFit=prepared.every(r=>r.cells.every(slots=>slots.every(s=>[s.start,s.end+(s.draft?'*':''),s.agents+' ag.'].every(t=>doc.getTextWidth(t)<=cell-1))));
-    layout={w,h,left,total,cell,fs,line,prepared};
-    if(height<=h-85&&timesFit)break;
+    layout={w,h,left,cell,fs,line,slotHeight,prepared};
+    if(height<=h-104)break;
     if(format==='a3')throw new Error('Ce mois contient trop de lignes pour une seule page lisible. Aucun planning incomplet généré.');
   }
-  const {w,h,left,total,cell,fs,line,prepared}=layout;
-  doc.setProperties({title:`Planning exploitation - ${range.label}`,subject:'Synthèse mensuelle globale sur une page',author:'AZZERA PROTECT · Sentinelle Pro'});
-  doc.setFillColor(...C.obsidian);doc.rect(0,0,w,25,'F');drawLogo(doc,10,4,17,17);
-  doc.setFont('helvetica','bold');doc.setFontSize(12);doc.setTextColor(...C.white);doc.text('AZZERA PROTECT',32,11);
-  doc.setFontSize(9);doc.setTextColor(0,156,255);doc.text('PLANNING EXPLOITATION',32,19);
-  doc.setTextColor(...C.white);doc.setFontSize(11);doc.text(text(range.label).toUpperCase(),w-10,12,{align:'right'});
-  doc.setFont('helvetica','normal');doc.setFontSize(8);doc.text('Mois complet · Tous les sites',w-10,19,{align:'right'});
-  doc.setTextColor(...C.obsidian);doc.setFontSize(9);
-  doc.text(`${summary.missions.length} vacations   /   ${summary.agents} collaborateurs   /   ${hours(summary.minutes)} h dans le mois`,10,34);
-  let y=40;
-  doc.setFillColor(...C.obsidian);doc.rect(10,y,w-20,11,'F');doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...C.white);
-  doc.text('Site / intervenant',12,y+7);doc.text('Total h',w-10-total/2,y+7,{align:'center'});
-  const weekday=['D','L','M','M','J','V','S'];
+  const {w,h,left,cell,fs,line,slotHeight,prepared}=layout;
+  doc.setProperties({title:`Planning exploitation - ${range.label}`,subject:'Planning mensuel de tous les sites sur une page',author:'AZZERA PROTECT · Sentinelle Pro'});
+  doc.setFillColor(...C.obsidian);doc.rect(0,0,w,28,'F');drawLogo(doc,10,5,17,17);
+  doc.setFont('helvetica','bold');doc.setFontSize(13);doc.setTextColor(...C.white);doc.text('AZZERA PROTECT',31,12);
+  doc.setFontSize(7.2);doc.setTextColor(0,156,255);doc.text('PLANNING EXPLOITATION',31,18);
+  doc.setTextColor(210,220,230);doc.setFont('helvetica','normal');doc.setFontSize(6.8);
+  doc.text(`Édition du ${generatedAt.toLocaleString('fr-FR')} · Planning susceptible d'être modifié.`,w-11,12,{align:'right'});
+  doc.text(`${text(range.label).toUpperCase()} · TOUS LES SITES`,w-11,19,{align:'right'});
+  doc.setDrawColor(...C.line);doc.setFillColor(248,250,252);doc.roundedRect(10,34,w-20,15,2.5,2.5,'FD');
+  doc.setTextColor(...C.obsidian);doc.setFont('helvetica','bold');doc.setFontSize(9);doc.text('Planification mensuelle des sites',14,40);
+  doc.setFont('helvetica','normal');doc.setFontSize(7);doc.setTextColor(...C.grey);
+  doc.text(`${rows.length} sites · ${summary.missions.length} vacations · ${summary.agents} collaborateurs · ${hours(summary.minutes)} h planifiées dans le mois`,14,45);
+  let y=54;
+  doc.setFillColor(...C.obsidian);doc.rect(10,y,w-20,10,'F');doc.setFont('helvetica','bold');doc.setFontSize(7);doc.setTextColor(...C.white);
+  doc.text('SITES',12,y+6.5);
   for(let d=0;d<days;d++){
-    const date=new Date(range.start.getFullYear(),range.start.getMonth(),d+1),x=10+left+(d+.5)*cell;
-    doc.setFontSize(7);doc.text(weekday[date.getDay()],x,y+4,{align:'center'});doc.setFontSize(8);doc.text(String(d+1).padStart(2,'0'),x,y+8.5,{align:'center'});
+    const date=new Date(range.start.getFullYear(),range.start.getMonth(),d+1),x=10+left+d*cell;
+    doc.setDrawColor(80,94,110);doc.rect(x,y,cell,10);
+    doc.setFontSize(6.3);doc.text(String(d+1).padStart(2,'0'),x+cell/2,y+4,{align:'center'});
+    doc.setFontSize(4.8);doc.text(date.toLocaleDateString('fr-FR',{weekday:'short'}).replace('.','').slice(0,3).toUpperCase(),x+cell/2,y+7.5,{align:'center'});
   }
-  y+=11;
+  y+=10;
   for(const row of prepared){
     const rh=row.height;
-    doc.setDrawColor(...C.line);doc.setLineWidth(.15);doc.setFillColor(...C.soft);doc.rect(10,y,left,rh,'FD');
-    doc.setTextColor(...C.obsidian);doc.setFont('helvetica','bold');doc.setFontSize(layout.w<300?8:9);
-    doc.text(row.siteLines,12,y+5,{lineHeightFactor:1.2});
-    doc.setFont('helvetica','normal');doc.setTextColor(...C.grey);doc.text(row.agentLines,12,y+5+row.siteLines.length*3.6,{lineHeightFactor:1.2});
+    doc.setDrawColor(...C.line);doc.setLineWidth(.15);doc.setFillColor(248,250,252);doc.rect(10,y,left,rh,'FD');
+    doc.setTextColor(...C.obsidian);doc.setFont('helvetica','bold');doc.setFontSize(w<300?7:8.5);
+    doc.text(row.siteLines,12,y+(rh-row.siteLines.length*3.4)/2+2.7,{lineHeightFactor:1.2});
     for(let d=0;d<days;d++){
       const x=10+left+d*cell,slots=row.cells[d],day=new Date(range.start.getFullYear(),range.start.getMonth(),d+1).getDay();
-      doc.setFillColor(...(slots.length?[232,244,255]:[0,6].includes(day)?[242,244,247]:C.white));doc.rect(x,y,cell,rh,'FD');
-      const contentHeight=slots.reduce((sum,s)=>sum+(s.agents===1?2:3)*line+2,0);
-      let cy=y+(rh-contentHeight+2)/2+line*.8;
-      doc.setFont('helvetica','normal');doc.setFontSize(fs);doc.setTextColor(...C.obsidian);
+      doc.setFillColor(...([0,6].includes(day)?[236,243,248]:[248,250,252]));doc.rect(x,y,cell,rh,'FD');
+      let cy=y+(rh-slots.length*slotHeight)/2+line;
       for(const slot of slots){
-        // Fit time suffixes (+1, draft *) inside their day; no truncation of a vacation.
-        const lines=[slot.start,slot.end+(slot.draft?'*':'')];
-        const widest=Math.max(...lines.map(t=>doc.getTextWidth(t)));
-        const size=Math.min(fs,fs*(cell-1)/widest);doc.setFontSize(size);
-        doc.text(lines[0],x+cell/2,cy,{align:'center'});doc.text(lines[1],x+cell/2,cy+line,{align:'center'});
-        doc.setFontSize(fs);
-        if(slot.agents!==1){doc.setFont('helvetica','bold');doc.setTextColor(0,84,139);doc.text(slot.agents+' ag.',x+cell/2,cy+2*line,{align:'center'});doc.setFont('helvetica','normal');doc.setTextColor(...C.obsidian);}
-        cy+=(slot.agents===1?2:3)*line+2;
+        doc.setFont('helvetica','bold');doc.setFontSize(fs);doc.setTextColor(...C.obsidian);
+        doc.text(slot.start,x+cell/2,cy,{align:'center'});doc.text(slot.end,x+cell/2,cy+line,{align:'center'});
+        doc.setFont('helvetica','normal');doc.setTextColor(0,84,139);doc.setFontSize(fs-.5);
+        const count=slot.agents+' ag.'+(slot.draft?'*':'');
+        doc.setFontSize(Math.min(fs-.5,(fs-.5)*(cell-1)/doc.getTextWidth(count)));
+        doc.text(count,x+cell/2,cy+2*line,{align:'center'});cy+=slotHeight;
       }
     }
-    const x=w-10-total;doc.setFillColor(...C.soft);doc.rect(x,y,total,rh,'FD');doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...C.obsidian);doc.text(hours(row.minutes),x+total/2,y+rh/2+1,{align:'center'});y+=rh;
+    y+=rh;
   }
-  if(!prepared.length){doc.setFont('helvetica','normal');doc.setFontSize(10);doc.setTextColor(...C.grey);doc.text('Aucun site ni vacation accessible pour ce mois.',12,y+10);y+=15;}
-  doc.setFont('helvetica','normal');doc.setTextColor(...C.grey);doc.setFontSize(7.5);
-  doc.text('Horaires au jour de départ. +1 : fin le lendemain ; +2 : deux jours après. < : début avant le mois. * : brouillon.',10,y+7);
-  doc.text('2 ag. : agents prévus sur le même site et créneau (brouillons inclus). Sans nombre : 1 agent. Une case vide ne signifie pas une absence.',10,y+12);
-  doc.text('Totaux limités au mois. Missions annulées ou retirées exclues.',10,y+17);
-  doc.setDrawColor(...C.line);doc.line(10,h-15,w-10,h-15);doc.setFontSize(7.5);
-  doc.text(`Sentinelle Pro · Édition du ${generatedAt.toLocaleString('fr-FR')} · Document interne, sans publication ni envoi`,10,h-9);
+  if(!prepared.length){doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(...C.grey);doc.text('Aucun site ni vacation accessible pour ce mois.',12,y+8);y+=14;}
+  doc.setDrawColor(...C.line);doc.setFillColor(236,243,248);doc.rect(10,y,w-20,9,'F');doc.rect(10,y,left,9);
+  doc.setTextColor(...C.obsidian);doc.setFont('helvetica','bold');doc.setFontSize(6);doc.text('TOTAL HEURES JOURNALIÈRES',12,y+5.8);
+  daily.forEach((minutes,i)=>{const x=10+left+i*cell;doc.rect(x,y,cell,9);doc.setFontSize(fs);doc.text(minutes?(minutes/60).toFixed(1):'-',x+cell/2,y+5.8,{align:'center'});});
+  y+=9;
+  doc.setFont('helvetica','normal');doc.setTextColor(...C.grey);doc.setFontSize(7);
+  doc.text('Chaque case : début / fin / agents prévus sur ce créneau. Les nuits sont réparties sur les jours concernés ; 24:00 = minuit.',10,y+7);
+  doc.text('* : brouillon inclus. 0 ag. : créneau non affecté. Les effectifs représentent les affectations, pas les présences réelles.',10,y+12);
+  doc.setDrawColor(...C.line);doc.line(10,h-15,w-10,h-15);doc.setFontSize(6.5);
+  doc.text('AZZERA PROTECT · Document généré par Sentinelle Pro · Mois complet, sans publication ni envoi',10,h-9);
   doc.text('1 / 1',w-10,h-9,{align:'right'});
   return doc;
 }
