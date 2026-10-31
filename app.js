@@ -3,13 +3,13 @@ import { createClock } from './ui-runtime.js?v=dock-20261031-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=documents-20261028-r1';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=camera-20261031-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
-} from './supabase-compat.js?v=phase3-20261026-r4';
+} from './supabase-compat.js?v=camera-20261031-r1';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -1359,7 +1359,8 @@ function takeShiftForm(){
       <div id="checkin-photo-preview" class="camera-preview"><span>Aucune photo enregistrée</span></div>
       <div class="checkline camera-consent"><input type="checkbox" id="checkin-photo-confirm" disabled> <span>Je confirme que cette photo correspond à ma prise de poste actuelle.</span></div>
     </section>
-    <button class="btn primary full shift-start-cta" id="take-shift-submit" type="submit" disabled>Démarrer ma mission</button>
+    <p id="take-shift-readiness" class="muted" role="status" aria-live="polite">Choisis une mission ou un site pour continuer.</p>
+    <button class="btn primary full shift-start-cta" id="take-shift-submit" type="submit" aria-describedby="take-shift-readiness" disabled>Démarrer ma mission</button>
   </form>`;
 }
 async function bindAgentHome(shift){
@@ -1368,7 +1369,12 @@ async function bindAgentHome(shift){
   if (whatsappBtn) whatsappBtn.addEventListener('click', () => openWhatsapp(shift));
   document.querySelector('#enable-push')?.addEventListener('click', () => registerPushNotifications());
   if (!shift) {
+    const form = document.querySelector('#take-shift-form');
+    if (!form || form.dataset.bound === 'true') return;
+    form.dataset.bound = 'true';
     const [sites, plannedMissions] = await Promise.all([getActiveSites().catch(()=>[]), getAgentPlannedMissions().catch(()=>[])]);
+    // A response from an abandoned screen must not initialize a newer form.
+    if (!form.isConnected) return;
     let availableMissions=plannedMissions, missions=upcomingTakeShiftMissions(plannedMissions);
     const select = document.querySelector('#site-select');
     const missionSelect = document.querySelector('#mission-select');
@@ -1389,14 +1395,23 @@ async function bindAgentHome(shift){
     };
     const syncSubmitState = () => {
       if (!submitButton) return;
-      submitButton.disabled = !(selectedSite() && checkInPhoto && photoConfirm?.checked);
+      const site=selectedSite();
+      submitButton.disabled = takeShiftSubmissionLock || !(site && checkInPhoto && photoConfirm?.checked);
+      const readiness=form.querySelector('#take-shift-readiness');
+      if(readiness) readiness.textContent=takeShiftSubmissionLock ? 'Confirmation du serveur en cours…' : !site
+        ? (checkInPhoto ? 'Photo prête. Choisis ta mission ou ton site à l’étape 1 pour démarrer.' : 'Choisis une mission ou un site pour continuer.')
+        : !checkInPhoto ? 'Prends la photo de prise de poste pour continuer.'
+        : !photoConfirm?.checked ? 'Confirme que la photo correspond à ta prise de poste.'
+        : 'Prêt à démarrer : attends la confirmation du serveur après avoir appuyé sur le bouton.';
     };
     if (select) select.innerHTML = `<option value="">Choisir un site</option>` + sites.map(s => `<option value="${safe(s.id)}">${safe(s.name)}</option>`).join('');
     const refreshMissionOptions = () => {
-      if(!missionSelect?.isConnected) return;
+      // Do not replace a native Android selector while its picker is open.
+      if(!missionSelect?.isConnected || document.activeElement === missionSelect || takeShiftSubmissionLock) return;
       const previous=missionSelect.value;
       missions=upcomingTakeShiftMissions(availableMissions);
-      missionSelect.innerHTML = `<option value="">Prise de poste libre</option>` + missions.map(m => `<option value="${safe(m.id)}">${safe(m.siteNom || 'Site')} · ${dateText(m.scheduledStart)}</option>`).join('');
+      const options = `<option value="">Prise de poste libre</option>` + missions.map(m => `<option value="${safe(m.id)}">${safe(m.siteNom || 'Site')} · ${dateText(m.scheduledStart)}</option>`).join('');
+      if(missionSelect.innerHTML !== options) missionSelect.innerHTML = options;
       if(previous&&missions.some(m=>m.id===previous)) {
         missionSelect.value=previous;
         const selected=missions.find(m=>m.id===previous);
@@ -1421,7 +1436,7 @@ async function bindAgentHome(shift){
     };
     if (missionSelect) {
       refreshMissionOptions();
-      missionSelect.addEventListener('focus', refreshMissionOptions);
+      missionSelect.addEventListener('blur', () => queueMicrotask(refreshMissionOptions));
       const visible=()=>{if(!document.hidden)reloadMissionOptions();};
       window.addEventListener('online',reloadMissionOptions);
       window.addEventListener('focus',reloadMissionOptions);
@@ -1466,7 +1481,6 @@ async function bindAgentHome(shift){
       syncSubmitState();
     });
     photoConfirm?.addEventListener('change', syncSubmitState);
-    const form = document.querySelector('#take-shift-form');
     form?.addEventListener('submit', async e => {
       e.preventDefault();
       // V5.8.8.6 : verrou local immédiat. Même si iOS/Safari rejoue le submit,

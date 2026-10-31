@@ -1,5 +1,5 @@
 import { supabaseConfig } from './supabase-config.js?v=510';
-import { getSupabaseClient } from './supabase-compat.js?v=phase3-20261026-r4';
+import { getSupabaseClient } from './supabase-compat.js?v=camera-20261031-r1';
 
 function isConfigured(){
   return Boolean(

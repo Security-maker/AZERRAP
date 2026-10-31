@@ -284,19 +284,30 @@ export async function signOut(){
 }
 export function onAuthStateChanged(_auth, callback){
   let active=true, revision=0;
-  const deliver=async(session,ticket)=>{
-    try {const user=await loadCompatUser(session?.user||null,session);if(active && ticket===revision) callback(user);}
-    catch(e){if(active && ticket===revision){console.error(e);callback(null);}}
+  let deliveredIdentity=Symbol('not-delivered');
+  const notify=(user,event)=>{
+    // SIGNED_IN can also mean returning from the native camera, not a new login.
+    // Revalidate the profile above, but only rebuild the app if identity/access changed.
+    const identity=user ? JSON.stringify([user.supabaseUid,user.uid,user.email,user.emailVerified,
+      Boolean(user.__missingProfile),profileCache?.id,profileCache?.organization_id,
+      profileCache?.role,profileCache?.active]) : null;
+    if(identity===deliveredIdentity && !['USER_UPDATED','PASSWORD_RECOVERY'].includes(event)) return;
+    deliveredIdentity=identity;
+    callback(user);
+  };
+  const deliver=async(session,ticket,event)=>{
+    try {const user=await loadCompatUser(session?.user||null,session);if(active && ticket===revision) notify(user,event);}
+    catch(e){if(active && ticket===revision){console.error(e);notify(null,event);}}
   };
   const initial=revision;
   supabase.auth.getSession().then(({data,error})=>{
     if(!active || revision!==initial) return;
-    if(error){callback(null);return;}
+    if(error){notify(null);return;}
     deliver(data.session,initial);
   });
-  const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,session)=>{
+  const {data:{subscription}}=supabase.auth.onAuthStateChange((event,session)=>{
     const ticket=++revision;
-    queueMicrotask(()=>{if(active && ticket===revision) deliver(session,ticket);});
+    queueMicrotask(()=>{if(active && ticket===revision) deliver(session,ticket,event);});
   });
   return ()=>{active=false;revision++;subscription?.unsubscribe?.();};
 }
