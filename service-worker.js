@@ -1,18 +1,18 @@
-const CACHE_NAME = 'sentinelle-pro-map-pan-20261030-r2';
+const CACHE_NAME = 'sentinelle-pro-dock-20261031-r1';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
   './vendor/maps/leaflet-maplibre-gl-0.1.4.js',
   './planning-tools.js?v=planning-20261030-r3',
   './operational-map.js?v=map-pan-20261030-r2',
   './operational-map.css?v=map-20261026-r1',
-  './phase3.css?v=mobile-20261030-r1',
-  './ui-runtime.js?v=mobile-20261030-r1',
+  './phase3.css?v=dock-20261031-r1',
+  './ui-runtime.js?v=dock-20261031-r1',
   './premium.css?v=phase3-20261026-r4',
   './interventions.js?v=phase3-20261026-r4',
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=map-pan-20261030-r2',
+  './app.js?v=dock-20261031-r1',
   './sentinelle-config.js',
   './supabase-compat.js?v=phase3-20261026-r4',
   './supabase-config.js?v=510',

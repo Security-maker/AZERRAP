@@ -1,5 +1,5 @@
 import { installOperationalBasemap, preserveOperationalMapView } from './operational-map.js?v=map-pan-20261030-r2';
-import { createClock, pinMobileNavigation } from './ui-runtime.js?v=mobile-20261030-r1';
+import { createClock } from './ui-runtime.js?v=dock-20261031-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
@@ -28,7 +28,6 @@ let unsubscribeList = [];
 const viewClock=createClock(()=>{const node=document.querySelector('#clock-pill');if(node)node.textContent=nowText();});
 let latestFlashUnsub = null;
 let mapInstance = null;
-let stopNavigationPinning = ()=>{};
 let mapSiteLayer = null;
 let mapAgentLayer = null;
 let mapBoundsCache = [];
@@ -481,9 +480,7 @@ function render(html){
   // Empêche le faux écran 'Démarrage trop long' une fois qu'une vue est rendue.
   window.__SENTINELLE_RENDERED__ = true;
   $app.className = '';
-  stopNavigationPinning();
   $app.innerHTML = html;
-  stopNavigationPinning=pinMobileNavigation($app.querySelector('.phase3-dock'));
   bindGlobalEvents();
   const clock = document.querySelector('#clock-pill');
   viewClock.stop();

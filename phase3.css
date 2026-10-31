@@ -199,7 +199,16 @@ body:has(.client-shell),.client-background {background:#f4f6f9;color:#132a43}.cl
 .layout .cat-btn {min-height:44px;padding:10px;border-radius:9px;font-size:14px;font-weight:550;line-height:1.4}.layout .cat-btn.active {background:#123758;border-color:var(--ui-brand);color:#d8efff;font-weight:650}
 @media(max-width:699px){.layout .category-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}
 
-/* Mobile navigation stays on the visible viewport, independently of document scrolling. */
-@media(max-width:699px){
-  .layout .phase3-dock{top:auto;bottom:0;left:0;right:0;width:auto;margin:0;transform:translate3d(0,var(--dock-offset,0px),0);transition:none;backface-visibility:hidden}
+/* Mobile shell: only the content scrolls. The navigation owns its bottom row,
+   outside the scrolling area; no fixed-position/visualViewport feedback loop.
+   Scoped to the QG/Agent shell: login, client portal and printed pages keep their layout. */
+@media screen and (max-width:699px){
+  html:has(#app > .layout){height:100%;overflow:hidden!important;overscroll-behavior-y:none}
+  body:has(#app > .layout){height:100vh;height:100dvh;min-height:0;padding-top:0;overflow:hidden!important;overscroll-behavior-y:none}
+  #app:has(> .layout){height:100%;min-height:0;overflow:hidden}
+  #app > .layout{height:100%;min-height:0;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;overflow:hidden}
+  .layout > .main{grid-row:1;min-height:0;height:100%;overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior-y:none;padding-bottom:110px!important}
+  .layout > .main > .topbar{position:relative;top:auto}
+  .layout > .phase3-dock{grid-row:2;position:relative;inset:auto;width:100%;margin:0;transform:none;transition:none;backface-visibility:visible}
+  body.modal-open .layout > .main{overflow-y:hidden!important}
 }
