@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-latency-20261110-r3';
+const CACHE_NAME = 'sentinelle-pro-planning-ack-20261110-r1';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
   './vendor/maps/leaflet-maplibre-gl-0.1.4.js',
@@ -12,12 +12,12 @@ const APP_SHELL = [
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=latency-20261110-r3',
+  './app.js?v=planning-ack-20261110-r1',
   './sentinelle-config.js',
-  './supabase-compat.js?v=latency-20261110-r3',
+  './supabase-compat.js?v=planning-ack-20261110-r1',
   './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js?v=latency-20261110-r3',
+  './supabase-bridge.js?v=planning-ack-20261110-r1',
   './manifest.json',
   './manifest-client.json',
   './offline.html',

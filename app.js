@@ -3,13 +3,13 @@ import { createClock } from './ui-runtime.js?v=dock-20261031-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=latency-20261110-r3';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=planning-ack-20261110-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
-} from './supabase-compat.js?v=latency-20261110-r3';
+} from './supabase-compat.js?v=planning-ack-20261110-r1';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -1042,21 +1042,29 @@ function renderAgentMonthlyAcknowledgement(state){
     return;
   }
   box.innerHTML=`<div class="agent-monthly-ack-copy"><span class="pill orange">À confirmer</span><div><strong>${safe(label)} · ${missions.length} mission${missions.length>1?'s':''}</strong><p>Consulte les horaires et les consignes, puis confirme la prise de connaissance du mois.</p></div></div><button class="btn success" id="agent-confirm-monthly-planning">J’ai pris connaissance du planning</button>`;
-  document.querySelector('#agent-confirm-monthly-planning')?.addEventListener('click',()=>acknowledgeMonthlyPlanning(state));
+  const confirmButton=document.querySelector('#agent-confirm-monthly-planning');
+  if(confirmButton){confirmButton.disabled=Boolean(state.monthlyAckPending);confirmButton.addEventListener('click',()=>acknowledgeMonthlyPlanning(state));}
 }
 async function acknowledgeMonthlyPlanning(state){
-  const range=monthRange(state.month);
-  const missions=state.missions.filter(m=>m.monthlyPlanning===true&&m.status!=='cancelled'&&missionOverlapsRange(m,range.start,range.end));
+  if(!currentUser?.uid||state.monthlyAckPending) return;
+  const agentId=currentUser.uid, month=state.month, range=monthRange(month);
+  const missions=state.missions.filter(m=>m.agentId===agentId&&m.monthlyPlanning===true&&m.status!=='cancelled'&&!missionIsDraft(m)&&!missionIsRemovedFromPlanning(m)&&missionOverlapsRange(m,range.start,range.end));
   if(!missions.length) return toast('Aucune mission à confirmer.','warning');
+  const signature=monthlyPlanningSignature(missions);
+  state.monthlyAckPending=true;
   const button=document.querySelector('#agent-confirm-monthly-planning'); if(button) button.disabled=true;
   try{
-    await batchUpdateMissionDocuments(missions,m=>({acknowledgedAt:serverTimestamp(),acknowledgedBy:currentUser.uid,acknowledgedRevision:missionRevision(m),updatedAt:serverTimestamp(),updatedBy:currentUser.uid}));
-    const signature=monthlyPlanningSignature(missions);
-    await setDoc(planningAcknowledgementRef(currentUser.uid,state.month),{agentId:currentUser.uid,month:state.month,signature,missionCount:missions.length,confirmedAt:serverTimestamp(),updatedAt:serverTimestamp()},{merge:true});
-    await addAudit('monthly_planning_acknowledged',{month:state.month,missionCount:missions.length,signature});
+    // The bulk mission editor is QG-only. Reuse the personal Agent update route,
+    // and only record the monthly receipt after every server acknowledgement.
+    for(const mission of missions){
+      await updateDoc(docRef('missions',mission.id),{acknowledgedAt:serverTimestamp(),acknowledgedBy:agentId,acknowledgedRevision:missionRevision(mission)});
+    }
+    await setDoc(planningAcknowledgementRef(agentId,month),{agentId,month,signature,missionCount:missions.length,confirmedAt:serverTimestamp(),updatedAt:serverTimestamp()},{merge:true});
+    await addAudit('monthly_planning_acknowledged',{month,missionCount:missions.length,signature});
     toast('Prise de connaissance du planning enregistrée.','success');
-    await loadAgentMonthlyAcknowledgement(state);
-  }catch(error){console.error(error);toast(userFriendlyError(error,'Confirmation du planning impossible.'),'error');if(button)button.disabled=false;}
+    if(state.month===month) await loadAgentMonthlyAcknowledgement(state);
+  }catch(error){console.error(error);toast(userFriendlyError(error,'Confirmation du planning impossible. Actualise le planning avant de réessayer.'),'error');}
+  finally{state.monthlyAckPending=false;if(button)button.disabled=false;renderAgentMonthlyAcknowledgement(state);}
 }
 
 function bindAgentPlanningActions(state){
