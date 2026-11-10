@@ -385,8 +385,14 @@ function idForCore(path,row){
 }
 
 const sharedReads=singleFlight();
-function readRows(path){return sharedReads(`${identityEpoch}:${usesOperationalProjection()}:${path}`,()=>fetchRows(path));}
-async function fetchRows(path){
+function readRows(path,constraints=[]){
+  const fields=path==='reports'?{agentId:'firebase_agent_uid',shiftId:'firebase_shift_id',missionId:'firebase_mission_id',siteId:'firebase_site_id'}:
+    path==='shifts'?{agentId:'firebase_agent_uid',missionId:'firebase_mission_id',siteId:'firebase_site_id',status:'status'}:{};
+  const filters=constraints.filter(c=>c.type==='where' && c.op==='==' && fields[c.field] && typeof c.value==='string' && c.value!=='')
+    .map(c=>[fields[c.field],c.value]);
+  return sharedReads(`${identityEpoch}:${usesOperationalProjection()}:${path}:${JSON.stringify(filters)}`,()=>fetchRows(path,filters));
+}
+async function fetchRows(path,filters=[]){
   if(path==='flashMessages' && profileCache?.role==='agent'){
     const {data,error}=await supabase.rpc('sentinelle_agent_flash');
     if(error) throw error;
@@ -399,9 +405,23 @@ async function fetchRows(path){
   }
   const cfg=coreFor(path);
   if(cfg){
-    const {data,error}=await supabase.from(cfg.table).select('*');
-    if(error) throw error;
-    return Promise.all((data||[]).map(async row=>({id:idForCore(path,row),data:await hydrateDecodedMedia(path,row,decodeCore(path,row))})));
+    let data=[];
+    if(['reports','shifts'].includes(path)){
+      // Filter operational identities before transfer; page without truncating the future MCI.
+      for(let offset=0;;){
+        let request=supabase.from(cfg.table).select('*',{count:'exact'}).order('id').range(offset,offset+499);
+        for(const [column,value] of filters) request=request.eq(column,value);
+        const result=await request;
+        if(result.error) throw result.error;
+        const page=result.data||[];data.push(...page);offset+=page.length;
+        if(result.count!=null && offset>=result.count) break;
+        if(!page.length){if(result.count>offset)throw new Error('Lecture opérationnelle incomplète.');break;}
+        if(result.count==null && page.length<500) break;
+      }
+    }else{
+      const result=await supabase.from(cfg.table).select('*');if(result.error) throw result.error;data=result.data||[];
+    }
+    return data.map(row=>({id:idForCore(path,row),data:decodeCore(path,row),mediaRow:row}));
   }
   const {data,error}=await supabase.from('compat_records').select('external_id,payload').eq('collection_name',path);
   if(error) throw error;
@@ -463,11 +483,42 @@ function applyConstraints(rows,constraints=[]){
   if(l&&l.count>=0) out=out.slice(0,l.count);
   return out;
 }
+// Read-only projection: old clients may have closed a shift without syncing its mission.
+// Keep RLS on shifts and match all associations; never infer completion from the clock.
+async function reconcileMissionShifts(rows){
+  const active=rows.filter(r=>r.data.status==='active');
+  if(!active.length) return rows;
+  const shifts=[];
+  for(let offset=0;offset<active.length;offset+=100){
+    const ids=active.slice(offset,offset+100).map(r=>r.id);
+    for(let page=0;;page+=500){
+      const {data,error}=await supabase.from('shifts')
+        .select('firebase_id,firebase_mission_id,firebase_site_id,firebase_agent_uid,status,started_at,completed_at')
+        .in('firebase_mission_id',ids).in('status',['active','completed'])
+        .order('id').range(page,page+499);
+      if(error) throw error;
+      shifts.push(...(data||[]));
+      if((data||[]).length<500) break;
+    }
+  }
+  return rows.map(row=>{
+    if(row.data.status!=='active') return row;
+    const related=shifts.filter(s=>s.firebase_mission_id===row.id && s.firebase_site_id===row.data.siteId && s.firebase_agent_uid===row.data.agentId);
+    if(!related.length || related.some(s=>s.status==='active')) return row;
+    const latest=related.filter(s=>s.completed_at).sort((a,b)=>Date.parse(b.completed_at)-Date.parse(a.completed_at))[0];
+    return latest ? {...row,data:{...row.data,status:'completed',actualEnd:revive(latest.completed_at),statusFromShift:true}} : row;
+  });
+}
 export async function getDoc(ref){ return new DocSnapshot(ref,await readOne(ref.path,ref.id)); }
 export async function getDocs(ref){
   const path=logicalCollection(ref), constraints=ref?.__kind==='query'?ref.constraints:[];
-  const rows=applyConstraints(await readRows(path),constraints);
-  return new QuerySnapshot(rows.map(row=>new DocSnapshot(makeDoc(path,row.id),row.data)));
+  let rows=await readRows(path,constraints);
+  if(path==='missions') rows=await reconcileMissionShifts(rows);
+  rows=applyConstraints(rows,constraints);
+  // Sign only the selected reports, not every photograph in the organisation.
+  const selected=await Promise.all(rows.map(async row=>new DocSnapshot(makeDoc(path,row.id),
+    row.mediaRow ? await hydrateDecodedMedia(path,row.mediaRow,{...row.data}) : row.data)));
+  return new QuerySnapshot(selected);
 }
 
 function onlyOperationalPatch(data){
@@ -501,9 +552,9 @@ function normalizeDataObject(data){
   }
   return out;
 }
-async function buildCoreRecord(path,id,data,{merge=false}={}){
+async function buildCoreRecord(path,id,data,{merge=false,existingRow=undefined}={}){
   const incoming=normalizeDataObject(data);
-  const existing=merge?await existingCoreRow(path,id):null;
+  const existing=merge?(existingRow===undefined?await existingCoreRow(path,id):existingRow):null;
   const previous=existing?decodeCore(path,existing):{};
   const combined=merge?deepMerge(previous,incoming):incoming;
   const payload=plain(combined);
@@ -547,7 +598,7 @@ async function writeCore(path,id,data,{merge=false,insertOnly=false}={}){
   }
   const existing=insertOnly?null:await existingCoreRow(path,id);
   const prepared=await prepareCoreMedia(path,id,data,existing);
-  const record=await buildCoreRecord(path,id,prepared,{merge:Boolean(existing)||merge});
+  const record=await buildCoreRecord(path,id,prepared,{merge:Boolean(existing)||merge,existingRow:path==='shifts'?existing:undefined});
   let result;
   if(existing) result=await supabase.from(cfg.table).update(record).eq(cfg.id,id).select(cfg.id).maybeSingle();
   else result=await supabase.from(cfg.table).insert(record).select(cfg.id).single();

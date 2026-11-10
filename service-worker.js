@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sentinelle-pro-camera-20261031-r1';
+const CACHE_NAME = 'sentinelle-pro-postes-20261110-r1';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
   './vendor/maps/leaflet-maplibre-gl-0.1.4.js',
@@ -12,12 +12,12 @@ const APP_SHELL = [
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=camera-20261031-r1',
+  './app.js?v=postes-20261110-r1',
   './sentinelle-config.js',
-  './supabase-compat.js?v=camera-20261031-r1',
+  './supabase-compat.js?v=postes-20261110-r1',
   './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js?v=camera-20261031-r1',
+  './supabase-bridge.js?v=postes-20261110-r1',
   './manifest.json',
   './manifest-client.json',
   './offline.html',

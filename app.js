@@ -3,13 +3,13 @@ import { createClock } from './ui-runtime.js?v=dock-20261031-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=camera-20261031-r1';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=postes-20261110-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
-} from './supabase-compat.js?v=camera-20261031-r1';
+} from './supabase-compat.js?v=postes-20261110-r1';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -1499,7 +1499,7 @@ async function bindAgentHome(shift){
       submitButton.disabled = true;
       submitButton.textContent = 'Prise de poste en cours...';
       try {
-        await takeShift(site, mission, checkInPhoto);
+        await takeShift(site, mission, checkInPhoto, label => { if(submitButton?.isConnected) submitButton.textContent=label; });
       } finally {
         takeShiftSubmissionLock = false;
         // V5.10.19 : si le démarrage a échoué avant création du shift,
@@ -1570,13 +1570,14 @@ function isDuplicateActiveShiftError(error){
   const text = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
   return code === '23505' && (text.includes('uq_shifts_one_active_per_agent') || text.includes('one_active_per_agent') || text.includes('duplicate key'));
 }
-async function takeShift(site, mission=null, checkInPhoto=null){
+async function takeShift(site, mission=null, checkInPhoto=null, progress=()=>{}){
   let shiftDoc = null;
   try {
-    const existing = await findActiveShift();
-    if (existing) return toast('Un poste est déjà ouvert. Termine-le avant d’en ouvrir un autre.', 'warning');
+    progress('Vérification du poste et localisation…');
     if (!checkInPhoto?.dataUrl) return toast('La photo de prise de poste est obligatoire.', 'warning');
-    const gps = await getGPS({ enableHighAccuracy:true, timeout:12000, maximumAge:0 });
+    const [existing,gps] = await Promise.all([findActiveShift(),getGPS({ enableHighAccuracy:true, timeout:12000, maximumAge:0 })]);
+    if (existing) return toast('Un poste est déjà ouvert. Termine-le avant d’en ouvrir un autre.', 'warning');
+    progress('Enregistrement du poste…');
     const agentNom = `${currentProfile.prenom || ''} ${currentProfile.nom || ''}`.trim();
     shiftDoc = await addDoc(collectionRef('shifts'), {
       agentId: currentUser.uid, agentNom, siteId: site.id, siteNom: site.name,
@@ -1590,6 +1591,7 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     // V5.8.8.6 : la preuve de prise de poste est stockée dans le rapport automatique
     // de prise de service. Le chemin reports -> Supabase Storage est le même que pour
     // les photos MCI déjà validées et évite le point de panne compat shiftProofs.
+    progress('Poste enregistré · sauvegarde de la photo…');
     let startReportDoc = null;
     try {
       startReportDoc = await addDoc(collectionRef('reports'), {
@@ -1651,11 +1653,14 @@ async function takeShift(site, mission=null, checkInPhoto=null){
     }
     currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
     syncNativePushIdentity().catch(() => {});
-    await addAudit('shift_start', { shiftId: shiftDoc.id, siteId: site.id, missionId: mission?.id || null, photoProof:true, gpsAvailable:!!gps });
-    const startPushResult = await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()});
-    await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:startPushResult?.skipped?(startPushResult?.reason||'skipped'):startPushResult?.ok?'sent':startPushResult?.error||'failed'}).catch(()=>{});
-    toast(Number(startPushResult?.delivered)>0 ? 'Prise de poste confirmée · notification acceptée par le fournisseur' : 'Prise de poste confirmée', 'success');
-    await renderAgentHome();
+    progress('Poste et photo confirmés · ouverture de l’accueil…');
+    const startNotification=(async()=>{
+      const result=await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()});
+      await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:result?.skipped?(result?.reason||'skipped'):result?.ok?'sent':result?.error||'failed'}).catch(()=>{});
+    })().catch(()=>{});
+    await addAudit('shift_start', { shiftId:shiftDoc.id,siteId:site.id,missionId:mission?.id||null,photoProof:true,gpsAvailable:!!gps }).catch(()=>{});
+    toast('Prise de poste confirmée', 'success');
+    await Promise.all([renderAgentHome(),startNotification]);
     return true;
   } catch(error){
     console.error(error);
@@ -1733,8 +1738,10 @@ async function loadAgentHandoverCard(shift){
 }
 async function endShift(shift){
   try {
-    const reportsSnap = await getDocs(query(collectionRef('reports'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)));
-    const roundsSnap = await getDocs(query(collectionRef('rounds'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)));
+    const [reportsSnap,roundsSnap] = await Promise.all([
+      getDocs(query(collectionRef('reports'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id))),
+      getDocs(query(collectionRef('rounds'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)))
+    ]);
     const reports = reportsSnap.docs.map(d=>d.data());
     const incidentsCount = reports.filter(r => ['Incident','Intervention','Anomalie'].includes(r.category) || ['Important','Critique'].includes(r.severity)).length;
     const score = computeConformityScore({ shift, reportsCount:reportsSnap.size, roundsCount:roundsSnap.size, incidentsCount });
@@ -1768,7 +1775,10 @@ async function endShift(shift){
       try {
         // V5.8.8.6 : garde-fou idempotent. Si le premier clic a déjà terminé
         // le poste, un second passage ne réécrit rien et n'envoie aucun push.
-        const latestShiftSnap = await getDoc(docRef('shifts', shiftKey));
+        if(button) button.textContent='Vérification du poste et localisation…';
+        const [latestShiftSnap,endGps] = await Promise.all([
+          getDoc(docRef('shifts', shiftKey)), getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 })
+        ]);
         if (latestShiftSnap?.exists?.() && latestShiftSnap.data()?.status === 'completed') {
           activeShiftCache = null;
           closeModal();
@@ -1779,7 +1789,7 @@ async function endShift(shift){
 
         if(!latestShiftSnap?.exists?.()) throw new Error('Poste introuvable : aucune clôture envoyée.');
         const fd = new FormData(form);
-        const endGps = await getGPS({ enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+        if(button) button.textContent='Enregistrement de la fin de poste…';
         let finalReportsCount = reportsSnap.size;
 
         try {
@@ -1807,18 +1817,20 @@ async function endShift(shift){
 
         if (shift.missionId) {
           await updateDoc(docRef('missions', shift.missionId), {
-            status:'completed', actualEnd:serverTimestamp(), reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, completedBy:currentUser.uid, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
+            status:'completed', actualEnd:serverTimestamp(), shiftId:shift.id, reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
           }).catch(error => console.warn('Mission liée non clôturée', error));
         }
 
         // Le push est exécuté une seule fois après confirmation du status=completed.
-        const endPushResult = await spNotifyQGShiftEnded({
-          shiftId:shift.id, siteName:shift.siteNom||'', reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount
-        }).catch(()=>({ok:false,error:'notification_failed'}));
-        await addAudit('qg_shift_end_notification',{
-          shiftId:shift.id,
-          pushStatus:endPushResult?.skipped?(endPushResult?.reason||'skipped'):endPushResult?.ok?'sent':endPushResult?.error||'failed'
-        }).catch(()=>{});
+        const endNotification = (async()=>{
+          const endPushResult = await spNotifyQGShiftEnded({
+            shiftId:shift.id, siteName:shift.siteNom||'', reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount
+          }).catch(()=>({ok:false,error:'notification_failed'}));
+          await addAudit('qg_shift_end_notification',{
+            shiftId:shift.id,
+            pushStatus:endPushResult?.skipped?(endPushResult?.reason||'skipped'):endPushResult?.ok?'sent':endPushResult?.error||'failed'
+          }).catch(()=>{});
+        })().catch(()=>{});
 
         // Les opérations secondaires ne doivent plus maintenir artificiellement
         // l'agent en mission si le shift a déjà été clôturé.
@@ -1829,6 +1841,7 @@ async function endShift(shift){
         syncNativePushIdentity().catch(() => {});
         await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps }).catch(()=>{});
 
+        if(button) button.textContent='Poste terminé · préparation du PDF…';
         const [finalReportsSnap, finalShiftSnap, finalMissionSnap] = await Promise.all([
           getDocs(query(collectionRef('reports'), where('shiftId','==',shift.id))).catch(()=>null),
           getDoc(docRef('shifts', shift.id)).catch(()=>null),
@@ -1840,7 +1853,7 @@ async function endShift(shift){
 
         closeModal();
         toast(supabaseBridgeEnabled() ? 'Fin de poste confirmée · PDF en cours d’archivage et d’envoi' : 'Fin de poste confirmée · PDF archivé', 'success');
-        await renderAgentHome();
+        await Promise.all([renderAgentHome(),endNotification]);
       } catch(error) {
         const confirmed=await getDoc(docRef('shifts',shiftKey)).catch(()=>null);
         if(confirmed?.exists?.() && confirmed.data()?.status==='completed'){
