@@ -2322,16 +2322,16 @@ function dashboardMissionStatusLabel(status){
 function missionStatusClass(status){
   return ({active:'green', completed:'blue', cancelled:'red', late:'red', planned:'orange', assigned:'orange'}[status] || 'blue');
 }
-function dashboardMissionIsCurrent(mission){
+function dashboardMissionIsVisible(mission){
   const status=String(mission?.status || 'planned');
-  return ['planned','assigned','active'].includes(status);
+  return ['planned','assigned','active','completed'].includes(status);
 }
 async function showQGDashboardDetail(type){
   const config = {
     working:{ title:'Agents en poste', subtitle:'Présence terrain en temps réel' },
     alerts:{ title:'Alertes actives', subtitle:'Alertes nécessitant une prise en charge' },
     incidents:{ title:'Incidents des dernières 24h', subtitle:'Incidents et interventions déclarés' },
-    missions:{ title:'Missions du jour', subtitle:'Missions planifiées ou en cours qui commencent aujourd’hui' }
+    missions:{ title:'Missions du jour', subtitle:'Planifiées, en cours ou terminées — début prévu aujourd’hui' }
   }[type];
   if (!config) return;
   showModal(config.title, `<div class="dashboard-detail-head"><p>${safe(config.subtitle)}</p><span class="dashboard-detail-live">Mise à jour à ${safe(new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}))}</span></div><div id="dashboard-detail-content" class="dashboard-detail-list"><div class="empty">Chargement...</div></div>`, 'wide');
@@ -2400,11 +2400,11 @@ async function showQGDashboardDetail(type){
       const snap = await getDocs(query(collectionRef('missions'), orderBy('scheduledStart','desc'), limit(400)));
       const today = startOfDay(new Date());
       const rows = snap.docs.map(d => ({id:d.id, ...d.data()})).filter(row => {
-        if(missionIsRemovedFromPlanning(row) || missionIsDraft(row) || !dashboardMissionIsCurrent(row)) return false;
+        if(missionIsRemovedFromPlanning(row) || missionIsDraft(row) || !dashboardMissionIsVisible(row)) return false;
         return missionStartsOnLocalDay(row, today);
       }).sort((a,b) => (timestampToDate(a.scheduledStart)?.getTime() || 0) - (timestampToDate(b.scheduledStart)?.getTime() || 0));
-      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission planifiée ou en cours ne commence aujourd’hui.');
-      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} planifiée${rows.length>1?'s':''} ou en cours commençant aujourd’hui</span></div>` + rows.map(row => dashboardDetailItem({
+      if (!rows.length) return box.innerHTML = dashboardEmpty('Aucune mission au programme aujourd’hui.');
+      box.innerHTML = `<div class="dashboard-detail-summary"><strong>${rows.length}</strong><span>mission${rows.length>1?'s':''} au programme aujourd’hui</span></div>` + rows.map(row => dashboardDetailItem({
         title:row.siteNom || row.title || 'Mission',
         meta:`Agent : <strong>${safe(row.agentNom || 'Non affecté')}</strong><br>${safe(dateText(row.scheduledStart))} → ${safe(dateText(row.scheduledEnd))}<br>${safe(row.type || row.missionType || 'Mission de sécurité')}`,
         badge:dashboardMissionStatusLabel(row.status), badgeClass:missionStatusClass(row.status),
@@ -2503,7 +2503,7 @@ function listenQGStats(){
   unsubscribeList.push(onSnapshot(missionsQ, snap => {
     const today = startOfDay(new Date());
     const rows = snap.docs.map(d=>d.data());
-    setText('#stat-missions', rows.filter(m => !missionIsRemovedFromPlanning(m) && !missionIsDraft(m) && dashboardMissionIsCurrent(m) && missionStartsOnLocalDay(m, today)).length);
+    setText('#stat-missions', rows.filter(m => !missionIsRemovedFromPlanning(m) && !missionIsDraft(m) && dashboardMissionIsVisible(m) && missionStartsOnLocalDay(m, today)).length);
   }, () => setText('#stat-missions', '0')));
 }
 function setText(sel, value){ const el=document.querySelector(sel); if(el) el.textContent=value; }
