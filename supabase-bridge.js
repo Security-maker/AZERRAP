@@ -1,5 +1,5 @@
 import { supabaseConfig } from './supabase-config.js?v=510';
-import { getSupabaseClient } from './supabase-compat.js?v=planning-ack-20261110-r1';
+import { getSupabaseClient } from './supabase-compat.js?v=camera-inline-20261110-r1';
 
 function isConfigured(){
   return Boolean(

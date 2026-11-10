@@ -1,15 +1,16 @@
 import { installOperationalBasemap, preserveOperationalMapView } from './operational-map.js?v=map-pan-20261030-r2';
 import { createClock } from './ui-runtime.js?v=dock-20261031-r1';
+import { bindCheckInCamera, stopCheckInCamera } from './checkin-camera.js?v=camera-inline-20261110-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=planning-ack-20261110-r1';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=camera-inline-20261110-r1';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
-} from './supabase-compat.js?v=planning-ack-20261110-r1';
+} from './supabase-compat.js?v=camera-inline-20261110-r1';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -477,6 +478,7 @@ async function primeAgentOfflineData(){
 }
 
 function render(html){
+  stopCheckInCamera();
   // Empêche le faux écran 'Démarrage trop long' une fois qu'une vue est rendue.
   window.__SENTINELLE_RENDERED__ = true;
   $app.className = '';
@@ -1296,24 +1298,32 @@ function openCheckInPhotoRecovery(shift){
   const preview = document.querySelector('#recover-checkin-photo-preview');
   const confirm = document.querySelector('#recover-checkin-photo-confirm');
   const submit = document.querySelector('#recover-checkin-photo-submit');
-  let photo = null;
+  let photo = null, photoRequest = 0;
   const sync = () => { if (submit) submit.disabled = !(photo && confirm?.checked) || checkInPhotoRecoveryLocks.has(String(shift.id)); };
-  input?.addEventListener('change', async () => {
-    const file = input.files?.[0];
+  const receiveRecoveryPhoto=async file=>{
     if (!file) return;
+    const request=++photoRequest;
+    photo=null;
+    if(confirm){confirm.disabled=true;confirm.checked=false;}
+    sync();
     if (preview) preview.innerHTML = '<span>Compression et sécurisation de la photo...</span>';
     try {
-      photo = await compressCheckInPhoto(file);
+      const prepared = await compressCheckInPhoto(file);
+      if(request!==photoRequest||!form.isConnected)return;
+      photo = prepared;
       if (preview) preview.innerHTML = `<img src="${safe(photo.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo prête</strong><span>${Math.round(photo.bytes / 1024)} Ko · ${photo.width}×${photo.height}</span></div>`;
       if (confirm) { confirm.disabled=false; confirm.checked=true; }
     } catch(error) {
+      if(request!==photoRequest||!form.isConnected)return;
       photo=null;
       if (confirm) { confirm.disabled=true; confirm.checked=false; }
       if (preview) preview.innerHTML = `<span>${safe(error.message || 'Photo impossible à traiter.')}</span>`;
       toast(error.message || 'Photo impossible à traiter.', 'error');
     }
     sync();
-  });
+  };
+  input?.addEventListener('change',()=>receiveRecoveryPhoto(input.files?.[0]));
+  unsubscribeList.push(bindCheckInCamera({input,onFile:receiveRecoveryPhoto,onError:error=>toast(error.message,'error')}));
   confirm?.addEventListener('change', sync);
   form?.addEventListener('submit', async event => {
     event.preventDefault();
@@ -1363,7 +1373,7 @@ function takeShiftForm(){
     <section class="shift-step camera-checkin">
       <div class="shift-step-head"><span class="shift-step-number">3</span><div><h3>Photo de prise de poste</h3><p>Prends une photo du poste, de l’accès principal ou de ta présence sur site.</p></div></div>
       <label class="camera-trigger" for="checkin-photo-input"><span>📷 Ouvrir l’appareil photo</span><small>Obligatoire pour démarrer la mission</small></label>
-      <input id="checkin-photo-input" type="file" accept="image/*" capture="environment" hidden>
+      <input id="checkin-photo-input" type="file" accept="image/*" capture="environment" hidden disabled>
       <div id="checkin-photo-preview" class="camera-preview"><span>Aucune photo enregistrée</span></div>
       <div class="checkline camera-consent"><input type="checkbox" id="checkin-photo-confirm" disabled> <span>Je confirme que cette photo correspond à ma prise de poste actuelle.</span></div>
     </section>
@@ -1391,7 +1401,7 @@ async function bindAgentHome(shift){
     const photoConfirm = document.querySelector('#checkin-photo-confirm');
     const submitButton = document.querySelector('#take-shift-submit');
     const shiftErrorBox = document.querySelector('#take-shift-error');
-    let checkInPhoto = null;
+    let checkInPhoto = null, photoRequest = 0;
     const clearShiftError = () => {
       if (!shiftErrorBox) return;
       shiftErrorBox.style.display = 'none';
@@ -1469,17 +1479,23 @@ async function bindAgentHome(shift){
       renderTakeShiftInfo(sites.find(s => s.id === select.value), missions.find(m => m.id === missionSelect?.value));
       syncSubmitState();
     });
-    photoInput?.addEventListener('change', async () => {
+    const receiveCheckInPhoto=async file=>{
       clearShiftError();
-      const file = photoInput.files?.[0];
       if (!file) return;
+      const request=++photoRequest;
+      checkInPhoto=null;
+      if(photoConfirm){photoConfirm.disabled=true;photoConfirm.checked=false;}
+      syncSubmitState();
       if (photoPreview) photoPreview.innerHTML = '<span>Compression et sécurisation de la photo...</span>';
       try {
-        checkInPhoto = await compressCheckInPhoto(file);
+        const prepared = await compressCheckInPhoto(file);
+        if(request!==photoRequest||!form.isConnected)return;
+        checkInPhoto = prepared;
         if (photoPreview) photoPreview.innerHTML = `<img src="${safe(checkInPhoto.dataUrl)}" alt="Preuve de prise de poste"><div><strong>Photo prête</strong><span>${Math.round(checkInPhoto.bytes / 1024)} Ko · ${checkInPhoto.width}×${checkInPhoto.height}</span></div>`;
         if (photoConfirm) { photoConfirm.disabled = false; photoConfirm.checked = true; }
         toast('Photo prête : elle sera associée au poste après confirmation.', 'info');
       } catch(error) {
+        if(request!==photoRequest||!form.isConnected)return;
         console.error(error);
         checkInPhoto = null;
         if (photoConfirm) { photoConfirm.disabled = true; photoConfirm.checked = false; }
@@ -1487,7 +1503,10 @@ async function bindAgentHome(shift){
         toast(error.message || 'Photo impossible à traiter.', 'error');
       }
       syncSubmitState();
-    });
+    };
+    photoInput?.addEventListener('change',()=>receiveCheckInPhoto(photoInput.files?.[0]));
+    unsubscribeList.push(bindCheckInCamera({input:photoInput,onFile:receiveCheckInPhoto,onError:error=>toast(error.message,'error')}));
+    if(photoInput)photoInput.disabled=false;
     photoConfirm?.addEventListener('change', syncSubmitState);
     form?.addEventListener('submit', async e => {
       e.preventDefault();
@@ -6908,6 +6927,7 @@ function showModal(title, body, size=''){
   div.addEventListener('click', e => { if (e.target === div) closeModal(); });
 }
 function closeModal(){
+  stopCheckInCamera();
   document.querySelector('#modal-root')?.remove();
   unlockModalViewport();
 }

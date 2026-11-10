@@ -1,0 +1,9 @@
+.checkin-camera-panel{display:grid;gap:12px;margin:12px 0;padding:12px;border:1px solid #3b5270;border-radius:14px;background:#0b1929;color:#f4f8fb}
+.checkin-camera-video{display:block;width:100%;height:min(42vh,340px);object-fit:contain;background:#030c16;border-radius:10px}
+.checkin-camera-status{margin:0;font-size:14px;line-height:1.5;color:#c5d5e5}
+.checkin-camera-status.error{color:#ffd0cc}
+.checkin-camera-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,125px),1fr));gap:10px}
+.checkin-camera-panel .btn{min-height:44px;white-space:normal}
+.checkin-camera-panel small{font-size:13px;line-height:1.5;color:#b5c6d8}
+.checkin-camera-panel [hidden]{display:none!important}
+.camera-trigger[role=button]:focus-visible{outline:3px solid #009cff;outline-offset:3px}

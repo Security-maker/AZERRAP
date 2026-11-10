@@ -1,6 +1,8 @@
-const CACHE_NAME = 'sentinelle-pro-planning-ack-20261110-r1';
+const CACHE_NAME = 'sentinelle-pro-camera-inline-20261110-r1';
 const CDN_CACHE_NAME = 'sentinelle-cdn-security-20261022-r1';
 const APP_SHELL = [
+  './checkin-camera.js?v=camera-inline-20261110-r1',
+  './checkin-camera.css?v=camera-inline-20261110-r1',
   './vendor/maps/leaflet-maplibre-gl-0.1.4.js',
   './planning-tools.js?v=planning-20261030-r3',
   './operational-map.js?v=map-pan-20261030-r2',
@@ -12,12 +14,12 @@ const APP_SHELL = [
   './',
   './index.html',
   './style.css?v=593',
-  './app.js?v=planning-ack-20261110-r1',
+  './app.js?v=camera-inline-20261110-r1',
   './sentinelle-config.js',
-  './supabase-compat.js?v=planning-ack-20261110-r1',
+  './supabase-compat.js?v=camera-inline-20261110-r1',
   './supabase-config.js?v=510',
   './supabase-config.js',
-  './supabase-bridge.js?v=planning-ack-20261110-r1',
+  './supabase-bridge.js?v=camera-inline-20261110-r1',
   './manifest.json',
   './manifest-client.json',
   './offline.html',
