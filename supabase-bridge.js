@@ -1,5 +1,5 @@
 import { supabaseConfig } from './supabase-config.js?v=510';
-import { getSupabaseClient } from './supabase-compat.js?v=postes-20261110-r1';
+import { getSupabaseClient } from './supabase-compat.js?v=latency-20261110-r3';
 
 function isConfigured(){
   return Boolean(

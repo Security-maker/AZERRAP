@@ -3,13 +3,13 @@ import { createClock } from './ui-runtime.js?v=dock-20261031-r1';
 import { upcomingTakeShiftMissions, loadOperationsPlanning, createOperationsPlanningPdf } from './planning-tools.js?v=planning-20261030-r3';
 import { createInterventionModule } from './interventions.js?v=phase3-20261026-r4';
 import { stagingConfig, DEFAULT_QG_WHATSAPP, pushConfig } from './sentinelle-config.js';
-import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=postes-20261110-r1';
+import { supabaseBridgeEnabled, mirrorGeneratedDocument } from './supabase-bridge.js?v=latency-20261110-r3';
 import {
   initializeApp, deleteApp, getAuth, setPersistence, browserLocalPersistence, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, onAuthStateChanged, initializeFirestore, persistentLocalCache,
   persistentMultipleTabManager, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, query, where,
   orderBy, limit, onSnapshot, serverTimestamp, Timestamp, runTransaction, deleteDoc, writeBatch, supabaseRuntimeConfigured, getSupabaseClient, setOperationalMode
-} from './supabase-compat.js?v=postes-20261110-r1';
+} from './supabase-compat.js?v=latency-20261110-r3';
 
 const $app = document.querySelector('#app');
 const $toast = document.querySelector('#toast-root');
@@ -1131,7 +1131,7 @@ async function renderAgentHome(){
 
 async function getShiftStartPhotoReports(shiftId){
   if (!shiftId) return [];
-  const snap = await getDocs(query(collectionRef('reports'), where('shiftId','==',shiftId), limit(80)));
+  const snap = await getDocs(query(collectionRef('reports'), where('shiftId','==',shiftId), limit(80)), {resolveMedia:false});
   return (snap.docs || []).map(d => ({id:d.id, ...d.data()})).filter(r =>
     r.eventType === 'shift_start' || r.eventType === 'shift_start_photo_recovery' || r.category === 'Prise de service'
   );
@@ -1641,16 +1641,19 @@ async function takeShift(site, mission=null, checkInPhoto=null, progress=()=>{})
       await renderAgentHome();
       return true;
     }
-    if (mission?.id) await updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{});
     // V5.10.12 : le shift actif est la source de vérité opérationnelle.
     // Une erreur secondaire de synchronisation du profil ne doit jamais faire croire
     // à l'agent que sa prise de poste a échoué après création du shift + preuve MCI.
-    try {
-      await updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() });
-    } catch(profileSyncError) {
-      console.warn('Synchronisation statut agent différée — poste actif conservé', profileSyncError);
-      addAudit('agent_working_status_sync_failed', { shiftId:shiftDoc.id, siteId:site.id, missionId:mission?.id || null, error:String(profileSyncError?.message || profileSyncError || 'unknown') }).catch(()=>{});
-    }
+    // These writes target independent records, after the shift and photo exist.
+    // Await every result before continuing; do not create a deferred write queue.
+    await Promise.all([
+      mission?.id ? updateDoc(docRef('missions', mission.id), { status:'active', actualStart:serverTimestamp(), shiftId:shiftDoc.id, updatedAt:serverTimestamp(), updatedBy:currentUser.uid }).catch(()=>{}) : Promise.resolve(),
+      updateDoc(docRef('users', currentUser.uid), { statut:'en_poste', siteActuel: site.id, siteActuelNom: site.name, lastSeen: serverTimestamp() }).catch(profileSyncError => {
+        console.warn('Synchronisation statut agent différée — poste actif conservé', profileSyncError);
+        return addAudit('agent_working_status_sync_failed', { shiftId:shiftDoc.id, siteId:site.id, missionId:mission?.id || null, error:String(profileSyncError?.message || profileSyncError || 'unknown') }).catch(()=>{});
+      }),
+      addAudit('shift_start', { shiftId:shiftDoc.id,siteId:site.id,missionId:mission?.id||null,photoProof:true,gpsAvailable:!!gps }).catch(()=>{})
+    ]);
     currentProfile = { ...currentProfile, statut:'en_poste', siteActuel:site.id, siteActuelNom:site.name };
     syncNativePushIdentity().catch(() => {});
     progress('Poste et photo confirmés · ouverture de l’accueil…');
@@ -1658,7 +1661,6 @@ async function takeShift(site, mission=null, checkInPhoto=null, progress=()=>{})
       const result=await spNotifyQGShiftStarted({shiftId:shiftDoc.id,siteName:site.name,startedAt:new Date()});
       await addAudit('qg_shift_start_notification',{shiftId:shiftDoc.id,pushStatus:result?.skipped?(result?.reason||'skipped'):result?.ok?'sent':result?.error||'failed'}).catch(()=>{});
     })().catch(()=>{});
-    await addAudit('shift_start', { shiftId:shiftDoc.id,siteId:site.id,missionId:mission?.id||null,photoProof:true,gpsAvailable:!!gps }).catch(()=>{});
     toast('Prise de poste confirmée', 'success');
     await Promise.all([renderAgentHome(),startNotification]);
     return true;
@@ -1739,7 +1741,7 @@ async function loadAgentHandoverCard(shift){
 async function endShift(shift){
   try {
     const [reportsSnap,roundsSnap] = await Promise.all([
-      getDocs(query(collectionRef('reports'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id))),
+      getDocs(query(collectionRef('reports'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)), {resolveMedia:false}),
       getDocs(query(collectionRef('rounds'), where('agentId','==',currentUser.uid), where('shiftId','==',shift.id)))
     ]);
     const reports = reportsSnap.docs.map(d=>d.data());
@@ -1815,11 +1817,17 @@ async function endShift(shift){
         // l'ancienne carte "poste actif" de réapparaître si une lecture réseau échoue.
         activeShiftCache = null;
 
-        if (shift.missionId) {
-          await updateDoc(docRef('missions', shift.missionId), {
+        // Independent follow-up records can be synchronized together, only after
+        // the authoritative close is confirmed. All complete before PDF reads.
+        await Promise.all([
+          shift.missionId ? updateDoc(docRef('missions', shift.missionId), {
             status:'completed', actualEnd:serverTimestamp(), shiftId:shift.id, reportsCount:finalReportsCount, roundsCount:roundsSnap.size, incidentsCount, conformityScore:score, updatedAt:serverTimestamp(), updatedBy:currentUser.uid
-          }).catch(error => console.warn('Mission liée non clôturée', error));
-        }
+          }).catch(error => console.warn('Mission liée non clôturée', error)) : Promise.resolve(),
+          updateDoc(docRef('users', currentUser.uid), {
+            statut:'hors_poste', siteActuel:null, siteActuelNom:null, lastSeen: serverTimestamp()
+          }).catch(error => console.warn('Profil agent non rafraîchi après clôture', error)),
+          addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps }).catch(()=>{})
+        ]);
 
         // Le push est exécuté une seule fois après confirmation du status=completed.
         const endNotification = (async()=>{
@@ -1834,12 +1842,8 @@ async function endShift(shift){
 
         // Les opérations secondaires ne doivent plus maintenir artificiellement
         // l'agent en mission si le shift a déjà été clôturé.
-        await updateDoc(docRef('users', currentUser.uid), {
-          statut:'hors_poste', siteActuel:null, siteActuelNom:null, lastSeen: serverTimestamp()
-        }).catch(error => console.warn('Profil agent non rafraîchi après clôture', error));
         currentProfile = { ...currentProfile, statut:'hors_poste', siteActuel:null, siteActuelNom:null };
         syncNativePushIdentity().catch(() => {});
-        await addAudit('shift_end', { shiftId: shift.id, reportsCount: finalReportsCount, roundsCount: roundsSnap.size, conformityScore:score, gpsAvailable:!!endGps }).catch(()=>{});
 
         if(button) button.textContent='Poste terminé · préparation du PDF…';
         const [finalReportsSnap, finalShiftSnap, finalMissionSnap] = await Promise.all([

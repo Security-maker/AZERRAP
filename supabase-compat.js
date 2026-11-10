@@ -510,14 +510,16 @@ async function reconcileMissionShifts(rows){
   });
 }
 export async function getDoc(ref){ return new DocSnapshot(ref,await readOne(ref.path,ref.id)); }
-export async function getDocs(ref){
+export async function getDocs(ref,{resolveMedia=true}={}){
   const path=logicalCollection(ref), constraints=ref?.__kind==='query'?ref.constraints:[];
   let rows=await readRows(path,constraints);
   if(path==='missions') rows=await reconcileMissionShifts(rows);
   rows=applyConstraints(rows,constraints);
-  // Sign only the selected reports, not every photograph in the organisation.
+  // Counters and proof-presence checks only need report metadata. Keep the same
+  // server query/RLS and preserve full media resolution for display and PDFs.
   const selected=await Promise.all(rows.map(async row=>new DocSnapshot(makeDoc(path,row.id),
-    row.mediaRow ? await hydrateDecodedMedia(path,row.mediaRow,{...row.data}) : row.data)));
+    row.mediaRow && !(path==='reports' && resolveMedia===false)
+      ? await hydrateDecodedMedia(path,row.mediaRow,{...row.data}) : row.data)));
   return new QuerySnapshot(selected);
 }
 
